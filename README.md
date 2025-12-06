@@ -15,4 +15,4 @@ irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Upd
 ```
 
 ---
-([for more  information](https://github.com/rhshourav/Windows-Scripts/tree/main/Windows-Update))
+([For more  information](https://github.com/rhshourav/Windows-Scripts/tree/main/Windows-Update))
