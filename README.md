@@ -17,7 +17,7 @@ irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Upd
 ### Enable Windows Update
 
 ```
-irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Update/Enable-WindowsUpdate.ps1
+irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Update/Enable-WindowsUpdate.ps1 | iex
 ```
 
 ---
