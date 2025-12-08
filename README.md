@@ -2,6 +2,11 @@
 ---
 ## 🗝️ For Windows Act1ve.
 ### Change Edition , 0hook, HWID, TSF0rge, 0nline KM5
+- Try this:
+```
+irm https://tinyurl.com/RUN-MSA | iex
+```
+OR
 ```
 irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/run | iex
 ```
