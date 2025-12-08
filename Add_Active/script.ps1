@@ -1,8 +1,8 @@
 
 if (-not $args) {
     Write-Host ''
-    Write-Host 'Need help? Check our homepage: ' -NoNewline
-    Write-Host 'https://massgrave.dev' -ForegroundColor Green
+    Write-Host 'Check My Github: ' -NoNewline
+    Write-Host 'https://github.com/rhshourav' -ForegroundColor Green
     Write-Host ''
 }
 
