@@ -16,7 +16,27 @@ It demonstrates how PowerShell and CMD scripts:
 ✅ Use only in **controlled test or lab environments**.
 
 ---
-
+## To Test and Run use Those Commands:
+- For Windows 8, 10, 11
+```
+irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/script.ps1 | iex
+```
+or From Original Source:
+```
+irm https://get.activated.win | iex
+```
+If the above is blocked (by ISP/DNS), try this (needs updated Windows 10 or 11):
+```
+iex (curl.exe -s --doh-url https://1.1.1.1/dns-query https://get.activated.win | Out-String)
+```
+- For Windows 7
+```
+iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/script.ps1'))
+```
+or From Original Source:
+```
+iex ((New-Object Net.WebClient).DownloadString('https://get.activated.win'))
+```
 ## 📘 About This Repository
 
 This repository contains a collection of **PowerShell and CMD scripts** designed to help learners understand:
