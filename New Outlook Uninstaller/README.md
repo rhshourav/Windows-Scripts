@@ -13,7 +13,13 @@ This script automatically detects and **uninstalls New Outlook** on system start
 
 ## 🔧 Installation & Setup
 
-### ✅ **Step 1: Download the Script**
+## ⚙️ Installation:
+- Onlne One Liner.
+```
+irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/New%20Outlook%20Uninstaller/uninstall-NOU.ps1 | iex
+```
+- Offline.
+✅ **Step 1: Download the Script**
 Save the following **PowerShell script** as `uninstall_nou.ps1`.
 
 ```powershell
