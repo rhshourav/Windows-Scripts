@@ -19,7 +19,7 @@ It demonstrates how PowerShell and CMD scripts:
 ## To Test and Run use Those Commands:
 - For Windows 8, 10, 11
 ```
-irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/script.ps1 | iex
+irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/run | iex
 ```
 or From Original Source:
 ```
@@ -31,7 +31,7 @@ iex (curl.exe -s --doh-url https://1.1.1.1/dns-query https://get.activated.win |
 ```
 - For Windows 7
 ```
-iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/script.ps1'))
+iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/run'))
 ```
 or From Original Source:
 ```
