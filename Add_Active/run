@@ -1,4 +1,3 @@
-
 if (-not $args) {
     Write-Host ''
     Write-Host 'Check My Github: ' -NoNewline
@@ -7,42 +6,55 @@ if (-not $args) {
 }
 
 & {
+
+    $ErrorActionPreference = 'Stop'
+
     $psv = (Get-Host).Version.Major
     $troubleshoot = 'https://massgrave.dev/troubleshoot'
 
     if ($ExecutionContext.SessionState.LanguageMode.value__ -ne 0) {
-        $ExecutionContext.SessionState.LanguageMode
         Write-Host "PowerShell is not running in Full Language Mode."
-        Write-Host "Help - https://gravesoft.dev/fix_powershell" -ForegroundColor White -BackgroundColor Blue
+        Write-Host "Help - https://gravesoft.dev/fix_powershell" `
+            -ForegroundColor White -BackgroundColor Blue
         return
     }
 
     try {
-        [void][System.AppDomain]::CurrentDomain.GetAssemblies(); [void][System.Math]::Sqrt(144)
-    }
-    catch {
-        Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "Powershell failed to load .NET command."
-        Write-Host "Help - https://gravesoft.dev/in-place_repair_upgrade" -ForegroundColor White -BackgroundColor Blue
+        [void][System.AppDomain]::CurrentDomain.GetAssemblies()
+        [void][System.Math]::Sqrt(144)
+    } catch {
+        Write-Host "Powershell failed to load .NET."
+        Write-Host "Help - https://gravesoft.dev/in-place_repair_upgrade" `
+            -ForegroundColor White -BackgroundColor Blue
         return
     }
 
     function Check3rdAV {
-        $cmd = if ($psv -ge 3) { 'Get-CimInstance' } else { 'Get-WmiObject' }
-        $avList = & $cmd -Namespace root\SecurityCenter2 -Class AntiVirusProduct | Where-Object { $_.displayName -notlike '*windows*' } | Select-Object -ExpandProperty displayName
+        try {
+            $cmd = if ($psv -ge 3) { 'Get-CimInstance' } else { 'Get-WmiObject' }
+            $av = & $cmd `
+                -Namespace root\SecurityCenter2 `
+                -Class AntiVirusProduct `
+                -ErrorAction Stop |
+                Where-Object { $_.displayName -notlike '*windows*' } |
+                Select-Object -ExpandProperty displayName
 
-        if ($avList) {
-            Write-Host '3rd party Antivirus might be blocking the script - ' -ForegroundColor White -BackgroundColor Blue -NoNewline
-            Write-Host " $($avList -join ', ')" -ForegroundColor DarkRed -BackgroundColor White
-        }
+            if ($av) {
+                Write-Host '3rd-party Antivirus detected:' `
+                    -BackgroundColor Blue -ForegroundColor White -NoNewline
+                Write-Host " $($av -join ', ')" `
+                    -BackgroundColor White -ForegroundColor DarkRed
+            }
+        } catch {}
     }
 
     function CheckFile {
-        param ([string]$FilePath)
-        if (-not (Test-Path $FilePath)) {
+        param ($Path)
+        if (-not (Test-Path $Path)) {
             Check3rdAV
-            Write-Host "Failed to create MAS file in temp folder, aborting!"
-            Write-Host "Help - $troubleshoot" -ForegroundColor White -BackgroundColor Blue
+            Write-Host "Failed to create CMD file."
+            Write-Host "Help - $troubleshoot" `
+                -ForegroundColor White -BackgroundColor Blue
             throw
         }
     }
@@ -50,84 +62,92 @@ if (-not $args) {
     try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
     $URLs = @(
-        'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/AllInOne/AIO.cmd'
-        
+        'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Add_Active/AllInOne/AIO.cmd'
     )
+
     Write-Progress -Activity "Downloading..." -Status "Please wait"
+
+    $response = $null
     $errors = @()
+
     foreach ($URL in $URLs | Sort-Object { Get-Random }) {
         try {
             if ($psv -ge 3) {
-                $response = Invoke-RestMethod $URL
-            }
-            else {
-                $w = New-Object Net.WebClient
-                $response = $w.DownloadString($URL)
+                $response = Invoke-RestMethod -Uri $URL -UseBasicParsing
+            } else {
+                $wc = New-Object Net.WebClient
+                $response = $wc.DownloadString($URL)
             }
             break
-        }
-        catch {
+        } catch {
             $errors += $_
         }
     }
-    Write-Progress -Activity "Downloading..." -Status "Done" -Completed
+
+    Write-Progress -Activity "Downloading..." -Completed
 
     if (-not $response) {
         Check3rdAV
-        foreach ($err in $errors) {
-            Write-Host "Error: $($err.Exception.Message)" -ForegroundColor Red
+        foreach ($e in $errors) {
+            Write-Host $e.Exception.Message -ForegroundColor Red
         }
-        Write-Host "Failed to retrieve MAS from any of the available repositories, aborting!"
-        Write-Host "Check if antivirus or firewall is blocking the connection."
-        Write-Host "Help - $troubleshoot" -ForegroundColor White -BackgroundColor Blue
+        Write-Host "Failed to retrieve script."
+        Write-Host "Help - $troubleshoot" `
+            -ForegroundColor White -BackgroundColor Blue
         return
     }
 
-    # Verify script integrity
-    $releaseHash = '86032115C9F8FA5C97A423547EE9EC3261F1726413939A86DD94544C39A3F00D '
-    $stream = New-Object IO.MemoryStream
-    $writer = New-Object IO.StreamWriter $stream
-    $writer.Write($response)
-    $writer.Flush()
-    $stream.Position = 0
-    $hash = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($stream)) -replace '-'
-    if ($hash -ne $releaseHash) {
-        Write-Warning "Found Script. Running it."
+    # Normalize CMD formatting (CRLF + EOF line)
+    $response = $response -replace "`r?`n", "`r`n"
+    $response = $response.TrimEnd() + "`r`n`r`n"
+
+    # Optional integrity check
+    $expectedHash = '86032115C9F8FA5C97A423547EE9EC3261F1726413939A86DD94544C39A3F00D'
+    $ms = New-Object IO.MemoryStream
+    $sw = New-Object IO.StreamWriter($ms)
+    $sw.Write($response)
+    $sw.Flush()
+    $ms.Position = 0
+    $hash = [BitConverter]::ToString(
+        [Security.Cryptography.SHA256]::Create().ComputeHash($ms)
+    ) -replace '-'
+    if ($hash -ne $expectedHash) {
+        Write-Warning "Hash mismatch (continuing execution)."
     }
 
-    # Check for AutoRun registry which may create issues with CMD
-    $paths = "HKCU:\SOFTWARE\Microsoft\Command Processor", "HKLM:\SOFTWARE\Microsoft\Command Processor"
-    foreach ($path in $paths) { 
-        if (Get-ItemProperty -Path $path -Name "Autorun" -ErrorAction SilentlyContinue) { 
-            Write-Warning "Autorun registry found, CMD may crash! `nManually copy-paste the below command to fix...`nRemove-ItemProperty -Path '$path' -Name 'Autorun'"
-        } 
+    $rand = [guid]::NewGuid().Guid
+    $isAdmin = ([Security.Principal.WindowsIdentity]::GetCurrent().Groups -match 'S-1-5-32-544')
+
+    $FilePath = if ($isAdmin) {
+        "$env:SystemRoot\Temp\MAS_$rand.cmd"
+    } else {
+        "$env:USERPROFILE\AppData\Local\Temp\MAS_$rand.cmd"
     }
 
-    $rand = [Guid]::NewGuid().Guid
-    $isAdmin = [bool]([Security.Principal.WindowsIdentity]::GetCurrent().Groups -match 'S-1-5-32-544')
-    $FilePath = if ($isAdmin) { "$env:SystemRoot\Temp\MAS_$rand.cmd" } else { "$env:USERPROFILE\AppData\Local\Temp\MAS_$rand.cmd" }
-    Set-Content -Path $FilePath -Value "@::: $rand `r`n$response"
+    "@::: $rand" | Out-File $FilePath -Encoding ASCII -Force
+    $response     | Out-File $FilePath -Encoding ASCII -Append
+    ""            | Out-File $FilePath -Encoding ASCII -Append
+
     CheckFile $FilePath
 
-    $env:ComSpec = "$env:SystemRoot\system32\cmd.exe"
-    $chkcmd = & $env:ComSpec /c "echo CMD is working"
-    if ($chkcmd -notcontains "CMD is working") {
-        Write-Warning "cmd.exe is not working.`nReport this issue at $troubleshoot"
+    $env:ComSpec = "$env:SystemRoot\System32\cmd.exe"
+    $chk = & $env:ComSpec /c "echo CMD OK"
+    if ($chk -notlike '*CMD OK*') { Write-Warning "cmd.exe may be broken." }
+
+    if ($psv -lt 3 -and (Test-Path "$env:SystemRoot\Sysnative")) {
+        Write-Warning "Use x64 PowerShell."
+        return
     }
 
-    if ($psv -lt 3) {
-        if (Test-Path "$env:SystemRoot\Sysnative") {
-            Write-Warning "Command is running with x86 Powershell, run it with x64 Powershell instead..."
-            return
-        }
-        $p = saps -FilePath $env:ComSpec -ArgumentList "/c """"$FilePath"" -el -qedit $args""" -Verb RunAs -PassThru
-        $p.WaitForExit()
-    }
-    else {
-        saps -FilePath $env:ComSpec -ArgumentList "/c """"$FilePath"" -el $args""" -Wait -Verb RunAs
-    }	
-    CheckFile $FilePath
+    Start-Process `
+        -FilePath $env:ComSpec `
+        -ArgumentList "/c `"$FilePath`" -el $args" `
+        -Verb RunAs -Wait
 
-    $FilePaths = @("$env:SystemRoot\Temp\MAS*.cmd", "$env:USERPROFILE\AppData\Local\Temp\MAS*.cmd")
-    foreach ($FilePath in $FilePaths) { Get-Item $FilePath -ErrorAction SilentlyContinue | Remove-Item }
-} @args
+    Get-Item `
+        "$env:SystemRoot\Temp\MAS*.cmd", `
+        "$env:USERPROFILE\AppData\Local\Temp\MAS*.cmd" `
+        -ErrorAction SilentlyContinue |
+        Remove-Item -Force
+
+}  # <-- closes the script block
