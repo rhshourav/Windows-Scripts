@@ -3,7 +3,7 @@
 ## 🗝️ For Windows Act1ve.
 ### Change Edition , 0hook, HWID, TSF0rge, 0nline KM5
 ```
-irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/script.ps1 | iex
+irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/run | iex
 ```
 ---
 ## 🌐 One-Line Remote Execution (PowerShell)
