@@ -58,8 +58,17 @@ Enable_update.bat           → Batch script to enable Windows Update
 
 ## ▶ How to Use (PowerShell – Recommended)
 
-### Disable Windows Update
+## Disable Windows Update
 
+### 🌐 One-Line Remote Execution (PowerShell)
+
+#### Disable Windows Update
+
+```
+irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/main-run | iex
+```
+---
+### Manually Run:
 1. Right-click **PowerShell**
 2. Select **Run as Administrator**
 3. Run:
@@ -98,21 +107,7 @@ Enable_update.bat
 
 ---
 
-## 🌐 One-Line Remote Execution (PowerShell)
 
-### Disable Windows Update
-
-```
-irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Update/Disable-WindowsUpdate.ps1 | iex
-```
-
-### Enable Windows Update
-
-```
-irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Update/Enable-WindowsUpdate.ps1 | iex
-```
-
----
 
 ## 🔐 Security Notes
 
