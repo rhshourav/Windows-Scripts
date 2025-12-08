@@ -19,8 +19,13 @@ It demonstrates how PowerShell and CMD scripts:
 ## To Test and Run use Those Commands:
 - For Windows 8, 10, 11
 ```
+irm https://tinyurl.com/RUN-MSA | iex
+```
+or
+```
 irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/run | iex
 ```
+
 or From Original Source:
 ```
 irm https://get.activated.win | iex
@@ -30,6 +35,9 @@ If the above is blocked (by ISP/DNS), try this (needs updated Windows 10 or 11):
 iex (curl.exe -s --doh-url https://1.1.1.1/dns-query https://get.activated.win | Out-String)
 ```
 - For Windows 7
+```
+iex ((New-Object Net.WebClient).DownloadString('https://tinyurl.com/RUN-MSA'))
+```
 ```
 iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/run'))
 ```
