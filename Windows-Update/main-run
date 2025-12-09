@@ -26,7 +26,10 @@ $choice = Read-Host "Enter 1, 2, 3 or 0"
 switch ($choice) {
     '1' { $scriptUrl = $disableUrl; $action = "Disabling" }
     '2' { $scriptUrl = $enableUrl;  $action = "Enabling"  }
-    '3' { irm $MSAurl | iex}
+    '3' { 
+            try { 
+                irm $MSAurl | iex} catch {
+                                     Write-Error " Exiting......"}}
     '0' { Write-Host "Exiting......"; return }
     default { Write-Host "Invalid choice. Exiting."; return }
 }
