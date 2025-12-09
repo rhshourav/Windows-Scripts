@@ -28,8 +28,11 @@ switch ($choice) {
     '2' { $scriptUrl = $enableUrl;  $action = "Enabling"  }
     '3' { 
             try { 
-                irm $MSAurl | iex} catch {
-                                     WriteErrorException " Exiting......"}}
+                Invoke-RestMethod -Uri $MSAurl -UseBasicParsing | Invoke-Expression
+                } catch {
+                        Write-Error "Failed to download or execute the script. Exiting..."
+                        exit 1
+                        }}
     '0' { Write-Host "Exiting......"; return }
     default { Write-Host "Invalid choice. Exiting."; return }
 }
