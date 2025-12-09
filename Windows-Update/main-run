@@ -29,7 +29,7 @@ switch ($choice) {
     '3' { 
             try { 
                 irm $MSAurl | iex} catch {
-                                     Write-Error " Exiting......"}}
+                                     WriteErrorException " Exiting......"}}
     '0' { Write-Host "Exiting......"; return }
     default { Write-Host "Invalid choice. Exiting."; return }
 }
