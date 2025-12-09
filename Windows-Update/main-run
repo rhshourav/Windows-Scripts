@@ -19,7 +19,7 @@ Write-Host "1. Disable Windows Update"
 Write-Host "2. Enable Windows Update"
 Write-Host "0. Exit"
 
-$choice = Read-Host "Enter 1 or 2"
+$choice = Read-Host "Enter 1, 2 or 0"
 
 switch ($choice) {
     '1' { $scriptUrl = $disableUrl; $action = "Disabling" }
