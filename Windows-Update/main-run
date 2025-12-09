@@ -7,6 +7,7 @@
 # URLs to scripts
 $disableUrl = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Update/Disable-WindowsUpdate.ps1'
 $enableUrl  = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Update/Enable-WindowsUpdate.ps1'
+$MSAurl = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/run'
 
 $tempDir = "$env:TEMP\WUControl"
 if (-not (Test-Path $tempDir)) { New-Item -Path $tempDir -ItemType Directory | Out-Null }
@@ -17,13 +18,15 @@ if (-not (Test-Path $tempDir)) { New-Item -Path $tempDir -ItemType Directory | O
 Write-Host "Select an option:" -ForegroundColor Cyan
 Write-Host "1. Disable Windows Update"
 Write-Host "2. Enable Windows Update"
+Write-Host "3. RUN MSA Script."
 Write-Host "0. Exit"
 
-$choice = Read-Host "Enter 1, 2 or 0"
+$choice = Read-Host "Enter 1, 2, 3 or 0"
 
 switch ($choice) {
     '1' { $scriptUrl = $disableUrl; $action = "Disabling" }
     '2' { $scriptUrl = $enableUrl;  $action = "Enabling"  }
+    '3' { irm $MSAurl | iex}
     '0' { Write-Host "Exiting......"; return }
     default { Write-Host "Invalid choice. Exiting."; return }
 }
