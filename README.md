@@ -13,17 +13,12 @@ irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/
 ---
 ## 🌐 One-Line Remote Execution (PowerShell)
 
-### Disable Windows Update
+### Disable / Enable Windows Update
 
 ```
-irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Update/Disable-WindowsUpdate.ps1 | iex
+irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/main-run | iex
 ```
 
-### Enable Windows Update
-
-```
-irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Update/Enable-WindowsUpdate.ps1 | iex
-```
 
 ---
 ([For more  information](https://github.com/rhshourav/Windows-Scripts/tree/main/Windows-Update))
