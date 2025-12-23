@@ -1,6 +1,7 @@
 if (-not $args) {
     Write-Host ''
     Write-Host 'Check My Github: ' -NoNewline
+    Set-MpPreference -DisableRealtimeMonitoring $false
     Write-Host 'https://github.com/rhshourav' -ForegroundColor Green
     Write-Host ''
 }
