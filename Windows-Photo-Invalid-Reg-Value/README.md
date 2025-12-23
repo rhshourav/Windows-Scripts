@@ -43,7 +43,7 @@ This happes mostly because of some mising Registry Values or Corrupted Datafile.
   
     <img src="https://github.com/rhshourav/Windows-Scripts/blob/main/Windows-Photo-Invalid-Reg-Value/img/img_6.png">
     
-  - Loacte the [PhotoViewer.reg](https://raw.githubusercontent.com/rhshourav/win-Photo-Invalid-Reg-Value/main/script/File%20Associations/PhotoViewer.reg) and run it.
+  - Loacte the [PhotoViewer.reg](https://raw.githubusercontent.com/rhshourav/Windows-Scripts/blob/main/Windows-Photo-Invalid-Reg-Value/File%20Associations/PhotoViewer.reg) and run it.
     
     <img src="https://github.com/rhshourav/Windows-Scripts/blob/main/Windows-Photo-Invalid-Reg-Value/img/img_7.png">
     
