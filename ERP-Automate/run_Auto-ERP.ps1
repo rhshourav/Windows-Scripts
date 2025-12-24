@@ -130,27 +130,31 @@ if (-not (Test-Path $SourceDll))    { throw "Source DLL not found: $SourceDll" }
 # -----------------------------
 # Copy Oracle Instant Client (Progress)
 # -----------------------------
-if (-not (Test-Path $OracleDir)) {
-    Write-Step "Copying Oracle Instant Client (this may take a moment)..."
+if (Test-Path $OracleDir) {
+    Write-Warn "Oracle Instant Client folder exists. Removing for fresh install..."
+    Remove-Item -Path $OracleDir -Recurse -Force
+}
 
-    $files = Get-ChildItem -Path $SourceOracle -Recurse -File
-    $total = $files.Count; $count = 0
+Write-Step "Copying Oracle Instant Client (this may take a moment)..."
 
-    foreach ($file in $files) {
-        $relative = $file.FullName.Substring($SourceOracle.Length).TrimStart('\')
-        $destPath = Join-Path $OracleDir $relative
-        $destDir  = Split-Path $destPath
-        if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir | Out-Null }
-        Copy-Item -Path $file.FullName -Destination $destPath -Force
-        $count++
-        Write-Progress -Activity "Copying Oracle Instant Client" `
-                       -Status "$count of $total files" `
-                       -PercentComplete (($count/$total)*100)
-    }
+$files = Get-ChildItem -Path $SourceOracle -Recurse -File
+$total = $files.Count; $count = 0
 
-    Write-Progress -Activity "Copying Oracle Instant Client" -Completed
-    Write-Success "Oracle Instant Client copied"
-} else { Write-Warn "Oracle Instant Client already exists" }
+foreach ($file in $files) {
+    $relative = $file.FullName.Substring($SourceOracle.Length).TrimStart('\')
+    $destPath = Join-Path $OracleDir $relative
+    $destDir  = Split-Path $destPath
+    if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir | Out-Null }
+    Copy-Item -Path $file.FullName -Destination $destPath -Force
+    $count++
+    Write-Progress -Activity "Copying Oracle Instant Client" `
+                   -Status "$count of $total files" `
+                   -PercentComplete (($count/$total)*100)
+}
+
+Write-Progress -Activity "Copying Oracle Instant Client" -Completed
+Write-Success "Oracle Instant Client copied"
+
 
 # -----------------------------
 # Copy DLL (Progress)
