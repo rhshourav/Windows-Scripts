@@ -19,7 +19,8 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 # -----------------------------
 # COM Detection - global
 # -----------------------------
-Add-Type @"
+if (-not ("NativeMethods" -as [type])) {
+    Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public static class NativeMethods {
@@ -31,11 +32,26 @@ public static class NativeMethods {
     public static extern bool FreeLibrary(IntPtr hModule);
 }
 "@
+}
 
+# -----------------------------
+# Function for Decode
+# -----------------------------
+function Decode-Base64Path {
+    param([string]$Encoded)
+    $bytes = [System.Convert]::FromBase64String($Encoded)
+    return [System.Text.Encoding]::UTF8.GetString($bytes)
+}
 # -----------------------------
 # Configuration
 # -----------------------------
-$SourceShare      = "\\192.168.16.251\erp"
+
+# Encrypted Base64 path
+$EncodedShare = "XFwxOTIuMTY4LjE2LjI1MVxlcnA="
+
+
+# Decode at runtime
+$SourceShare = Decode-Base64Path $EncodedShare
 $InstantClientDir = "instantclient_10_2"
 $OracleDir        = "C:\Program Files\$InstantClientDir"
 $SourceOracle     = Join-Path $SourceShare $InstantClientDir
