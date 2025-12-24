@@ -1,5 +1,5 @@
 # =============================================================
-# GitHub Font Installer
+# GitHub Font Installer with Colorful Output
 # Downloads fonts from a GitHub repo folder and installs them
 # =============================================================
 
@@ -12,14 +12,25 @@ $TempDir = "$env:TEMP\erp_fonts"
 $FontDir = "$env:WINDIR\Fonts"
 
 # -----------------------------
+# Color Helpers
+# -----------------------------
+function Write-Header($Text) { Write-Host ""; Write-Host "=== $Text ===" -ForegroundColor Cyan }
+function Write-Step($Text)   { Write-Host "[*] $Text" -ForegroundColor White }
+function Write-Success($Text){ Write-Host "[OK] $Text" -ForegroundColor Green }
+function Write-Warn($Text)   { Write-Host "[!] $Text" -ForegroundColor Yellow }
+
+# -----------------------------
 # Admin Check
 # -----------------------------
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) { throw "This script must be run as Administrator." }
 
+Write-Header "GitHub Font Installer"
+
 # -----------------------------
 # Prepare Temp Folder
 # -----------------------------
+Write-Step "Preparing temporary folder..."
 if (Test-Path $TempDir) { Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue }
 New-Item -ItemType Directory -Path $TempDir | Out-Null
 
@@ -49,6 +60,7 @@ $SMTO_ABORTIFHUNG = 0x0002
 # -----------------------------
 # Download Fonts from GitHub
 # -----------------------------
+Write-Step "Fetching font list from GitHub..."
 try {
     $Files = Invoke-RestMethod -Uri $ApiUrl -Headers @{ "User-Agent" = "PowerShell" }
 } catch {
@@ -66,33 +78,37 @@ foreach ($File in $FontFiles) {
         Write-Progress -Activity "Downloading fonts" -Status "$($File.name) ($count/$total)" -PercentComplete (($count/$total)*100)
         Invoke-WebRequest -Uri $File.download_url -OutFile $Out -ErrorAction Stop
     } catch {
-        Write-Warning "Failed to download $($File.name): $_"
+        Write-Warn "Failed to download $($File.name): $_"
         continue
     }
 }
 Write-Progress -Activity "Downloading fonts" -Completed
+Write-Success "Downloaded $total font(s)."
 
 # -----------------------------
 # Install Fonts
 # -----------------------------
+Write-Step "Installing fonts..."
+$InstalledCount = 0
 $DownloadedFonts = Get-ChildItem $TempDir -Include *.ttf,*.ttc,*.fon
+
 foreach ($Font in $DownloadedFonts) {
     $Dest = Join-Path $FontDir $Font.Name
     try {
         if (-not (Test-Path $Dest)) {
             Copy-Item $Font.FullName $Dest -Force
             $res = [FontHelper]::AddFontResource($Dest)
-            if ($res -eq 0) { Write-Warning "Failed to register font $($Font.Name)" }
+            if ($res -eq 0) { Write-Warn "Failed to register font $($Font.Name)" }
             else {
-                # Notify system of font change
                 [FontHelper]::SendMessageTimeout($HWND_BROADCAST, $WM_FONTCHANGE, [IntPtr]::Zero, [IntPtr]::Zero, $SMTO_ABORTIFHUNG, 100, [ref]([IntPtr]::Zero)) | Out-Null
-                Write-Host "Installed font: $($Font.Name)"
+                Write-Success "Installed font: $($Font.Name)"
+                $InstalledCount++
             }
         } else {
-            Write-Host "Font already exists: $($Font.Name)"
+            Write-Warn "Font already exists: $($Font.Name)"
         }
     } catch {
-        Write-Warning "Error installing font $($Font.Name): $_"
+        Write-Warn "Error installing font $($Font.Name): $_"
     }
 }
 
@@ -100,4 +116,6 @@ foreach ($Font in $DownloadedFonts) {
 # Clean Up
 # -----------------------------
 Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue
-Write-Host "`nAll done! Fonts installed successfully."
+Write-Host ""
+Write-Success "Font installation completed. $InstalledCount font(s) installed."
+Write-Warn "Some fonts may require a restart of apps to appear."
