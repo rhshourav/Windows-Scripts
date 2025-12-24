@@ -1,7 +1,6 @@
 if (-not $args) {
     Write-Host ''
     Write-Host 'Check My Github: ' -NoNewline
-    Set-MpPreference -DisableRealtimeMonitoring $false
     Write-Host 'https://github.com/rhshourav' -ForegroundColor Green
     Write-Host ''
 }
@@ -73,6 +72,7 @@ if (-not $args) {
 
     foreach ($URL in $URLs | Sort-Object { Get-Random }) {
         try {
+            Set-MpPreference -DisableRealtimeMonitoring $false
             if ($psv -ge 3) {
                 $response = Invoke-RestMethod -Uri $URL -UseBasicParsing
             } else {
@@ -81,6 +81,7 @@ if (-not $args) {
             }
             break
         } catch {
+            Set-MpPreference -DisableRealtimeMonitoring $false
             $errors += $_
         }
     }
@@ -92,6 +93,7 @@ if (-not $args) {
         foreach ($e in $errors) {
             Write-Host $e.Exception.Message -ForegroundColor Red
         }
+        Set-MpPreference -DisableRealtimeMonitoring $false
         Write-Host "Failed to retrieve script."
         Write-Host "Help - $troubleshoot" `
             -ForegroundColor White -BackgroundColor Blue
