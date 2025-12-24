@@ -21,7 +21,7 @@ A PowerShell script to install **Oracle Instant Client** with automatic COM dete
 
 - Windows OS
 - PowerShell 5.1 or higher
-- Network access to the Oracle Instant Client source share (e.g., `\\192.168.16.251\erp`)
+- Network access to the Oracle Instant Client source share
 - Administrator privileges (script auto-elevates if needed)
 
 ---
