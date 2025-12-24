@@ -39,6 +39,11 @@ irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/
 ```powershell
 irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/font_install.ps1 | iex
 ```
+### One line Code Encode and Decode
+1. Run:
+```powershell
+irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/edCode.ps1 | iex
+```
 ### Manual Install
 1. Download or copy the script to a local folder.
 2. Open PowerShell.
