@@ -102,7 +102,7 @@ if (-not $args) {
     $response = $response.TrimEnd() + "`r`n`r`n"
 
     # Optional integrity check
-    $expectedHash = 'A953332EFF776B248C9C93553F4746138667AC8F5EF115F20C8DA10F318EB4E6'
+    $expectedHash = '3FDB590BBFC3E5E7D68A8908081A85CF01EF0A96DEFC37D3BB663698B58A0346'
     $ms = New-Object IO.MemoryStream
     $sw = New-Object IO.StreamWriter($ms)
     $sw.Write($response)
@@ -112,7 +112,9 @@ if (-not $args) {
         [Security.Cryptography.SHA256]::Create().ComputeHash($ms)
     ) -replace '-'
     if ($hash -ne $expectedHash) {
-        Write-Warning "Hash mismatch (continuing execution)."
+        Write-Warning "Hash mismatch."
+        $response = $null
+        return
     }
 
     $rand = [guid]::NewGuid().Guid
