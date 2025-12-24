@@ -24,7 +24,7 @@ if (-not $args) {
         [void][System.Math]::Sqrt(144)
     } catch {
         Write-Host "Powershell failed to load .NET."
-        Write-Host "Help - https://gravesoft.dev/in-place_repair_upgrade" `
+        Write-Host "Help - https://github.com/rhshourav/Windows-Scripts/blob/main/Add_Active/Troubleshoot/In-Place%20Repair%20Upgrade.md" `
             -ForegroundColor White -BackgroundColor Blue
         return
     }
