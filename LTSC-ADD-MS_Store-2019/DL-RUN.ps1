@@ -1,12 +1,20 @@
 # =========================================================
-# Script to download LTSC Add Microsoft Store files and run CMD as Admin
+# Script: Install LTSC Microsoft Store
 # =========================================================
 
-# Folder to save files
-$DownloadFolder = "$env:USERPROFILE\Downloads\LTSC-Add-MicrosoftStore"
-if (-Not (Test-Path $DownloadFolder)) {
-    New-Item -ItemType Directory -Path $DownloadFolder | Out-Null
-}
+# Display Author and Repo Info in CMD
+Write-Host "==============================================="
+Write-Host "LTSC Add Microsoft Store Installer"
+Write-Host "Author: rhshourav"
+Write-Host "GitHub: https://github.com/rhshourav"
+Write-Host "Supporting Repo: https://github.com/lixuy/LTSC-Add-MicrosoftStore"
+Write-Host "Description: Downloads and installs Microsoft Store and related apps"
+Write-Host "==============================================="
+
+# Create temporary folder
+$TempFolder = Join-Path $env:TEMP "LTSC-Add-MicrosoftStore"
+if (Test-Path $TempFolder) { Remove-Item -Recurse -Force $TempFolder }
+New-Item -ItemType Directory -Path $TempFolder | Out-Null
 
 # List of files to download (raw GitHub URLs)
 $DOWNLOAD_URLS = @(
@@ -30,16 +38,21 @@ $DOWNLOAD_URLS = @(
 # Download files
 foreach ($url in $DOWNLOAD_URLS) {
     $fileName = Split-Path $url -Leaf
-    $destination = Join-Path $DownloadFolder $fileName
+    $destination = Join-Path $TempFolder $fileName
     Write-Host "Downloading $fileName..."
     Invoke-WebRequest -Uri $url -OutFile $destination
 }
 
 # Run the CMD file as Administrator
-$cmdPath = Join-Path $DownloadFolder "Add-Store.cmd"
+$cmdPath = Join-Path $TempFolder "Add-Store.cmd"
 if (Test-Path $cmdPath) {
-    Write-Host "Running Add-Store.cmd as Administrator..."
-    Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$cmdPath`"" -Verb RunAs
+    Write-Host "`nRunning Add-Store.cmd as Administrator..."
+    Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$cmdPath`"" -Verb RunAs -Wait
 } else {
     Write-Host "Add-Store.cmd not found!"
 }
+
+# Clean up temporary folder
+Write-Host "`nCleaning up temporary files..."
+Remove-Item -Recurse -Force $TempFolder
+Write-Host "Done!"
