@@ -1,9 +1,36 @@
 # ============================================================
 # Oracle Instant Client Installer
-# With COM Auto-Detection, Progress Bars, and Colorful Output
+# With COM Auto-Detection, Progress Bars, Colorful Output
+# Optional Font Installation
+# Auto-Elevates to Administrator
 # ============================================================
 
 $ErrorActionPreference = "Stop"
+
+# -----------------------------
+# Auto-Elevate to Admin
+# -----------------------------
+if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Warning "Script is not running as administrator. Restarting as admin..."
+    Start-Process powershell "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+    Exit
+}
+
+# -----------------------------
+# COM Detection - global
+# -----------------------------
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class NativeMethods {
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern IntPtr LoadLibrary(string lpFileName);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
+    [DllImport("kernel32.dll")]
+    public static extern bool FreeLibrary(IntPtr hModule);
+}
+"@
 
 # -----------------------------
 # Configuration
@@ -24,17 +51,6 @@ function Write-Step($Text)   { Write-Host "[*] $Text" -ForegroundColor White }
 function Write-Success($Text){ Write-Host "[OK] $Text" -ForegroundColor Green }
 function Write-Warn($Text)   { Write-Host "[!] $Text" -ForegroundColor Yellow }
 function Write-Verify($Text) { Write-Host "[VERIFIED] $Text" -ForegroundColor DarkGreen }
-
-# -----------------------------
-# Admin Check
-# -----------------------------
-function Assert-Admin {
-    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $p  = New-Object Security.Principal.WindowsPrincipal($id)
-    if (-not $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        throw "This script must be run as Administrator."
-    }
-}
 
 # -----------------------------
 # PATH Handling
@@ -78,20 +94,6 @@ function Verify-SystemPath { param([string]$ExpectedEntry)
 # -----------------------------
 # COM Detection
 # -----------------------------
-if (-not ([System.Management.Automation.PSTypeName]'NativeMethods')) {
-    Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public static class NativeMethods {
-    [DllImport("kernel32.dll", SetLastError=true)]
-    public static extern IntPtr LoadLibrary(string lpFileName);
-    [DllImport("kernel32.dll", SetLastError=true)]
-    public static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
-    [DllImport("kernel32.dll")]
-    public static extern bool FreeLibrary(IntPtr hModule);
-}
-"@
-}
 function Test-ComDll { param([string]$DllPath)
     if (-not (Test-Path $DllPath)) { return $false }
     $hModule = [NativeMethods]::LoadLibrary($DllPath)
@@ -105,7 +107,6 @@ function Test-ComDll { param([string]$DllPath)
 # Start
 # -----------------------------
 Write-Header "Oracle Instant Client Installer"
-Assert-Admin
 
 if (-not (Test-Path $SourceOracle)) { throw "Source path not found: $SourceOracle" }
 if (-not (Test-Path $SourceDll))    { throw "Source DLL not found: $SourceDll" }
@@ -116,7 +117,6 @@ if (-not (Test-Path $SourceDll))    { throw "Source DLL not found: $SourceDll" }
 if (-not (Test-Path $OracleDir)) {
     Write-Step "Copying Oracle Instant Client (this may take a moment)..."
 
-    # Get all files recursively
     $files = Get-ChildItem -Path $SourceOracle -Recurse -File
     $total = $files.Count; $count = 0
 
@@ -178,6 +178,25 @@ Write-Header "Validating system configuration..."
 Verify-SystemVariable "TNS_ADMIN"  $OracleDir
 Verify-SystemVariable "ORACLE_HOME" $OracleDir
 Verify-SystemPath $OracleDir
+
+# -----------------------------
+# Font Installation Prompt
+# -----------------------------
+Write-Host ""
+$installFonts = Read-Host "Do you want to install ERP fonts? (Y/N)"
+if ($installFonts.Trim().ToUpper() -eq "Y") {
+    Write-Step "Downloading and running font installation script..."
+    try {
+        $fontScript = "$env:TEMP\font_install.ps1"
+        Invoke-WebRequest -Uri "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/font_install.ps1" -OutFile $fontScript
+        . $fontScript  # Dot-source to run in same scope
+        Write-Success "Font installation completed successfully."
+    } catch {
+        Write-Warn "Failed to install fonts: $_"
+    }
+} else {
+    Write-Step "Font installation skipped."
+}
 
 # -----------------------------
 # Done
