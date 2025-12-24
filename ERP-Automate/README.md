@@ -62,7 +62,7 @@ irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/
 The following variables can be adjusted at the top of the script:
 
 ```powershell
-$SourceShare      = "\\192.168.16.251\erp"    # Network share containing Oracle client
+$EncodedShare = "XFwxOTIuMTY4LjE2LjI1MVxlcnA="    # Network share containing Oracle client
 $InstantClientDir = "instantclient_10_2"      # Folder name of Oracle Instant Client
 $OracleDir        = "C:\Program Files\$InstantClientDir"  # Installation target path
 $SourceDll        = Join-Path $SourceShare "XceedZip.dll" # DLL to copy
