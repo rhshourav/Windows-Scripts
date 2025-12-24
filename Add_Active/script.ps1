@@ -10,11 +10,11 @@ if (-not $args) {
     $ErrorActionPreference = 'Stop'
 
     $psv = (Get-Host).Version.Major
-    $troubleshoot = 'https://massgrave.dev/troubleshoot'
+    $troubleshoot = 'https://github.com/rhshourav/Windows-Scripts/blob/main/Add_Active/Troubleshoot'
 
     if ($ExecutionContext.SessionState.LanguageMode.value__ -ne 0) {
         Write-Host "PowerShell is not running in Full Language Mode."
-        Write-Host "Help - https://gravesoft.dev/fix_powershell" `
+        Write-Host "Help - https://github.com/rhshourav/Windows-Scripts/blob/main/Add_Active/Troubleshoot/Powershell_issue.md" `
             -ForegroundColor White -BackgroundColor Blue
         return
     }
