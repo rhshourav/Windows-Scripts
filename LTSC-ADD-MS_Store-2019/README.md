@@ -48,7 +48,10 @@ irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/
    - Download all required files to a temporary folder.
    - Run `Add-Store.cmd` with elevated privileges.
    - Delete temporary files after installation.
-
+### OR Complete Manual Install
+1. [Download Zip file By Clicking me](https://github.com/kkkgo/LTSC-Add-MicrosoftStore/archive/refs/tags/2019.zip)
+2. Extract The  `LTSC-Add-MicrosoftStore-2019.zip`
+3. Run `Add-Store.cmd` as an Administrator.
 ---
 
 ## Notes
