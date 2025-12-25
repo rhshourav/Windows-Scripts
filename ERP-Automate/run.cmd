@@ -1,22 +1,23 @@
 @echo off
-setlocal
+setlocal EnableExtensions
 
-:: ================================
-:: Relaunch as admin (single visible window)
-:: ================================
+:: ==========================================
+:: Check for Administrator (do nothing if yes)
+:: ==========================================
 net session >nul 2>&1
 if %errorlevel% neq 0 (
+    echo Requesting Administrator privileges...
     powershell -NoProfile -Command ^
-      "Start-Process '%~f0' -Verb RunAs -WindowStyle Normal"
-    exit
+      "Start-Process '%~f0' -Verb RunAs"
+    exit /b
 )
 
-:: ================================
-:: ADMIN CONTEXT (only window user sees)
-:: ================================
+:: ==========================================
+:: Already Administrator → normal execution
+:: ==========================================
 cls
 echo =====================================
-echo ERP Automation - Administrator Mode
+echo ERP Automation (Administrator Mode)
 echo =====================================
 echo.
 
@@ -29,10 +30,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
  irm '%url%' -OutFile '%psfile%'"
 
 echo.
-echo Running ERP automation...
+echo Running script...
 echo.
 
-:: 🔥 SAME WINDOW, NO EXTRA TERMINALS
+:: Runs in SAME window, no extra terminals
 powershell -NoProfile -NoExit -ExecutionPolicy Bypass -File "%psfile%"
 
 echo.
