@@ -5,6 +5,16 @@
 # Optional Font Installation
 # Auto-Elevates to Administrator
 # ============================================================
+# Script Info
+$ScriptName = "ERP Setup"
+$Author     = "rhshourav"
+$GitHub     = "https://github.com/rhshourav/Windows-Scripts"
+$Version    = "v1.0.8"
+
+Write-Host (" Script   : " + $ScriptName) -ForegroundColor White
+Write-Host (" Author   : " + $Author)     -ForegroundColor White
+Write-Host (" GitHub   : " + $GitHub)     -ForegroundColor Cyan
+Write-Host (" Version  : " + $Version)    -ForegroundColor Yellow
 
 $ErrorActionPreference = "Stop"
 
