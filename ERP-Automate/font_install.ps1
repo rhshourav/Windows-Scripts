@@ -64,7 +64,7 @@ $Summary = @()
 # -----------------------------
 $NetworkSources = @(
     "\\192.168.18.201\it\ERP\font",
-    "\\192.168.18.202\it\ERP\font"
+    "\\192.168.19.44\it\FONTS\ERP"
 )
 
 $GitHubSource = @{
