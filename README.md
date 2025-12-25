@@ -3,11 +3,11 @@
 ## 🗝️ For Windows Act1ve.
 ### Change Edition , 0hook, HWID, TSF0rge, 0nline KM5
 - Try this:
-```
+```powershell
 irm https://tinyurl.com/RUN-MSA | iex
 ```
 OR
-```
+```powershell
 irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/run | iex
 ```
 ---
@@ -15,7 +15,7 @@ irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/
 
 ### Disable / Enable Windows Update
 
-```
+```powershell
 irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/main-run | iex
 ```
 
@@ -35,4 +35,10 @@ irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/
 2. Run:
 ```powershell
 irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/font_install.ps1 | iex
+```
+
+## Install Microsoft Store On Windows 10 / 11 LTSC or LTSB edition
+### Try
+```powershell
+irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/LTSC-ADD-MS_Store-2019/DL-RUN.ps1 | iex
 ```
