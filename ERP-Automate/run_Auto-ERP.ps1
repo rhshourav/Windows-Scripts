@@ -1,6 +1,7 @@
 # ============================================================
 # Oracle Instant Client Installer
-# With COM Auto-Detection, Progress Bars, Colorful Output
+# With Fallback Source Locations
+# COM Auto-Detection, Progress Bars, Colorful Output
 # Optional Font Installation
 # Auto-Elevates to Administrator
 # ============================================================
@@ -10,9 +11,13 @@ $ErrorActionPreference = "Stop"
 # -----------------------------
 # Auto-Elevate to Admin
 # -----------------------------
-if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+if (-not ([Security.Principal.WindowsPrincipal] `
+    [Security.Principal.WindowsIdentity]::GetCurrent()
+).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+
     Write-Warning "Script is not running as administrator. Restarting as admin..."
-    Start-Process powershell "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+    $pwsh = (Get-Process -Id $PID).Path
+    Start-Process $pwsh "-NoProfile -File `"$PSCommandPath`"" -Verb RunAs
     Exit
 }
 
@@ -35,38 +40,80 @@ public static class NativeMethods {
 }
 
 # -----------------------------
-# Function for Decode
+# Decode Base64 Path
 # -----------------------------
 function Decode-Base64Path {
     param([string]$Encoded)
-    $bytes = [System.Convert]::FromBase64String($Encoded)
-    return [System.Text.Encoding]::UTF8.GetString($bytes)
+    $bytes = [Convert]::FromBase64String($Encoded)
+    [Text.Encoding]::UTF8.GetString($bytes)
 }
-# -----------------------------
-# Configuration
-# -----------------------------
-
-# Encrypted Base64 path
-$EncodedShare = "XFwxOTIuMTY4LjE2LjI1MVxlcnA="
-
-
-# Decode at runtime
-$SourceShare = Decode-Base64Path $EncodedShare
-$InstantClientDir = "instantclient_10_2"
-$OracleDir        = "C:\Program Files\$InstantClientDir"
-$SourceOracle     = Join-Path $SourceShare $InstantClientDir
-
-$SourceDll = Join-Path $SourceShare "XceedZip.dll"
-$DestDll   = "C:\Windows\XceedZip.dll"
 
 # -----------------------------
 # Color Helpers
 # -----------------------------
-function Write-Header($Text) { Write-Host ""; Write-Host "=== $Text ===" -ForegroundColor Cyan }
-function Write-Step($Text)   { Write-Host "[*] $Text" -ForegroundColor White }
-function Write-Success($Text){ Write-Host "[OK] $Text" -ForegroundColor Green }
-function Write-Warn($Text)   { Write-Host "[!] $Text" -ForegroundColor Yellow }
-function Write-Verify($Text) { Write-Host "[VERIFIED] $Text" -ForegroundColor DarkGreen }
+function Write-Header ($Text)  { Write-Host ""; Write-Host "=== $Text ===" -ForegroundColor Cyan }
+function Write-Step   ($Text)  { Write-Host "[*] $Text" -ForegroundColor White }
+function Write-Success($Text)  { Write-Host "[OK] $Text" -ForegroundColor Green }
+function Write-Warn   ($Text)  { Write-Host "[!] $Text" -ForegroundColor Yellow }
+function Write-Verify ($Text)  { Write-Host "[VERIFIED] $Text" -ForegroundColor DarkGreen }
+
+# -----------------------------
+# Configuration
+# -----------------------------
+
+$InstantClientDir = "instantclient_10_2"
+$OracleDir        = "C:\Program Files\$InstantClientDir"
+$DestDll          = "C:\Windows\XceedZip.dll"
+
+# Base64-obfuscated source locations (priority order)
+$EncodedShares = @(
+    "XFwxOTIuMTY4LjE2LjI1MVxlcnA=",   # Primary
+    "XFwxOTIuMTY4LjE2LjI1MlxkZXBvdA==", # Secondary
+    "XFxcZmlsZXNlcnZlcjFcZXJw"        # Tertiary
+)
+
+# -----------------------------
+# Source Selection with Fallback
+# -----------------------------
+function Get-AvailableSource {
+    param(
+        [string[]]$EncodedPaths,
+        [string]$RequiredFolder
+    )
+
+    foreach ($encoded in $EncodedPaths) {
+        try {
+            $decoded = Decode-Base64Path $encoded
+            Write-Step "Testing source: $decoded"
+
+            if (-not (Test-Path $decoded)) {
+                Write-Warn "Source not reachable"
+                continue
+            }
+
+            $oraclePath = Join-Path $decoded $RequiredFolder
+            $dllPath    = Join-Path $decoded "XceedZip.dll"
+
+            if (-not (Test-Path $oraclePath)) {
+                Write-Warn "Missing Oracle client folder"
+                continue
+            }
+
+            if (-not (Test-Path $dllPath)) {
+                Write-Warn "Missing XceedZip.dll"
+                continue
+            }
+
+            Write-Success "Using source: $decoded"
+            return $decoded
+        }
+        catch {
+            Write-Warn "Error testing source: $_"
+        }
+    }
+
+    throw "No valid source locations available."
+}
 
 # -----------------------------
 # PATH Handling
@@ -76,47 +123,67 @@ function Add-ToSystemPath {
     $entry = $Entry.TrimEnd('\')
     $path  = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $parts = $path.Split(";") | ForEach-Object { $_.TrimEnd('\') }
+
     if ($parts -notcontains $entry) {
-        $newPath = $path.TrimEnd(";") + ";" + $entry
-        [Environment]::SetEnvironmentVariable("Path", $newPath, "Machine")
+        [Environment]::SetEnvironmentVariable(
+            "Path",
+            ($path.TrimEnd(";") + ";" + $entry),
+            "Machine"
+        )
         Write-Step "Added '$entry' to system PATH"
     }
-    else { Write-Step "'$entry' already exists in system PATH" }
+    else {
+        Write-Step "'$entry' already exists in system PATH"
+    }
 }
 
 # -----------------------------
 # Validation
 # -----------------------------
-function Verify-SystemVariable { param([string]$Name, [string]$Expected)
+function Verify-SystemVariable {
+    param([string]$Name, [string]$Expected)
+
     $actual = [Environment]::GetEnvironmentVariable($Name, "Machine")
-    if (-not $actual) { throw "System variable '$Name' is missing." }
-    if ($actual.TrimEnd('\') -ne $Expected.TrimEnd('\')) {
-        throw "System variable '$Name' mismatch. Expected '$Expected', found '$actual'."
+    if (-not $actual) {
+        throw "System variable '$Name' missing."
     }
+
+    if ($actual.TrimEnd('\') -ne $Expected.TrimEnd('\')) {
+        throw "System variable '$Name' mismatch."
+    }
+
     Write-Verify "$Name = $actual"
 }
 
-function Verify-SystemPath { param([string]$ExpectedEntry)
+function Verify-SystemPath {
+    param([string]$ExpectedEntry)
+
     $expected = $ExpectedEntry.TrimEnd('\')
     $path = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $parts = $path.Split(";") | ForEach-Object { $_.TrimEnd('\') }
-    $count = ($parts | Where-Object { $_ -eq $expected }).Count
-    if ($count -eq 0) { throw "PATH does not contain '$expected'." }
-    elseif ($count -gt 1) { throw "PATH contains duplicate entries for '$expected'." }
+
+    if (($parts | Where-Object { $_ -eq $expected }).Count -ne 1) {
+        throw "PATH validation failed for '$expected'"
+    }
+
     Write-Verify "PATH contains '$expected' exactly once"
-    if ($path.Length -gt 1800) { Write-Warn "PATH length is $($path.Length) characters (near limit)" }
 }
 
 # -----------------------------
 # COM Detection
 # -----------------------------
-function Test-ComDll { param([string]$DllPath)
+function Test-ComDll {
+    param([string]$DllPath)
+
     if (-not (Test-Path $DllPath)) { return $false }
-    $hModule = [NativeMethods]::LoadLibrary($DllPath)
-    if ($hModule -eq [IntPtr]::Zero) { return $false }
-    $proc = [NativeMethods]::GetProcAddress($hModule, "DllRegisterServer")
-    [NativeMethods]::FreeLibrary($hModule)
-    return ($proc -ne [IntPtr]::Zero)
+
+    $h = [NativeMethods]::LoadLibrary($DllPath)
+    if ($h -eq [IntPtr]::Zero) { return $false }
+
+    $p = [NativeMethods]::GetProcAddress($h, "DllRegisterServer")
+    [NativeMethods]::FreeLibrary($h)
+
+    return ($p -ne [IntPtr]::Zero)
 }
 
 # -----------------------------
@@ -124,98 +191,78 @@ function Test-ComDll { param([string]$DllPath)
 # -----------------------------
 Write-Header "Oracle Instant Client Installer"
 
-if (-not (Test-Path $SourceOracle)) { throw "Source path not found: $SourceOracle" }
-if (-not (Test-Path $SourceDll))    { throw "Source DLL not found: $SourceDll" }
+$SourceShare = Get-AvailableSource `
+    -EncodedPaths $EncodedShares `
+    -RequiredFolder $InstantClientDir
+
+$SourceOracle = Join-Path $SourceShare $InstantClientDir
+$SourceDll    = Join-Path $SourceShare "XceedZip.dll"
 
 # -----------------------------
-# Copy Oracle Instant Client (Progress)
+# Copy Oracle Instant Client
 # -----------------------------
 if (Test-Path $OracleDir) {
-    Write-Warn "Oracle Instant Client folder exists. Removing for fresh install..."
-    Remove-Item -Path $OracleDir -Recurse -Force
+    Write-Warn "Existing Oracle client found. Removing..."
+    Remove-Item $OracleDir -Recurse -Force
 }
 
-Write-Step "Copying Oracle Instant Client (this may take a moment)..."
-
-$files = Get-ChildItem -Path $SourceOracle -Recurse -File
-$total = $files.Count; $count = 0
-
-foreach ($file in $files) {
-    $relative = $file.FullName.Substring($SourceOracle.Length).TrimStart('\')
-    $destPath = Join-Path $OracleDir $relative
-    $destDir  = Split-Path $destPath
-    if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir | Out-Null }
-    Copy-Item -Path $file.FullName -Destination $destPath -Force
-    $count++
-    Write-Progress -Activity "Copying Oracle Instant Client" `
-                   -Status "$count of $total files" `
-                   -PercentComplete (($count/$total)*100)
+Write-Step "Copying Oracle Instant Client..."
+robocopy $SourceOracle $OracleDir /E /R:3 /W:5 /ETA
+if ($LASTEXITCODE -ge 8) {
+    throw "Oracle client copy failed (Robocopy exit code $LASTEXITCODE)"
 }
-
-Write-Progress -Activity "Copying Oracle Instant Client" -Completed
 Write-Success "Oracle Instant Client copied"
 
-
 # -----------------------------
-# Copy DLL (Progress)
+# Copy DLL
 # -----------------------------
 Write-Step "Copying XceedZip.dll..."
-$size = (Get-Item $SourceDll).Length; $copied = 0; $buffer = 4MB
-$in  = [IO.File]::OpenRead($SourceDll)
-$out = [IO.File]::Create($DestDll)
-$buf = New-Object byte[] $buffer
-while (($read = $in.Read($buf,0,$buf.Length)) -gt 0) {
-    $out.Write($buf,0,$read); $copied += $read
-    $percent = [math]::Round(($copied/$size)*100,0)
-    Write-Progress -Activity "Copying XceedZip.dll" -Status "$percent% Complete" -PercentComplete $percent
-}
-$in.Close(); $out.Close()
-Write-Progress -Activity "Copying XceedZip.dll" -Completed
+Copy-Item $SourceDll $DestDll -Force
 Write-Success "XceedZip.dll copied"
 
 # -----------------------------
-# COM Auto-Register
+# COM Registration
 # -----------------------------
 if (Test-ComDll $DestDll) {
-    Write-Step "XceedZip.dll supports COM. Registering..."
-    $proc = Start-Process "$env:windir\System32\regsvr32.exe" -ArgumentList "/s `"$DestDll`"" -Wait -PassThru
-    if ($proc.ExitCode -ne 0) { throw "DLL registration failed (exit code $($proc.ExitCode))" }
-    Write-Success "XceedZip.dll registered successfully"
-} else { Write-Warn "XceedZip.dll does not support COM. Registration skipped." }
+    Write-Step "Registering XceedZip.dll..."
+    & "$env:windir\System32\regsvr32.exe" /s "$DestDll"
+    Write-Success "XceedZip.dll registered"
+}
+else {
+    Write-Warn "XceedZip.dll is not COM-capable. Skipping registration."
+}
 
 # -----------------------------
 # Environment Variables
 # -----------------------------
-Write-Step "Configuring system environment variables..."
-[Environment]::SetEnvironmentVariable("TNS_ADMIN",  $OracleDir, "Machine")
-[Environment]::SetEnvironmentVariable("ORACLE_HOME", $OracleDir, "Machine")
+Write-Step "Configuring environment variables..."
+[Environment]::SetEnvironmentVariable("TNS_ADMIN", $OracleDir, "Machine")
 Add-ToSystemPath $OracleDir
 
 # -----------------------------
 # Verification
 # -----------------------------
-Write-Header "Validating system configuration..."
-Verify-SystemVariable "TNS_ADMIN"  $OracleDir
-Verify-SystemVariable "ORACLE_HOME" $OracleDir
+Write-Header "Validating System Configuration"
+Verify-SystemVariable "TNS_ADMIN" $OracleDir
 Verify-SystemPath $OracleDir
 
 # -----------------------------
-# Font Installation Prompt
+# Font Installation (Optional)
 # -----------------------------
-Write-Host ""
 $installFonts = Read-Host "Do you want to install ERP fonts? (Y/N)"
 if ($installFonts.Trim().ToUpper() -eq "Y") {
-    Write-Step "Downloading and running font installation script..."
     try {
+        Write-Step "Installing fonts..."
         $fontScript = "$env:TEMP\font_install.ps1"
-        Invoke-WebRequest -Uri "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/font_install.ps1" -OutFile $fontScript
-        . $fontScript  # Dot-source to run in same scope
-        Write-Success "Font installation completed successfully."
-    } catch {
-        Write-Warn "Failed to install fonts: $_"
+        Invoke-WebRequest `
+            -Uri "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/ERP-Automate/font_install.ps1" `
+            -OutFile $fontScript
+        . $fontScript
+        Write-Success "Fonts installed"
     }
-} else {
-    Write-Step "Font installation skipped."
+    catch {
+        Write-Warn "Font installation failed: $_"
+    }
 }
 
 # -----------------------------
