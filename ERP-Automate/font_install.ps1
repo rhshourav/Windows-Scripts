@@ -1,6 +1,8 @@
 # =============================================================
-# Font Installer: GitHub or Network Share
+# Font Installer (Network Shares → GitHub Fallback)
 # =============================================================
+
+$ErrorActionPreference = "Stop"
 
 # -----------------------------
 # Color Helpers
@@ -13,33 +15,24 @@ function Write-Warn($Text)   { Write-Host "[!] $Text" -ForegroundColor Yellow }
 # -----------------------------
 # Admin Check
 # -----------------------------
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) { throw "This script must be run as Administrator." }
+$principal = New-Object Security.Principal.WindowsPrincipal(
+    [Security.Principal.WindowsIdentity]::GetCurrent()
+)
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw "This script must be run as Administrator."
+}
 
 Write-Header "Font Installer"
 
 # -----------------------------
-# User Choice
-# -----------------------------
-Write-Host "Select font source:"
-Write-Host "1 - GitHub"
-Write-Host "2 - Network Share"
-Write-Host "0 - Exit"
-
-$choice = Read-Host "Enter your choice (0/1/2)"
-switch ($choice) {
-    "0" { Write-Host "Exiting..."; exit }
-    "1" { $Source = "GitHub" }
-    "2" { $Source = "Network" }
-    default { Write-Warn "Invalid choice. Exiting..."; exit }
-}
-
-# -----------------------------
-# Setup Temp and Font Directories
+# Temp / Font Directories
 # -----------------------------
 $TempDir = "$env:TEMP\erp_fonts"
 $FontDir = "$env:WINDIR\Fonts"
-if (Test-Path $TempDir) { Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue }
+
+if (Test-Path $TempDir) {
+    Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue
+}
 New-Item -ItemType Directory -Path $TempDir | Out-Null
 
 # -----------------------------
@@ -50,114 +43,170 @@ using System;
 using System.Runtime.InteropServices;
 public class FontHelper {
     [DllImport("gdi32.dll", EntryPoint="AddFontResourceW", SetLastError=true)]
-    public static extern int AddFontResource([MarshalAs(UnmanagedType.LPWStr)] string lpFileName);
-    
-    [DllImport("gdi32.dll", EntryPoint="RemoveFontResourceW", SetLastError=true)]
-    public static extern bool RemoveFontResource([MarshalAs(UnmanagedType.LPWStr)] string lpFileName);
-    
+    public static extern int AddFontResource(string lpFileName);
+
     [DllImport("user32.dll")]
-    public static extern int SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+    public static extern int SendMessageTimeout(
+        IntPtr hWnd, int Msg, IntPtr wParam, IntPtr lParam,
+        int flags, int timeout, out IntPtr lpdwResult
+    );
 }
 "@
+
 $HWND_BROADCAST = [intptr]0xffff
-$WM_FONTCHANGE   = 0x001D
+$WM_FONTCHANGE = 0x001D
 $SMTO_ABORTIFHUNG = 0x0002
 
-$Summary = @()  # Array to store font status
+$Summary = @()
 
 # -----------------------------
-# Fetch Fonts
+# SOURCE DEFINITIONS (ORDERED)
 # -----------------------------
-if ($Source -eq "GitHub") {
-    # GitHub Settings
-    $RepoOwner = "rhshourav"
-    $RepoName  = "ideal-fishstick"
-    $Folder    = "erp_font"
-    $ApiUrl    = "https://api.github.com/repos/$RepoOwner/$RepoName/contents/$Folder"
+$NetworkSources = @(
+    "\\192.168.18.201\it\ERP\font",
+    "\\192.168.18.202\it\ERP\font"
+)
 
-    Write-Step "Fetching font list from GitHub..."
+$GitHubSource = @{
+    RepoOwner = "rhshourav"
+    RepoName  = "ideal-fishstick"
+    Folder    = "erp_font"
+}
+
+# -----------------------------
+# TRY NETWORK SHARES FIRST
+# -----------------------------
+$FontsFetched = $false
+
+foreach ($Path in $NetworkSources) {
+
+    Write-Step "Trying network source: $Path"
+
     try {
-        $Files = Invoke-RestMethod -Uri $ApiUrl -Headers @{ "User-Agent" = "PowerShell" }
-    } catch {
-        throw "Failed to get files from GitHub: $_"
-    }
-
-    $FontFiles = $Files | Where-Object { $_.name -match '\.(ttf|ttc|fon)$' }
-    $total = $FontFiles.Count
-    $count = 0
-
-    foreach ($File in $FontFiles) {
-        $count++
-        $Out = Join-Path $TempDir $File.name
-        try {
-            Write-Progress -Activity "Downloading fonts" -Status "$($File.name) ($count/$total)" -PercentComplete (($count/$total)*100)
-            Invoke-WebRequest -Uri $File.download_url -OutFile $Out -ErrorAction Stop
-        } catch {
-            Write-Warn "Failed to download $($File.name): $_"
-            continue
+        if (-not (Test-Path $Path)) {
+            throw "Path not accessible"
         }
-    }
-    Write-Progress -Activity "Downloading fonts" -Completed
-    Write-Success "Downloaded $total font(s)."
-}
-elseif ($Source -eq "Network") {
-    # Network Share Settings
-    $NetworkPath = "\\192.168.18.201\it\ERP\font"
-    if (-not (Test-Path $NetworkPath)) {
-        throw "Network path not accessible: $NetworkPath"
-    }
 
-    Write-Step "Copying fonts from network share..."
-    $Files = Get-ChildItem -Path $NetworkPath -File | Where-Object { $_.Extension -match '(\.ttf|\.ttc|\.fon)$' }
-$total = $Files.Count
-if ($total -eq 0) { Write-Warn "No font files found in $NetworkPath"; return }
+        $Files = Get-ChildItem $Path -File |
+            Where-Object { $_.Extension -match '\.(ttf|ttc|fon)$' }
 
-$count = 0
-foreach ($File in $Files) {
-    $count++
-    $Dest = Join-Path $TempDir $File.Name
-    try {
-        Copy-Item $File.FullName $Dest -Force
-        Write-Progress -Activity "Copying fonts" -Status "$($File.Name) ($count/$total)" -PercentComplete (($count/$total)*100)
-    } catch {
-        Write-Warn "Failed to copy $($File.Name): $_"
-        continue
+        if ($Files.Count -eq 0) {
+            throw "No font files found"
+        }
+
+        $total = $Files.Count
+        $count = 0
+
+        foreach ($File in $Files) {
+            $count++
+            Copy-Item $File.FullName (Join-Path $TempDir $File.Name) -Force
+            Write-Progress `
+                -Activity "Copying fonts from network" `
+                -Status "$($File.Name) ($count/$total)" `
+                -PercentComplete (($count / $total) * 100)
+        }
+
+        Write-Progress -Activity "Copying fonts from network" -Completed
+        Write-Success "Fonts copied from $Path"
+        $FontsFetched = $true
+        break
     }
-}
-Write-Progress -Activity "Copying fonts" -Completed
-Write-Success "Copied $total font(s) from network share."
-
+    catch {
+        Write-Warn "Network source failed: $($_.Exception.Message)"
+    }
 }
 
 # -----------------------------
-# Install Fonts
+# FALL BACK TO GITHUB (LAST)
+# -----------------------------
+if (-not $FontsFetched) {
+
+    Write-Warn "All network sources failed. Falling back to GitHub..."
+
+    try {
+        $ApiUrl = "https://api.github.com/repos/$($GitHubSource.RepoOwner)/$($GitHubSource.RepoName)/contents/$($GitHubSource.Folder)"
+        $Files = Invoke-RestMethod -Uri $ApiUrl -Headers @{ "User-Agent" = "PowerShell" }
+
+        $FontFiles = $Files | Where-Object { $_.name -match '\.(ttf|ttc|fon)$' }
+        if ($FontFiles.Count -eq 0) {
+            throw "No fonts found in GitHub repo"
+        }
+
+        $total = $FontFiles.Count
+        $count = 0
+
+        foreach ($File in $FontFiles) {
+            $count++
+            $Out = Join-Path $TempDir $File.name
+            Write-Progress `
+                -Activity "Downloading fonts from GitHub" `
+                -Status "$($File.name) ($count/$total)" `
+                -PercentComplete (($count / $total) * 100)
+
+            Invoke-WebRequest -Uri $File.download_url -OutFile $Out -ErrorAction Stop
+        }
+
+        Write-Progress -Activity "Downloading fonts from GitHub" -Completed
+        Write-Success "Fonts downloaded from GitHub"
+        $FontsFetched = $true
+    }
+    catch {
+        throw "GitHub fallback failed: $($_.Exception.Message)"
+    }
+}
+
+if (-not $FontsFetched) {
+    throw "No available font sources succeeded."
+}
+
+# -----------------------------
+# INSTALL FONTS
 # -----------------------------
 Write-Step "Installing fonts..."
+
 $DownloadedFonts = Get-ChildItem $TempDir -Include *.ttf,*.ttc,*.fon
 
 foreach ($Font in $DownloadedFonts) {
+
     $Dest = Join-Path $FontDir $Font.Name
     $Status = ""
+
     try {
         if (-not (Test-Path $Dest)) {
+
             Copy-Item $Font.FullName $Dest -Force
             $res = [FontHelper]::AddFontResource($Dest)
-            if ($res -eq 0) { 
-                $Status = "Failed to Register"
-                Write-Warn "Failed to register font $($Font.Name)"
-            } else {
-                [FontHelper]::SendMessageTimeout($HWND_BROADCAST, $WM_FONTCHANGE, [IntPtr]::Zero, [IntPtr]::Zero, $SMTO_ABORTIFHUNG, 100, [ref]([IntPtr]::Zero)) | Out-Null
-                $Status = "Installed"
-                Write-Success "Installed font: $($Font.Name)"
+
+            if ($res -eq 0) {
+                $Status = "Failed"
+                Write-Warn "Failed to register $($Font.Name)"
             }
-        } else {
+            else {
+                [FontHelper]::SendMessageTimeout(
+                    $HWND_BROADCAST,
+                    $WM_FONTCHANGE,
+                    [IntPtr]::Zero,
+                    [IntPtr]::Zero,
+                    $SMTO_ABORTIFHUNG,
+                    100,
+                    [ref]([IntPtr]::Zero)
+                ) | Out-Null
+
+                $Status = "Installed"
+                Write-Success "Installed: $($Font.Name)"
+            }
+
+        }
+        else {
             $Status = "Already Exists"
             Write-Warn "Font already exists: $($Font.Name)"
         }
-    } catch {
-        $Status = "Error"
-        Write-Warn "Error installing font $($Font.Name): $_"
     }
+    catch {
+        $Status = "Error"
+        Write-Warn "Error installing $($Font.Name): $_"
+    }
+
     $Summary += [PSCustomObject]@{
         Font   = $Font.Name
         Status = $Status
@@ -165,15 +214,15 @@ foreach ($Font in $DownloadedFonts) {
 }
 
 # -----------------------------
-# Clean Up
+# CLEANUP
 # -----------------------------
 Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue
 
 # -----------------------------
-# Summary Table
+# SUMMARY
 # -----------------------------
 Write-Header "Installation Summary"
 $Summary | Format-Table -AutoSize
 
-Write-Success "`nFont installation completed."
-Write-Warn "Some fonts may require a restart of apps to appear."
+Write-Success "Font installation completed."
+Write-Warn "Restart applications if fonts do not appear immediately."
