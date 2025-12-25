@@ -1,6 +1,16 @@
 # =============================================================
 # Font Installer (Network Shares → GitHub Fallback)
 # =============================================================
+# Script Info
+$ScriptName = "ERP Font Install"
+$Author     = "rhshourav"
+$GitHub     = "https://github.com/rhshourav/Windows-Scripts"
+$Version    = "v1.0.4"
+
+Write-Host (" Script   : " + $ScriptName) -ForegroundColor White
+Write-Host (" Author   : " + $Author)     -ForegroundColor White
+Write-Host (" GitHub   : " + $GitHub)     -ForegroundColor Cyan
+Write-Host (" Version  : " + $Version)    -ForegroundColor Yellow
 
 $ErrorActionPreference = "Stop"
 
