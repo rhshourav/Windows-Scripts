@@ -11,6 +11,8 @@ $Author     = "rhshourav"
 $GitHub     = "https://github.com/rhshourav/Windows-Scripts"
 $Version    = "v1.0.8"
 
+Write-Host ""
+Write-Host ""
 Write-Host (" Script   : " + $ScriptName) -ForegroundColor White
 Write-Host (" Author   : " + $Author)     -ForegroundColor White
 Write-Host (" GitHub   : " + $GitHub)     -ForegroundColor Cyan
