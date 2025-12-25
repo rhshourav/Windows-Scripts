@@ -69,7 +69,7 @@ $DestDll          = "C:\Windows\XceedZip.dll"
 $EncodedShares = @(
     "XFwxOTIuMTY4LjE2LjI1MVxlcnA=",   # Primary
     "XFwxOTIuMTY4LjE2LjI1MVxjYW0tZXJw", # Secondary
-    "XFxcZmlsZXNlcnZlcjFcZXJw"        # Tertiary
+    "XFwxOTIuMTY4LjE3LjE0MlxtbGJkX2VycA=="        # Tertiary
 )
 
 # -----------------------------
