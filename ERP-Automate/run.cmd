@@ -1,4 +1,7 @@
 @echo off
+:: ==================================
+:: Version: 1.0.0s
+:: ==================================
 setlocal EnableExtensions EnableDelayedExpansion
 
 :: ===============================
@@ -38,7 +41,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; ^
  irm '%url%' -OutFile '%psfile%'"
 
-echo %ESC%[92m[✔] Download complete%ESC%[0m
+echo %ESC%[92m[o] Download complete%ESC%[0m
 echo.
 
 echo %ESC%[93m[+] Running ERP automation...%ESC%[0m
