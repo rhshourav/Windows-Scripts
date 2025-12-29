@@ -1,289 +1,291 @@
-# ============================================================
-# Oracle Instant Client Installer
-# With Fallback Source Locations
-# COM Auto-Detection, Progress Bars, Colorful Output
-# Optional Font Installation
-# Auto-Elevates to Administrator
-# ============================================================
+# =============================================================
+# ERP Font Installer (Network → GitHub Fallback)
+# Windows 10/11 Compatible – Verified Installation
+# =============================================================
+
+# -----------------------------
 # Script Info
-$ScriptName = "ERP Setup"
+# -----------------------------
+$ScriptName = "ERP Font Install"
 $Author     = "rhshourav"
 $GitHub     = "https://github.com/rhshourav/Windows-Scripts"
-$Version    = "v1.0.9"
+$Version    = "v1.1.1"
 
 Write-Host ""
+Write-Host (" Script   : $ScriptName") -ForegroundColor White
+Write-Host (" Author   : $Author")     -ForegroundColor White
+Write-Host (" GitHub   : $GitHub")     -ForegroundColor Cyan
+Write-Host (" Version  : $Version")    -ForegroundColor Yellow
 Write-Host ""
-Write-Host (" Script   : " + $ScriptName) -ForegroundColor White
-Write-Host (" Author   : " + $Author)     -ForegroundColor White
-Write-Host (" GitHub   : " + $GitHub)     -ForegroundColor Cyan
-Write-Host (" Version  : " + $Version)    -ForegroundColor Yellow
 
 $ErrorActionPreference = "Stop"
 
 # -----------------------------
-# Auto-Elevate to Admin
+# Helpers
+# -----------------------------
+function Write-Header ($t){ Write-Host ""; Write-Host "=== $t ===" -ForegroundColor Cyan }
+function Write-Step   ($t){ Write-Host "[*] $t" -ForegroundColor White }
+function Write-Success($t){ Write-Host "[OK] $t" -ForegroundColor Green }
+function Write-Warn   ($t){ Write-Host "[!] $t" -ForegroundColor Yellow }
+
+# -----------------------------
+# Admin Check
 # -----------------------------
 if (-not ([Security.Principal.WindowsPrincipal] `
     [Security.Principal.WindowsIdentity]::GetCurrent()
 ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-
-    Write-Warning "Script is not running as administrator. Restarting as admin..."
-    $pwsh = (Get-Process -Id $PID).Path
-    Start-Process $pwsh "-NoProfile -File `"$PSCommandPath`"" -Verb RunAs
-    Exit
+    throw "This script must be run as Administrator."
 }
 
 # -----------------------------
-# COM Detection - global
+# Paths
 # -----------------------------
-if (-not ("NativeMethods" -as [type])) {
-    Add-Type @"
+$TempDir = "$env:TEMP\erp_fonts"
+$FontDir = "$env:WINDIR\Fonts"
+$RegPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
+
+if (Test-Path $TempDir) {
+    Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+New-Item -ItemType Directory -Path $TempDir | Out-Null
+
+# -----------------------------
+# Win32 API
+# -----------------------------
+Add-Type @"
 using System;
 using System.Runtime.InteropServices;
-public static class NativeMethods {
-    [DllImport("kernel32.dll", SetLastError=true)]
-    public static extern IntPtr LoadLibrary(string lpFileName);
-    [DllImport("kernel32.dll", SetLastError=true)]
-    public static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
-    [DllImport("kernel32.dll")]
-    public static extern bool FreeLibrary(IntPtr hModule);
+public class FontAPI {
+    [DllImport("gdi32.dll", EntryPoint="AddFontResourceW", SetLastError=true)]
+    public static extern int AddFontResource(string lpFileName);
+
+    [DllImport("user32.dll")]
+    public static extern int SendMessageTimeout(
+        IntPtr hWnd, int Msg, IntPtr wParam, IntPtr lParam,
+        int flags, int timeout, out IntPtr lpdwResult
+    );
 }
 "@
-}
+
+$HWND_BROADCAST = [intptr]0xffff
+$WM_FONTCHANGE = 0x001D
+$SMTO_ABORTIFHUNG = 0x0002
 
 # -----------------------------
-# Decode Base64 Path
+# Font Registration
 # -----------------------------
-function Decode-Base64Path {
-    param([string]$Encoded)
-    $bytes = [Convert]::FromBase64String($Encoded)
-    [Text.Encoding]::UTF8.GetString($bytes)
-}
+function Register-Font {
+    param([string]$FontPath)
 
-# -----------------------------
-# Color Helpers
-# -----------------------------
-function Write-Header ($Text)  { Write-Host ""; Write-Host "=== $Text ===" -ForegroundColor Cyan }
-function Write-Step   ($Text)  { Write-Host "[*] $Text" -ForegroundColor White }
-function Write-Success($Text)  { Write-Host "[OK] $Text" -ForegroundColor Green }
-function Write-Warn   ($Text)  { Write-Host "[!] $Text" -ForegroundColor Yellow }
-function Write-Verify ($Text)  { Write-Host "[VERIFIED] $Text" -ForegroundColor DarkGreen }
+    $name = [IO.Path]::GetFileName($FontPath)
+    $ext  = [IO.Path]::GetExtension($name).ToLower()
 
-# -----------------------------
-# Configuration
-# -----------------------------
-
-$InstantClientDir = "instantclient_10_2"
-$OracleDir        = "C:\Program Files\$InstantClientDir"
-$DestDll          = "C:\Windows\XceedZip.dll"
-
-# Base64-obfuscated source locations (priority order)
-$EncodedShares = @(
-    "XFwxOTIuMTY4LjE2LjI1MVxlcnA=",   # Primary
-    "XFwxOTIuMTY4LjE2LjI1MVxjYW0tZXJw", # Secondary
-    "XFwxOTIuMTY4LjE3LjE0MlxtbGJkX2VycA=="        # Tertiary
-)
-
-# -----------------------------
-# Source Selection with Fallback
-# -----------------------------
-function Get-AvailableSource {
-    param(
-        [string[]]$EncodedPaths,
-        [string]$RequiredFolder
-    )
-
-    foreach ($encoded in $EncodedPaths) {
-        try {
-            $decoded = Decode-Base64Path $encoded
-            Write-Step "Testing source: $decoded"
-
-            if (-not (Test-Path $decoded)) {
-                Write-Warn "Source not reachable"
-                continue
-            }
-
-            $oraclePath = Join-Path $decoded $RequiredFolder
-            $dllPath    = Join-Path $decoded "XceedZip.dll"
-
-            if (-not (Test-Path $oraclePath)) {
-                Write-Warn "Missing Oracle client folder"
-                continue
-            }
-
-            if (-not (Test-Path $dllPath)) {
-                Write-Warn "Missing XceedZip.dll"
-                continue
-            }
-
-            Write-Success "Using source: $decoded"
-            return $decoded
-        }
-        catch {
-            Write-Warn "Error testing source: $_"
-        }
+    switch ($ext) {
+        ".ttf" { $suffix = " (TrueType)" }
+        ".ttc" { $suffix = " (TrueType)" }
+        ".fon" { $suffix = " (Raster)" }
+        default { return $false }
     }
 
-    throw "No valid source locations available."
+    $display = ($name -replace '\.(ttf|ttc|fon)$','') + $suffix
+
+    New-ItemProperty `
+        -Path $RegPath `
+        -Name $display `
+        -Value $name `
+        -PropertyType String `
+        -Force | Out-Null
+
+    return $true
 }
-
-# -----------------------------
-# PATH Handling
-# -----------------------------
-function Add-ToSystemPath {
-    param([string]$Entry)
-    $entry = $Entry.TrimEnd('\')
-    $path  = [Environment]::GetEnvironmentVariable("Path", "Machine")
-    $parts = $path.Split(";") | ForEach-Object { $_.TrimEnd('\') }
-
-    if ($parts -notcontains $entry) {
-        [Environment]::SetEnvironmentVariable(
-            "Path",
-            ($path.TrimEnd(";") + ";" + $entry),
-            "Machine"
-        )
-        Write-Step "Added '$entry' to system PATH"
-    }
-    else {
-        Write-Step "'$entry' already exists in system PATH"
-    }
-}
-
-# -----------------------------
-# Validation
-# -----------------------------
-function Verify-SystemVariable {
-    param([string]$Name, [string]$Expected)
-
-    $actual = [Environment]::GetEnvironmentVariable($Name, "Machine")
-    if (-not $actual) {
-        throw "System variable '$Name' missing."
-    }
-
-    if ($actual.TrimEnd('\') -ne $Expected.TrimEnd('\')) {
-        throw "System variable '$Name' mismatch."
-    }
-
-    Write-Verify "$Name = $actual"
-}
-
-function Verify-SystemPath {
-    param([string]$ExpectedEntry)
-
-    $expected = $ExpectedEntry.TrimEnd('\')
-    $path = [Environment]::GetEnvironmentVariable("Path", "Machine")
-    $parts = $path.Split(";") | ForEach-Object { $_.TrimEnd('\') }
-
-    if (($parts | Where-Object { $_ -eq $expected }).Count -ne 1) {
-        throw "PATH validation failed for '$expected'"
-    }
-
-    Write-Verify "PATH contains '$expected' exactly once"
-}
-
-# -----------------------------
-# COM Detection
-# -----------------------------
-function Test-ComDll {
-    param([string]$DllPath)
-
-    if (-not (Test-Path $DllPath)) { return $false }
-
-    $h = [NativeMethods]::LoadLibrary($DllPath)
-    if ($h -eq [IntPtr]::Zero) { return $false }
-
-    $p = [NativeMethods]::GetProcAddress($h, "DllRegisterServer")
-    [NativeMethods]::FreeLibrary($h)
-
-    return ($p -ne [IntPtr]::Zero)
-}
-
-# -----------------------------
-# Start
-# -----------------------------
-Write-Header "Oracle Instant Client Installer"
-
-$SourceShare = Get-AvailableSource `
-    -EncodedPaths $EncodedShares `
-    -RequiredFolder $InstantClientDir
-
-$SourceOracle = Join-Path $SourceShare $InstantClientDir
-$SourceDll    = Join-Path $SourceShare "XceedZip.dll"
-
-# -----------------------------
-# Copy Oracle Instant Client
-# -----------------------------
-if (Test-Path $OracleDir) {
-    Write-Warn "Existing Oracle client found. Removing..."
-    Remove-Item $OracleDir -Recurse -Force
-}
-
-Write-Step "Copying Oracle Instant Client..."
-robocopy $SourceOracle $OracleDir /E /R:3 /W:5 /ETA
-if ($LASTEXITCODE -ge 8) {
-    throw "Oracle client copy failed (Robocopy exit code $LASTEXITCODE)"
-}
-Write-Success "Oracle Instant Client copied"
-
-# -----------------------------
-# Copy DLL
-# -----------------------------
-Write-Step "Copying XceedZip.dll..."
-Copy-Item $SourceDll $DestDll -Force
-Write-Success "XceedZip.dll copied"
-
-# -----------------------------
-# COM Registration
-# -----------------------------
-if (Test-ComDll $DestDll) {
-    Write-Step "Registering XceedZip.dll..."
-    & "$env:windir\System32\regsvr32.exe" /s "$DestDll"
-    Write-Success "XceedZip.dll registered"
-}
-else {
-    Write-Warn "XceedZip.dll is not COM-capable. Skipping registration."
-}
-
-# -----------------------------
-# Environment Variables
-# -----------------------------
-Write-Step "Configuring environment variables..."
-# Oracle variables
-[Environment]::SetEnvironmentVariable("ORACLE_HOME", $OracleDir, "Machine")
-[Environment]::SetEnvironmentVariable("TNS_ADMIN",  $OracleDir, "Machine")
-Add-ToSystemPath $OracleDir
 
 # -----------------------------
 # Verification
 # -----------------------------
-Write-Header "Validating System Configuration"
-Verify-SystemVariable "ORACLE_HOME" $OracleDir
-Verify-SystemVariable "TNS_ADMIN"  $OracleDir
-Verify-SystemPath $OracleDir
+function Verify-FontInstalled {
+    param([string]$FontName)
 
+    $fileExists = Test-Path (Join-Path $FontDir $FontName)
 
-# -----------------------------
-# Font Installation (Optional)
-# -----------------------------
-$installFonts = Read-Host "Do you want to install ERP fonts? (Y/N)"
-if ($installFonts.Trim().ToUpper() -eq "Y") {
-    try {
-        Write-Step "Installing fonts..."
-        $fontScript = "$env:TEMP\font_install.ps1"
-        Invoke-WebRequest `
-            -Uri "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/ERP-Automate/font_install.ps1" `
-            -OutFile $fontScript
-        . $fontScript
-        Write-Success "Fonts installed"
+    $reg = Get-ItemProperty $RegPath -ErrorAction SilentlyContinue
+    $regExists = $false
+    foreach ($p in $reg.PSObject.Properties) {
+        if ($p.Value -eq $FontName) {
+            $regExists = $true
+            break
+        }
     }
-    catch {
-        Write-Warn "Font installation failed: $_"
-    }
+
+    return ($fileExists -and $regExists)
 }
 
 # -----------------------------
-# Done
+# Sources
 # -----------------------------
-Write-Host ""
-Write-Success "Installation completed successfully."
-Write-Warn "Log off or restart required for PATH changes to apply."
+$NetworkSources = @(
+    "\\192.168.18.201\it\ERP\font",
+    "\\192.168.19.44\it\FONTS\ERP"
+)
+
+$GitHubSource = @{
+    Owner  = "rhshourav"
+    Repo   = "ideal-fishstick"
+    Folder = "erp_font"
+}
+
+# -----------------------------
+# Fetch Fonts
+# -----------------------------
+Write-Header "Fetching Fonts"
+$Fetched = $false
+
+foreach ($src in $NetworkSources) {
+
+    Write-Step "Trying network source: $src"
+
+    if (-not (Test-Path $src)) {
+        Write-Warn "Source not accessible"
+        continue
+    }
+
+    $Files = Get-ChildItem $src -File |
+             Where-Object { $_.Extension -match '\.(ttf|ttc|fon)$' }
+
+    if ($Files.Count -eq 0) {
+        Write-Warn "No font files found"
+        continue
+    }
+
+    $total = $Files.Count
+    $i = 0
+
+    foreach ($f in $Files) {
+        $i++
+        Write-Progress `
+            -Activity "Copying fonts from network" `
+            -Status "$($f.Name) ($i/$total)" `
+            -PercentComplete (($i/$total)*100)
+
+        Copy-Item $f.FullName (Join-Path $TempDir $f.Name) -Force
+    }
+
+    Write-Progress -Activity "Copying fonts from network" -Completed
+    Write-Success "Fonts copied from network"
+    $Fetched = $true
+    break
+}
+
+# -----------------------------
+# GitHub Fallback
+# -----------------------------
+if (-not $Fetched) {
+
+    Write-Warn "Network failed. Falling back to GitHub..."
+
+    $api = "https://api.github.com/repos/$($GitHubSource.Owner)/$($GitHubSource.Repo)/contents/$($GitHubSource.Folder)"
+    $files = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent" = "PowerShell" }
+
+    $FontFiles = $files | Where-Object { $_.name -match '\.(ttf|ttc|fon)$' }
+
+    if ($FontFiles.Count -eq 0) {
+        throw "No fonts found in GitHub repository"
+    }
+
+    $total = $FontFiles.Count
+    $i = 0
+
+    foreach ($f in $FontFiles) {
+        $i++
+        Write-Progress `
+            -Activity "Downloading fonts from GitHub" `
+            -Status "$($f.name) ($i/$total)" `
+            -PercentComplete (($i/$total)*100)
+
+        Invoke-WebRequest $f.download_url `
+            -OutFile (Join-Path $TempDir $f.name) `
+            -ErrorAction Stop
+    }
+
+    Write-Progress -Activity "Downloading fonts from GitHub" -Completed
+    Write-Success "Fonts downloaded from GitHub"
+}
+
+# -----------------------------
+# Install Fonts
+# -----------------------------
+Write-Header "Installing Fonts"
+
+$Fonts = Get-ChildItem -Path $TempDir -File |
+         Where-Object { $_.Extension -match '\.(ttf|ttc|fon)$' }
+
+if ($Fonts.Count -eq 0) {
+    throw "No fonts available to install."
+}
+
+$total = $Fonts.Count
+$idx = 0
+$Summary = @()
+
+foreach ($font in $Fonts) {
+
+    $idx++
+    Write-Progress `
+        -Activity "Installing ERP Fonts" `
+        -Status "$($font.Name) ($idx/$total)" `
+        -PercentComplete (($idx/$total)*100)
+
+    $dest = Join-Path $FontDir $font.Name
+    $status = "Unknown"
+
+    try {
+        if (-not (Test-Path $dest)) {
+            Copy-Item $font.FullName $dest -Force
+            Register-Font $dest | Out-Null
+            [FontAPI]::AddFontResource($dest) | Out-Null
+
+            [FontAPI]::SendMessageTimeout(
+                $HWND_BROADCAST,
+                $WM_FONTCHANGE,
+                [IntPtr]::Zero,
+                [IntPtr]::Zero,
+                $SMTO_ABORTIFHUNG,
+                100,
+                [ref]([IntPtr]::Zero)
+            ) | Out-Null
+        }
+
+        if (Verify-FontInstalled $font.Name) {
+            $status = "Installed & Verified"
+            Write-Success $font.Name
+        }
+        else {
+            $status = "Verification Failed"
+            Write-Warn "$($font.Name) verification failed"
+        }
+    }
+    catch {
+        $status = "Error"
+        Write-Warn "$($font.Name): $_"
+    }
+
+    $Summary += [PSCustomObject]@{
+        Font   = $font.Name
+        Status = $status
+    }
+}
+
+Write-Progress -Activity "Installing ERP Fonts" -Completed
+
+# -----------------------------
+# Cleanup
+# -----------------------------
+Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue
+
+# -----------------------------
+# Summary
+# -----------------------------
+Write-Header "Installation Summary"
+$Summary | Format-Table -AutoSize
+
+Write-Success "Font installation completed."
+Write-Warn "Restart ERP / Office apps if fonts were open."
