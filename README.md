@@ -23,7 +23,7 @@ irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/
 ---
 ([For more  information](https://github.com/rhshourav/Windows-Scripts/tree/main/Windows-Update))
 
-## 💠ERP AUTOMATE 
+## 💠 ERP AUTOMATE 
 ### One Line Code for ERP Setup
 1. Run `Powershell` as an administrator
 2. Run:
@@ -37,7 +37,7 @@ irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/
 irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/font_install.ps1 | iex
 ```
 
-## Install Microsoft Store On Windows 10 / 11 LTSC or LTSB edition
+## 🏪 Install Microsoft Store On Windows 10 / 11 LTSC or LTSB edition
 ### Try
 ```powershell
 irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/LTSC-ADD-MS_Store-2019/DL-RUN.ps1 | iex
