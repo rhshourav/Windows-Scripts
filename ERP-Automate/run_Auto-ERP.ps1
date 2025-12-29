@@ -9,7 +9,7 @@
 $ScriptName = "ERP Setup"
 $Author     = "rhshourav"
 $GitHub     = "https://github.com/rhshourav/Windows-Scripts"
-$Version    = "v1.0.8"
+$Version    = "v1.0.9t"
 
 Write-Host ""
 Write-Host ""
