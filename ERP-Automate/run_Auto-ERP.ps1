@@ -248,15 +248,19 @@ else {
 # Environment Variables
 # -----------------------------
 Write-Step "Configuring environment variables..."
-[Environment]::SetEnvironmentVariable("TNS_ADMIN", $OracleDir, "Machine")
+# Oracle variables
+[Environment]::SetEnvironmentVariable("ORACLE_HOME", $OracleDir, "Machine")
+[Environment]::SetEnvironmentVariable("TNS_ADMIN",  $OracleDir, "Machine")
 Add-ToSystemPath $OracleDir
 
 # -----------------------------
 # Verification
 # -----------------------------
 Write-Header "Validating System Configuration"
-Verify-SystemVariable "TNS_ADMIN" $OracleDir
+Verify-SystemVariable "ORACLE_HOME" $OracleDir
+Verify-SystemVariable "TNS_ADMIN"  $OracleDir
 Verify-SystemPath $OracleDir
+
 
 # -----------------------------
 # Font Installation (Optional)
