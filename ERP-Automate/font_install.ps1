@@ -1,6 +1,6 @@
 # =============================================================
 # ERP Font Installer (Network → GitHub Fallback)
-# Persistent Windows 10/11 Font Registration
+# Windows 10/11 Compatible – Verified Installation
 # =============================================================
 
 # -----------------------------
@@ -9,7 +9,7 @@
 $ScriptName = "ERP Font Install"
 $Author     = "rhshourav"
 $GitHub     = "https://github.com/rhshourav/Windows-Scripts"
-$Version    = "v1.1.0"
+$Version    = "v1.1.1"
 
 Write-Host ""
 Write-Host (" Script   : $ScriptName") -ForegroundColor White
@@ -38,7 +38,7 @@ if (-not ([Security.Principal.WindowsPrincipal] `
 }
 
 # -----------------------------
-# Directories
+# Paths
 # -----------------------------
 $TempDir = "$env:TEMP\erp_fonts"
 $FontDir = "$env:WINDIR\Fonts"
@@ -72,7 +72,7 @@ $WM_FONTCHANGE = 0x001D
 $SMTO_ABORTIFHUNG = 0x0002
 
 # -----------------------------
-# Font Registry Registration
+# Font Registration
 # -----------------------------
 function Register-Font {
     param([string]$FontPath)
@@ -100,17 +100,21 @@ function Register-Font {
 }
 
 # -----------------------------
-# Verification Function
+# Verification
 # -----------------------------
 function Verify-FontInstalled {
     param([string]$FontName)
 
     $fileExists = Test-Path (Join-Path $FontDir $FontName)
 
-    $regExists = Get-ItemProperty `
-        -Path $RegPath `
-        -ErrorAction SilentlyContinue |
-        Get-Member -Name ($FontName -replace '\.(ttf|ttc|fon)$','')
+    $reg = Get-ItemProperty $RegPath -ErrorAction SilentlyContinue
+    $regExists = $false
+    foreach ($p in $reg.PSObject.Properties) {
+        if ($p.Value -eq $FontName) {
+            $regExists = $true
+            break
+        }
+    }
 
     return ($fileExists -and $regExists)
 }
@@ -133,28 +137,76 @@ $GitHubSource = @{
 # Fetch Fonts
 # -----------------------------
 Write-Header "Fetching Fonts"
-
 $Fetched = $false
 
 foreach ($src in $NetworkSources) {
-    Write-Step "Trying $src"
-    if (Test-Path $src) {
-        Get-ChildItem $src -File |
-            Where-Object { $_.Extension -match '\.(ttf|ttc|fon)$' } |
-            Copy-Item -Destination $TempDir -Force
-        $Fetched = $true
-        Write-Success "Fonts copied from network"
-        break
+
+    Write-Step "Trying network source: $src"
+
+    if (-not (Test-Path $src)) {
+        Write-Warn "Source not accessible"
+        continue
     }
+
+    $Files = Get-ChildItem $src -File |
+             Where-Object { $_.Extension -match '\.(ttf|ttc|fon)$' }
+
+    if ($Files.Count -eq 0) {
+        Write-Warn "No font files found"
+        continue
+    }
+
+    $total = $Files.Count
+    $i = 0
+
+    foreach ($f in $Files) {
+        $i++
+        Write-Progress `
+            -Activity "Copying fonts from network" `
+            -Status "$($f.Name) ($i/$total)" `
+            -PercentComplete (($i/$total)*100)
+
+        Copy-Item $f.FullName (Join-Path $TempDir $f.Name) -Force
+    }
+
+    Write-Progress -Activity "Copying fonts from network" -Completed
+    Write-Success "Fonts copied from network"
+    $Fetched = $true
+    break
 }
 
+# -----------------------------
+# GitHub Fallback
+# -----------------------------
 if (-not $Fetched) {
-    Write-Warn "Network failed, using GitHub fallback"
+
+    Write-Warn "Network failed. Falling back to GitHub..."
+
     $api = "https://api.github.com/repos/$($GitHubSource.Owner)/$($GitHubSource.Repo)/contents/$($GitHubSource.Folder)"
-    $files = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent"="PowerShell" }
-    foreach ($f in $files | Where-Object { $_.name -match '\.(ttf|ttc|fon)$' }) {
-        Invoke-WebRequest $f.download_url -OutFile (Join-Path $TempDir $f.name)
+    $files = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent" = "PowerShell" }
+
+    $FontFiles = $files | Where-Object { $_.name -match '\.(ttf|ttc|fon)$' }
+
+    if ($FontFiles.Count -eq 0) {
+        throw "No fonts found in GitHub repository"
     }
+
+    $total = $FontFiles.Count
+    $i = 0
+
+    foreach ($f in $FontFiles) {
+        $i++
+        Write-Progress `
+            -Activity "Downloading fonts from GitHub" `
+            -Status "$($f.name) ($i/$total)" `
+            -PercentComplete (($i/$total)*100)
+
+        Invoke-WebRequest $f.download_url `
+            -OutFile (Join-Path $TempDir $f.name) `
+            -ErrorAction Stop
+    }
+
+    Write-Progress -Activity "Downloading fonts from GitHub" -Completed
     Write-Success "Fonts downloaded from GitHub"
 }
 
@@ -163,9 +215,24 @@ if (-not $Fetched) {
 # -----------------------------
 Write-Header "Installing Fonts"
 
+$Fonts = Get-ChildItem -Path $TempDir -File |
+         Where-Object { $_.Extension -match '\.(ttf|ttc|fon)$' }
+
+if ($Fonts.Count -eq 0) {
+    throw "No fonts available to install."
+}
+
+$total = $Fonts.Count
+$idx = 0
 $Summary = @()
 
-foreach ($font in Get-ChildItem $TempDir -Include *.ttf,*.ttc,*.fon) {
+foreach ($font in $Fonts) {
+
+    $idx++
+    Write-Progress `
+        -Activity "Installing ERP Fonts" `
+        -Status "$($font.Name) ($idx/$total)" `
+        -PercentComplete (($idx/$total)*100)
 
     $dest = Join-Path $FontDir $font.Name
     $status = "Unknown"
@@ -189,7 +256,7 @@ foreach ($font in Get-ChildItem $TempDir -Include *.ttf,*.ttc,*.fon) {
 
         if (Verify-FontInstalled $font.Name) {
             $status = "Installed & Verified"
-            Write-Success "$($font.Name)"
+            Write-Success $font.Name
         }
         else {
             $status = "Verification Failed"
@@ -207,6 +274,8 @@ foreach ($font in Get-ChildItem $TempDir -Include *.ttf,*.ttc,*.fon) {
     }
 }
 
+Write-Progress -Activity "Installing ERP Fonts" -Completed
+
 # -----------------------------
 # Cleanup
 # -----------------------------
@@ -219,4 +288,4 @@ Write-Header "Installation Summary"
 $Summary | Format-Table -AutoSize
 
 Write-Success "Font installation completed."
-Write-Warn "Restart ERP / Office apps if fonts were open during install."
+Write-Warn "Restart ERP / Office apps if fonts were open."
