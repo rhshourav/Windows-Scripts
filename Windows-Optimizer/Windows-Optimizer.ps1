@@ -1,141 +1,158 @@
-<#
-============================================
- Windows Optimizer
-============================================
- Version : 2.6.0
- Author  : Shourav
- GitHub  : https://github.com/rhshourav
-============================================
-#>
+# ============================================
+# Windows Optimizer
+# Version : 3.0.0
+# Author  : Shourav
+# GitHub  : https://github.com/rhshourav
+# ============================================
 
-# ==========================================================
-# Admin Check (NO INSTANT EXIT)
-# ==========================================================
-$IsAdmin = ([Security.Principal.WindowsPrincipal] `
-    [Security.Principal.WindowsIdentity]::GetCurrent()
-).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+# -------------------------
+# GLOBAL PATHS
+# -------------------------
+$BaseDir = "$env:TEMP\WindowsOptimizer"
+$LogDir  = "$BaseDir\logs"
+$SnapDir = "$BaseDir\snapshots"
+$LogFile = "$LogDir\optimizer.log"
 
-if (-not $IsAdmin) {
-    Clear-Host
-    Write-Host "Administrator privileges are REQUIRED." -ForegroundColor Red
-    Write-Host ""
-    Write-Host "The optimizer needs admin rights to:"
-    Write-Host "- Disable services"
-    Write-Host "- Modify system registry"
-    Write-Host "- Remove bloatware"
-    Write-Host ""
-    Write-Host "Press ENTER to relaunch as Administrator..."
-    Read-Host
+New-Item -ItemType Directory -Force -Path $LogDir, $SnapDir | Out-Null
 
-    Start-Process powershell `
-        "-NoProfile -ExecutionPolicy Bypass -Command `"irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Optimizer/Windows-Optimizer.ps1 | iex`"" `
-        -Verb RunAs
-
-    Write-Host "Relaunching... You may close this window."
-    Start-Sleep 3
-    exit
-}
-
-# ==========================================================
-# Paths
-# ==========================================================
-$Root    = Join-Path $env:TEMP "WindowsOptimizer"
-$LogDir  = Join-Path $Root "logs"
-$SnapDir = Join-Path $Root "snapshots"
-
-New-Item -ItemType Directory -Force -Path $Root,$LogDir,$SnapDir | Out-Null
-$LogFile = Join-Path $LogDir "optimizer.log"
-
-# ==========================================================
-# Logging
-# ==========================================================
+# -------------------------
+# LOGGING
+# -------------------------
 function Write-Log {
     param(
         [string]$Message,
-        [ValidateSet("INFO","ACTION","WARN","ERROR")] $Level="INFO"
+        [string]$Level = "INFO"
     )
-    $ts = Get-Date -Format "HH:mm:ss"
-    $line = "[$ts][$Level] $Message"
 
-    Add-Content $LogFile $line
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $line = "[$timestamp][$Level] $Message"
+    Add-Content -Path $LogFile -Value $line
 
     switch ($Level) {
         "INFO"   { Write-Host $line -ForegroundColor Cyan }
         "ACTION" { Write-Host $line -ForegroundColor Green }
         "WARN"   { Write-Host $line -ForegroundColor Yellow }
         "ERROR"  { Write-Host $line -ForegroundColor Red }
+        default  { Write-Host $line }
     }
 }
 
-# ==========================================================
-# Telemetry (Transparent)
-# ==========================================================
+# -------------------------
+# ADMIN CHECK
+# -------------------------
+if (-not ([Security.Principal.WindowsPrincipal] `
+    [Security.Principal.WindowsIdentity]::GetCurrent()
+).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+
+    Write-Warning "Script is not running as administrator. Restarting as admin..."
+    $pwsh = (Get-Process -Id $PID).Path
+    Start-Process $pwsh "-NoProfile -File `"$PSCommandPath`"" -Verb RunAs
+    Exit
+}
+
+Write-Log "Windows Optimizer started" "INFO"
+
+# -------------------------
+# SNAPSHOT
+# -------------------------
+function Save-Snapshot {
+    $file = "$SnapDir\snapshot-$(Get-Date -Format yyyyMMdd-HHmmss).txt"
+    Get-Service | Select Name, Status, StartType | Out-File $file
+    Write-Log "System snapshot saved: $file" "ACTION"
+}
+
+Save-Snapshot
+
+# -------------------------
+# TELEMETRY NOTICE
+# -------------------------
 function Show-TelemetryNotice {
     Write-Host ""
-    Write-Host "Telemetry is ENABLED by default." -ForegroundColor Cyan
-    Write-Host "Data collected:"
-    Write-Host "- Username"
-    Write-Host "- Computer name"
-    Write-Host "- Selected optimization profile"
+    Write-Host "Telemetry is ENABLED." -ForegroundColor Yellow
+    Write-Host "Collected: Username, Computer Name, Selected Profile." -ForegroundColor Yellow
+    Write-Host "Purpose: Usage analytics and script improvement." -ForegroundColor Yellow
     Write-Host ""
 }
 
-function Send-Telemetry {
-    param([string]$Profile)
-    Write-Log "Sending telemetry for profile: $Profile" "INFO"
-    try {
-        $body = @{
-            token = "shourav"
-            text  = "Windows Optimizer`nProfile: $Profile`nUser: $env:USERNAME`nPC: $env:COMPUTERNAME"
-        } | ConvertTo-Json
+Show-TelemetryNotice
 
-        Invoke-RestMethod `
-            -Uri "https://cryocore.rhshourav02.workers.dev/message" `
-            -Method POST `
-            -ContentType "application/json" `
-            -Body $body | Out-Null
-    } catch {
-        Write-Log "Telemetry failed to send" "WARN"
-    }
+# -------------------------
+# OPTIMIZATION PROFILES
+# -------------------------
+function Level1_Balanced {
+    Write-Log "Applying Level 1 - Balanced optimizations" "ACTION"
+    Set-ItemProperty `
+        -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" `
+        -Name "ShowSyncProviderNotifications" -Value 0 -Force
 }
 
-# ==========================================================
-# Snapshot
-# ==========================================================
-function Save-Snapshot {
-    $file = Join-Path $SnapDir "snapshot-$((Get-Date).ToString('yyyyMMdd-HHmmss')).txt"
-    Write-Log "Saving system snapshot..." "ACTION"
-    Get-Service | Select Name,Status,StartType | Out-File $file
-    Write-Log "Snapshot saved: $file" "INFO"
+function Level2_Performance {
+    Write-Log "Applying Level 2 - Performance optimizations" "ACTION"
+    Stop-Service "SysMain" -Force -ErrorAction SilentlyContinue
+    Set-Service "SysMain" -StartupType Disabled
 }
 
-# ==========================================================
-# Bloatware Removal
-# ==========================================================
+function Level3_Aggressive {
+    Write-Log "Applying Level 3 - Aggressive optimizations" "ACTION"
+    Stop-Service "DiagTrack" -Force -ErrorAction SilentlyContinue
+    Set-Service "DiagTrack" -StartupType Disabled
+}
+
+function Gaming_Profile {
+    Write-Log "Applying Gaming optimizations" "ACTION"
+    powercfg -setactive SCHEME_MIN
+}
+
+function Hardware_Aware {
+    Write-Log "Applying Hardware-Aware optimizations" "ACTION"
+    powercfg -setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX 100
+}
+
+# -------------------------
+# BLOATWARE REMOVAL
+# -------------------------
 function Remove-Bloatware {
-    Write-Log "Starting bloatware removal" "ACTION"
+    Write-Log "Removing optional Microsoft bloatware" "ACTION"
 
     $apps = @(
-        "Microsoft.Xbox*",
-        "Microsoft.GetHelp",
-        "Microsoft.Getstarted",
-        "Microsoft.People",
-        "Microsoft.MicrosoftSolitaireCollection",
+        "Microsoft.XboxApp",
+        "Microsoft.XboxGamingOverlay",
+        "Microsoft.ZuneMusic",
+        "Microsoft.ZuneVideo",
         "Microsoft.BingNews",
-        "Microsoft.BingWeather",
-        "Microsoft.WindowsFeedbackHub"
+        "Microsoft.GetHelp",
+        "Microsoft.MicrosoftSolitaireCollection"
     )
 
     foreach ($app in $apps) {
-        Write-Log "Removing package: $app" "ACTION"
         Get-AppxPackage -Name $app -AllUsers | Remove-AppxPackage -ErrorAction SilentlyContinue
+        Write-Log "Removed $app" "INFO"
     }
-
-    Write-Log "Bloatware removal completed" "INFO"
 }
 
-# ==========================================================
-# Optimization Profiles
-# ==========================================================
-function Level1-Balanced {
-    Write-Log "Applying Level 1 - Balanced" "ACTI
+# -------------------------
+# MENU
+# -------------------------
+Write-Host ""
+Write-Host "Select Optimization Profile:"
+Write-Host "1. Level 1 - Balanced"
+Write-Host "2. Level 2 - Performance"
+Write-Host "3. Level 3 - Aggressive"
+Write-Host "4. Gaming"
+Write-Host "5. Hardware-Aware"
+Write-Host "6. Remove Bloatware Only"
+Write-Host ""
+
+$choice = Read-Host "Enter choice"
+
+switch ($choice) {
+    "1" { Level1_Balanced }
+    "2" { Level2_Performance }
+    "3" { Level3_Aggressive }
+    "4" { Gaming_Profile }
+    "5" { Hardware_Aware }
+    "6" { Remove-Bloatware }
+    default { Write-Log "Invalid selection" "ERROR" }
+}
+
+Write-Log "Execution completed" "INFO"
