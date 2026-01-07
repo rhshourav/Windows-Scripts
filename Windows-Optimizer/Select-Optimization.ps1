@@ -9,7 +9,7 @@
     https://github.com/rhshoruav
 
 .VERSION
-    2.1.0
+    2.2.0
 #>
 
 # -------------------------------
@@ -47,7 +47,7 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 # -------------------------------
 # Metadata
 # -------------------------------
-$ScriptVersion = "2.1.0"
+$ScriptVersion = "2.2.0"
 $AuthorName    = "Shourav"
 $GitHubUser    = "rhshoruav"
 $ProjectName   = "Windows Optimizer"
@@ -112,9 +112,9 @@ Show-TelemetryNotice
 # -------------------------------
 Write-Host "Select Optimization Profile:"
 Write-Host ""
-Write-Host "1. Level 1 – Balanced"
-Write-Host "2. Level 2 – Performance"
-Write-Host "3. Level 3 – Aggressive"
+Write-Host "1. Level 1 - Balanced"
+Write-Host "2. Level 2 - Performance"
+Write-Host "3. Level 3 - Aggressive"
 Write-Host "4. Gaming"
 Write-Host "5. Hardware-Aware"
 Write-Host "6. Restore from Snapshot"
@@ -123,13 +123,34 @@ Write-Host ""
 $choice = Read-Host "Enter your choice"
 
 switch ($choice) {
-    "1" { Load-Profile "Level1-Balanced.ps1"; Send-Telemetry -ProfileName "Level 1 – Balanced" }
-    "2" { Load-Profile "Level2-Performance.ps1"; Send-Telemetry -ProfileName "Level 2 – Performance" }
-    "3" { Load-Profile "Level3-Aggressive.ps1"; Send-Telemetry -ProfileName "Level 3 – Aggressive" }
-    "4" { Load-Profile "Gaming.ps1"; Send-Telemetry -ProfileName "Gaming" }
-    "5" { Load-Profile "Hardware-Aware.ps1"; Send-Telemetry -ProfileName "Hardware-Aware" }
-    "6" { Load-CoreModule "Restore.ps1"; Restore-Snapshot }
-    default { Write-Host "Invalid selection." -ForegroundColor Yellow; Write-Log "Invalid menu selection: $choice" "WARN" }
+    "1" {
+        Load-Profile "Level1-Balanced.ps1"
+        Send-Telemetry -ProfileName "Level 1 - Balanced"
+    }
+    "2" {
+        Load-Profile "Level2-Performance.ps1"
+        Send-Telemetry -ProfileName "Level 2 - Performance"
+    }
+    "3" {
+        Load-Profile "Level3-Aggressive.ps1"
+        Send-Telemetry -ProfileName "Level 3 - Aggressive"
+    }
+    "4" {
+        Load-Profile "Gaming.ps1"
+        Send-Telemetry -ProfileName "Gaming"
+    }
+    "5" {
+        Load-Profile "Hardware-Aware.ps1"
+        Send-Telemetry -ProfileName "Hardware-Aware"
+    }
+    "6" {
+        Load-CoreModule "Restore.ps1"
+        Restore-Snapshot
+    }
+    default {
+        Write-Host "Invalid selection." -ForegroundColor Yellow
+        Write-Log "Invalid menu selection: $choice" "WARN"
+    }
 }
 
 Write-Log "Execution completed"
