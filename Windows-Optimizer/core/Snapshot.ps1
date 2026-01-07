@@ -6,30 +6,24 @@
     Shourav (rhshoruav)
 
 .VERSION
-    1.0.0
+    1.2.0
 #>
 
 # -------------------------------
 # Snapshot Folder
 # -------------------------------
-$SnapshotPath = "$PSScriptRoot\..\snapshots"
-if (-not (Test-Path $SnapshotPath)) { New-Item -ItemType Directory -Force -Path $SnapshotPath | Out-Null }
 
 function Save-Snapshot {
+    $snapFile = Join-Path $env:TEMP "WindowsOptimizer\snapshots\snapshot-$((Get-Date).ToString('yyyyMMdd-HHmmss')).txt"
     try {
-        $file = Join-Path $SnapshotPath ("snapshot_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".json")
-
-        $data = @{
-            Services   = Get-Service | Select Name, StartType, Status
-            PowerPlan  = (powercfg /getactivescheme | Out-String).Trim()
-            VisualFX   = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -ErrorAction SilentlyContinue
-        }
-
-        $data | ConvertTo-Json -Depth 4 | Set-Content $file
-        Write-Log "Snapshot saved: $file"
-    }
-    catch {
+        Get-Process | Out-File $snapFile
+        Write-Log "Snapshot saved: $snapFile"
+    } catch {
         Write-Log "Snapshot failed: $_" "ERROR"
-        throw
     }
+}
+
+function Restore-Snapshot {
+    Write-Host "Restoring snapshot is a placeholder (implement actual restore logic here)" -ForegroundColor Cyan
+    Write-Log "Restore-Snapshot called"
 }
