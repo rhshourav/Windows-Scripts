@@ -1,6 +1,6 @@
 # ============================================
 # Windows Optimizer
-# Version : 3.0.0
+# Version : 3.1.0
 # Author  : Shourav
 # GitHub  : https://github.com/rhshourav
 # ============================================
@@ -40,14 +40,40 @@ function Write-Log {
 # -------------------------
 # ADMIN CHECK
 # -------------------------
-if (-not ([Security.Principal.WindowsPrincipal] `
+# -------------------------
+# ADMIN CHECK (IRM | IEX SAFE)
+# -------------------------
+$IsAdmin = ([Security.Principal.WindowsPrincipal] `
     [Security.Principal.WindowsIdentity]::GetCurrent()
-).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
-    Write-Warning "Script is not running as administrator. Restarting as admin..."
-    $pwsh = (Get-Process -Id $PID).Path
-    Start-Process $pwsh "-NoProfile -File `"$PSCommandPath`"" -Verb RunAs
-    Exit
+if (-not $IsAdmin) {
+
+    Write-Host ""
+    Write-Host "Administrator privileges are required." -ForegroundColor Yellow
+    Write-Host "The script will now relaunch with elevation." -ForegroundColor Yellow
+    Write-Host ""
+
+    $TempDir = "$env:TEMP\WindowsOptimizer"
+    $ScriptPath = "$TempDir\Windows-Optimizer.ps1"
+    $ScriptUrl  = "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Optimizer/Windows-Optimizer.ps1"
+
+    New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
+
+    try {
+        Invoke-WebRequest -Uri $ScriptUrl -OutFile $ScriptPath -UseBasicParsing
+    }
+    catch {
+        Write-Host "Failed to download script. Aborting." -ForegroundColor Red
+        exit 1
+    }
+
+    Start-Process powershell `
+        -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`"" `
+        -Verb RunAs
+
+    Write-Host "Elevated instance launched. You may close this window." -ForegroundColor Green
+    exit
 }
 
 Write-Log "Windows Optimizer started" "INFO"
