@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Windows Optimizer Orchestrator (Lazy-Loading, IRM/IEX ready)
+    Windows Optimizer Orchestrator (Lazy-Loading, IRM/IEX ready, Auto-Elevate)
 
 .AUTHOR
     Shourav (rhshoruav)
@@ -13,29 +13,33 @@
 #>
 
 # -------------------------------
-# Metadata
+# Auto-elevate to Administrator
 # -------------------------------
-$ScriptVersion = "2.0.0"
-$AuthorName    = "Shourav"
-$GitHubUser    = "rhshoruav"
-$ProjectName   = "Windows Optimizer"
+$ScriptRoot = Join-Path $env:TEMP "WindowsOptimizer"
+$ScriptFile = Join-Path $ScriptRoot "Select-Optimization.ps1"
 
-# -------------------------------
-# Admin Check
-# -------------------------------
-$IsAdmin = ([Security.Principal.WindowsPrincipal] `
-    [Security.Principal.WindowsIdentity]::GetCurrent()
-).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
+        ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
 
-if (-not $IsAdmin) {
-    Write-Host "ERROR: This script must be run as Administrator." -ForegroundColor Red
-    Exit 1
+    Write-Host "Restarting script as Administrator..." -ForegroundColor Yellow
+    New-Item -ItemType Directory -Force -Path $ScriptRoot | Out-Null
+
+    # Save current script if running from IRM | IEX
+    if ($MyInvocation.ScriptName -eq "") {
+        Invoke-RestMethod "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Optimizer/Select-Optimization.ps1" -UseBasicParsing | Set-Content $ScriptFile
+    }
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "powershell.exe"
+    $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptFile`""
+    $psi.Verb = "runas"
+    try { [System.Diagnostics.Process]::Start($psi) | Out-Null } catch { Write-Host "Failed to elevate." -ForegroundColor Red }
+    Exit
 }
 
 # -------------------------------
-# Set up directories in TEMP
+# Directories
 # -------------------------------
-$ScriptRoot  = Join-Path $env:TEMP "WindowsOptimizer"
 $CoreDir     = Join-Path $ScriptRoot "core"
 $ProfilesDir = Join-Path $ScriptRoot "profiles"
 $LogsDir     = Join-Path $ScriptRoot "logs"
@@ -44,30 +48,12 @@ $SnapDir     = Join-Path $ScriptRoot "snapshots"
 New-Item -ItemType Directory -Force -Path $ScriptRoot,$CoreDir,$ProfilesDir,$LogsDir,$SnapDir | Out-Null
 
 # -------------------------------
-# Lazy-load core module function
+# Metadata
 # -------------------------------
-function Load-CoreModule {
-    param([string]$ModuleName)
-    $url = "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Optimizer/core/$ModuleName"
-    $file = Join-Path $CoreDir $ModuleName
-    if (-not (Test-Path $file)) {
-        Invoke-RestMethod $url -UseBasicParsing | Set-Content $file
-    }
-    . $file
-}
-
-# -------------------------------
-# Lazy-load selected profile
-# -------------------------------
-function Load-Profile {
-    param([string]$ProfileName)
-    $url  = "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Optimizer/profiles/$ProfileName"
-    $file = Join-Path $ProfilesDir $ProfileName
-    if (-not (Test-Path $file)) {
-        Invoke-RestMethod $url -UseBasicParsing | Set-Content $file
-    }
-    . $file
-}
+$ScriptVersion = "2.0.0"
+$AuthorName    = "Shourav"
+$GitHubUser    = "rhshoruav"
+$ProjectName   = "Windows Optimizer"
 
 # -------------------------------
 # Banner
@@ -86,21 +72,43 @@ function Show-Banner {
 Show-Banner
 
 # -------------------------------
+# Functions: Lazy-load Core Modules
+# -------------------------------
+function Load-CoreModule {
+    param([string]$ModuleName)
+    $url  = "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Optimizer/core/$ModuleName"
+    $file = Join-Path $CoreDir $ModuleName
+    if (-not (Test-Path $file)) {
+        Invoke-RestMethod $url -UseBasicParsing | Set-Content $file
+    }
+    . $file
+}
+
+function Load-Profile {
+    param([string]$ProfileName)
+    $url  = "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Optimizer/profiles/$ProfileName"
+    $file = Join-Path $ProfilesDir $ProfileName
+    if (-not (Test-Path $file)) {
+        Invoke-RestMethod $url -UseBasicParsing | Set-Content $file
+    }
+    . $file
+}
+
+# -------------------------------
 # Load Logger and Telemetry
 # -------------------------------
 Load-CoreModule "Logger.ps1"
 Load-CoreModule "Telemetry.ps1"
-
 Write-Log "Windows Optimizer started"
 
 # -------------------------------
-# Snapshot
+# Save Snapshot
 # -------------------------------
 Load-CoreModule "Snapshot.ps1"
 try { Save-Snapshot } catch { Write-Log "Snapshot failed: $_" "ERROR"; Exit 1 }
 
 # -------------------------------
-# Telemetry Notice
+# Show Telemetry Notice
 # -------------------------------
 Show-TelemetryNotice
 
