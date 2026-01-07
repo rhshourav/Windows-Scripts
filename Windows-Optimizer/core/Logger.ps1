@@ -6,24 +6,26 @@
     Shourav (rhshoruav)
 
 .VERSION
-    1.0.0
+    1.1.0
 #>
-
-# -------------------------------
-# Create Logs Folder
-# -------------------------------
-$Global:LogDir = "$PSScriptRoot\..\logs"
-if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Force -Path $LogDir | Out-Null }
-
-$Global:LogFile = Join-Path $LogDir ("log_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".txt")
 
 function Write-Log {
     param(
         [string]$Message,
-        [string]$Level = "INFO"
+        [ValidateSet("INFO","WARN","ERROR")] [string]$Level = "INFO"
     )
 
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $entry = "[{0}] [{1}] {2}" -f $timestamp, $Level, $Message
-    Add-Content -Path $Global:LogFile -Value $entry
+    $logLine = "[$timestamp][$Level] $Message"
+
+    # Output to console
+    switch ($Level) {
+        "INFO" { Write-Host $logLine -ForegroundColor Green }
+        "WARN" { Write-Host $logLine -ForegroundColor Yellow }
+        "ERROR" { Write-Host $logLine -ForegroundColor Red }
+    }
+
+    # Output to log file
+    $logFile = Join-Path $env:TEMP "WindowsOptimizer\logs\WindowsOptimizer.log"
+    Add-Content -Path $logFile -Value $logLine
 }
