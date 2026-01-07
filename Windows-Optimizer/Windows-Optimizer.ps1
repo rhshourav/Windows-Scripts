@@ -1,6 +1,6 @@
 # ============================================
 # Windows Optimizer
-# Version : 3.1.0
+# Version : 3.3.0
 # Author  : Shourav
 # GitHub  : https://github.com/rhshourav
 # ============================================
@@ -157,6 +157,50 @@ function Remove-Bloatware {
 }
 
 # -------------------------
+# RESTORE SNAPSHOT
+# -------------------------
+function Restore-Snapshot {
+    $snapFiles = Get-ChildItem -Path $SnapDir -Filter "snapshot-*.txt" | Sort-Object LastWriteTime -Descending
+
+    if (-not $snapFiles) {
+        Write-Log "No snapshot found to restore." "WARN"
+        return
+    }
+
+    Write-Host ""
+    Write-Host "Available snapshots:" -ForegroundColor Cyan
+    $i = 1
+    foreach ($f in $snapFiles) { Write-Host "$i. $($f.Name)"; $i++ }
+
+    $sel = Read-Host "Enter the number of the snapshot to restore"
+    if (-not [int]::TryParse($sel, [ref]$null) -or $sel -lt 1 -or $sel -gt $snapFiles.Count) {
+        Write-Log "Invalid snapshot selection." "ERROR"
+        return
+    }
+
+    $file = $snapFiles[$sel - 1].FullName
+    Write-Log "Restoring snapshot: $file" "ACTION"
+
+    # Read snapshot content
+    $snapshot = Import-Csv -Delimiter "`t" -Path $file -Header Name, Status, StartType
+
+    foreach ($svc in $snapshot) {
+        try {
+            Set-Service -Name $svc.Name -StartupType $svc.StartType -ErrorAction SilentlyContinue
+            if ($svc.Status -eq "Running") { Start-Service -Name $svc.Name -ErrorAction SilentlyContinue }
+            elseif ($svc.Status -eq "Stopped") { Stop-Service -Name $svc.Name -ErrorAction SilentlyContinue }
+            Write-Log "Restored service $($svc.Name) to $($svc.Status)/$($svc.StartType)" "INFO"
+        }
+        catch {
+            Write-Log "Failed to restore service $($svc.Name): $_" "WARN"
+        }
+    }
+
+    Write-Log "Snapshot restoration completed." "INFO"
+}
+
+
+# -------------------------
 # MENU
 # -------------------------
 Write-Host ""
@@ -167,6 +211,7 @@ Write-Host "3. Level 3 - Aggressive"
 Write-Host "4. Gaming"
 Write-Host "5. Hardware-Aware"
 Write-Host "6. Remove Bloatware Only"
+Write-Host "7. Restore from Snapshot"
 Write-Host ""
 
 $choice = Read-Host "Enter choice"
@@ -178,6 +223,7 @@ switch ($choice) {
     "4" { Gaming_Profile }
     "5" { Hardware_Aware }
     "6" { Remove-Bloatware }
+    "7" { Restore-Snapshot }
     default { Write-Log "Invalid selection" "ERROR" }
 }
 
