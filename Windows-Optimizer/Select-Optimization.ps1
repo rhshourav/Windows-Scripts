@@ -9,7 +9,7 @@
     https://github.com/rhshoruav
 
 .VERSION
-    2.2.0
+    2.3.0
 #>
 
 # -------------------------------
@@ -21,7 +21,8 @@ $ProfilesDir = Join-Path $ScriptRoot "profiles"
 $LogsDir     = Join-Path $ScriptRoot "logs"
 $SnapDir     = Join-Path $ScriptRoot "snapshots"
 
-New-Item -ItemType Directory -Force -Path $ScriptRoot,$CoreDir,$ProfilesDir,$LogsDir,$SnapDir | Out-Null
+# Ensure directories exist
+$null = New-Item -ItemType Directory -Force -Path $ScriptRoot,$CoreDir,$ProfilesDir,$LogsDir,$SnapDir
 
 $ScriptFile = Join-Path $ScriptRoot "Select-Optimization.ps1"
 
@@ -47,32 +48,43 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 # -------------------------------
 # Metadata
 # -------------------------------
-$ScriptVersion = "2.2.0"
+$ScriptVersion = "2.3.0"
 $AuthorName    = "Shourav"
 $GitHubUser    = "rhshoruav"
 $ProjectName   = "Windows Optimizer"
 
 # -------------------------------
-# Functions: Lazy-load Core Modules
+# Core Module Loader
 # -------------------------------
 function Load-CoreModule {
     param([string]$ModuleName)
-    $url  = "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Optimizer/core/$ModuleName"
     $file = Join-Path $CoreDir $ModuleName
     if (-not (Test-Path $file)) {
-        Invoke-RestMethod $url -UseBasicParsing | Set-Content $file
+        try {
+            Invoke-RestMethod "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Optimizer/core/$ModuleName" -UseBasicParsing | Set-Content $file
+        } catch {
+            Write-Host "Failed to download $ModuleName. Check network or GitHub URL." -ForegroundColor Red
+            Exit 1
+        }
     }
-    . $file
+    try { . $file } catch { Write-Host "Failed to load $ModuleName" -ForegroundColor Red; Exit 1 }
 }
 
+# -------------------------------
+# Profile Loader
+# -------------------------------
 function Load-Profile {
     param([string]$ProfileName)
-    $url  = "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Optimizer/profiles/$ProfileName"
     $file = Join-Path $ProfilesDir $ProfileName
     if (-not (Test-Path $file)) {
-        Invoke-RestMethod $url -UseBasicParsing | Set-Content $file
+        try {
+            Invoke-RestMethod "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Optimizer/profiles/$ProfileName" -UseBasicParsing | Set-Content $file
+        } catch {
+            Write-Host "Failed to download profile $ProfileName" -ForegroundColor Red
+            Exit 1
+        }
     }
-    . $file
+    try { . $file } catch { Write-Host "Failed to load profile $ProfileName" -ForegroundColor Red; Exit 1 }
 }
 
 # -------------------------------
@@ -92,14 +104,14 @@ function Show-Banner {
 Show-Banner
 
 # -------------------------------
-# Load Core Modules in Correct Order
+# Load Core Modules in Safe Order
 # -------------------------------
-Load-CoreModule "Logger.ps1"           # Needed immediately for Write-Log
-Load-CoreModule "Telemetry.ps1"        # Needed for Show-TelemetryNotice / Send-Telemetry
-Load-CoreModule "Snapshot.ps1"         # Needed for Save-Snapshot
+Load-CoreModule "Logger.ps1"           # Write-Log available
+Load-CoreModule "Telemetry.ps1"        # Show-TelemetryNotice / Send-Telemetry
+Load-CoreModule "Snapshot.ps1"         # Save-Snapshot / Restore-Snapshot
 
 # -------------------------------
-# Initial Logging and Snapshot
+# Initial Logging & Snapshot
 # -------------------------------
 Write-Log "Windows Optimizer started"
 
