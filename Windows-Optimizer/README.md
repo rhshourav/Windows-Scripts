@@ -1,128 +1,181 @@
-# Windows Optimizer
+# 🚀 Windows Optimizer
 
-A **production‑grade Windows 10/11 optimization framework** designed for performance, gaming latency reduction, and hardware‑aware tuning. The project is modular, reversible, and transparent by design.
-
-This repository is intended for power users, administrators, and engineers who want **deterministic performance improvements** without breaking Windows updateability or core system stability.
+A **single-file PowerShell Windows optimization utility** focused on **performance, transparency, reversibility, and user control**. This is **not** a shady debloater or placebo tweak pack. Every action is visible, logged, and (where possible) reversible.
 
 ---
 
-## Core Principles
+## ⚠️ DISCLAIMER (READ CAREFULLY)
 
-* Explicit execution (no background or hidden behavior)
-* Snapshot before modification
-* Reversible changes
-* Profile‑based optimization
-* Transparent, documented telemetry
+This tool **modifies Windows services, registry settings, power plans, and installed applications**.
 
----
+* 🧠 Intended for **advanced users**
+* 🛑 Not recommended for corporate or production machines without testing
+* 🔍 Always review logs and snapshots
+* ❗ You are fully responsible for the outcome
 
-## Optimization Profiles
-
-| Profile               | Purpose                                                     |
-| --------------------- | ----------------------------------------------------------- |
-| Level 1 – Balanced    | Safe performance improvements with minimal risk             |
-| Level 2 – Performance | Aggressive background reduction while maintaining stability |
-| Level 3 – Aggressive  | Maximum performance; reduced services and features          |
-| Gaming                | Latency‑focused tuning for gaming workloads                 |
-| Hardware‑Aware        | Dynamic tuning based on CPU, RAM, disk, and platform        |
+If you run scripts you don’t understand, **stop here**.
 
 ---
 
-## Telemetry (Enabled by Default)
+## ✨ FEATURES
 
-### Why telemetry exists
+### 🔐 Admin-Safe Execution
 
-Telemetry is used **only** to understand how the optimizer is used and to improve stability across different hardware configurations. It is **not required** for the tool to function.
+* Detects non-admin execution
+* Clearly explains **why elevation is required**
+* Relaunches cleanly (no crash, no instant close)
 
-### Telemetry status
+### 📜 Full Logging & Transparency
 
-* **Enabled by default**
-* **User is explicitly informed at runtime**
-* **Can be declined or disabled permanently**
+* Every action printed to screen
+* Persistent log file stored locally
+* Color-coded output for clarity
+* No silent changes
 
-The user is shown a clear notice before any data is transmitted.
+### 💾 Automatic System Snapshot
+
+* Captures key service states before changes
+* Stored locally for rollback or manual restore
+
+### ⚙️ Optimization Profiles
+
+| Profile                  | Purpose                      | Risk   |
+| ------------------------ | ---------------------------- | ------ |
+| 🟢 Level 1 – Balanced    | Minor UI + telemetry tuning  | Low    |
+| 🟡 Level 2 – Performance | Disables background services | Medium |
+| 🔴 Level 3 – Aggressive  | Maximum service reduction    | High   |
+| 🎮 Gaming                | High-performance power plan  | Medium |
+| 🧠 Hardware-Aware        | CPU-aware power tuning       | Low    |
+
+### 🧹 Optional Bloatware Removal
+
+Safely removes **non-essential Microsoft apps only**:
+
+* Xbox components
+* News / Weather
+* Feedback Hub
+* Solitaire Collection
+
+❌ **Never removed**:
+
+* Microsoft Store
+* Windows Update
+* Windows Defender
+* Core shell components
+
+### 📡 Telemetry (Transparent & Disclosed)
+
+Telemetry is **enabled by default** and clearly communicated to the user.
+
+Collected data:
+
+* 👤 Username
+* 💻 Computer name
+* ⚙️ Selected optimization profile
+
+Purpose:
+
+* 📊 Usage analytics
+* 🛠 Script improvement
+
+Telemetry failure **never breaks execution**.
 
 ---
 
-## Data Collected
+## 🧩 REQUIREMENTS
 
-Only the following **non‑sensitive metadata** is collected:
-
-* Username
-* Computer name
-* Domain or workgroup name
-* Local IPv4 address(es)
-* Selected optimization profile
-* Timestamp
-
-### Data NOT collected
-
-* Files or file contents
-* Installed applications
-* Running processes
-* Browsing or usage history
-* MAC addresses
-* External IP address
-* Hardware serial numbers
-* Credentials or secrets
-
-All telemetry payloads are human‑readable and visible in the source code.
+* Windows 10 / 11
+* PowerShell 5.1+
+* Administrator privileges
+* Internet access (only for telemetry and remote execution)
 
 ---
 
-## Telemetry Control
+## ▶️ INSTALL / RUN
 
-At first execution, the user is informed that telemetry is enabled and given the option to:
+### ⚡ One-Line Execution (Recommended)
 
-* Continue with telemetry enabled
-* Disable telemetry permanently
-
-Disabling telemetry does **not** affect optimization functionality.
-
-Telemetry preference is stored locally per user.
-
----
-
-## Reversibility
-
-Before any optimization profile is applied:
-
-* A system snapshot is taken
-* Service states, power plan, and key settings are recorded
-
-Users can restore a previous snapshot at any time using the selector menu.
-
----
-
-## Repository Structure
-
+```powershell
+irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Optimizer/Windows-Optimizer.ps1 | iex
 ```
-Windows-Optimizer/
-│
-├── core/
-│   ├── Logger.ps1
-│   ├── Snapshot.ps1
-│   ├── Restore.ps1
-│   ├── HardwareDetect.ps1
-│   └── Telemetry.ps1
-│
-├── profiles/
-│   ├── Level1-Balanced.ps1
-│   ├── Level2-Performance.ps1
-│   ├── Level3-Aggressive.ps1
-│   ├── Gaming.ps1
-│   └── Hardware-Aware.ps1
-│
-├── Select-Optimization.ps1
-├── README.md
-└── LICENSE
+
+### 📦 Manual Execution
+
+1. Download `Windows-Optimizer.ps1`
+2. Open PowerShell **as Administrator**
+3. Run:
+
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process
+.\\Windows-Optimizer.ps1
 ```
 
 ---
 
-## Disclaimer
+## 📁 RUNTIME FILE STRUCTURE
 
-This project makes system‑level changes. While care is taken to preserve stability and reversibility, **use at your own risk**. Review scripts before execution.
+Automatically created under `%TEMP%`:
+
+```
+WindowsOptimizer/
+├── logs/
+│   └── optimizer.log
+├── snapshots/
+│   └── snapshot-YYYYMMDD-HHMMSS.txt
+```
 
 ---
 
+## 🧾 LOGGING DETAILS
+
+* 🖥 Console output is color-coded
+* 🗂 Full persistent log stored locally
+* ❌ Errors are non-fatal unless critical
+
+Log levels:
+
+* INFO
+* ACTION
+* WARN
+* ERROR
+
+---
+
+## 🚫 WHAT THIS TOOL IS NOT
+
+* ❌ A fake “FPS booster”
+* ❌ A registry cleaner
+* ❌ A miracle performance button
+* ❌ Safe for beginners
+
+Expect **measured, real improvements**, not magic.
+
+---
+
+## 🛣 ROADMAP
+
+* 🔍 Dry-run / WhatIf mode
+* 🧬 Windows build detection
+* ♻️ Automated restore from snapshot
+* 🏭 OEM bloatware detection
+* 🤫 Silent / unattended mode
+
+---
+
+## 👤 AUTHOR
+
+**Shourav**
+Cyber Security Engineer
+GitHub: [https://github.com/rhshourav](https://github.com/rhshourav)
+
+---
+
+## 🧨 FINAL WARNING
+
+You are responsible for the system you run this on.
+
+📖 Read the code.
+🧠 Understand the changes.
+📂 Check the logs.
+
+If that mindset makes you uncomfortable — **do not use this tool**.
