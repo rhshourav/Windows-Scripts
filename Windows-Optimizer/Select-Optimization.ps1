@@ -9,26 +9,33 @@
     https://github.com/rhshoruav
 
 .VERSION
-    2.0.0
+    2.1.0
 #>
+
+# -------------------------------
+# Directories
+# -------------------------------
+$ScriptRoot  = Join-Path $env:TEMP "WindowsOptimizer"
+$CoreDir     = Join-Path $ScriptRoot "core"
+$ProfilesDir = Join-Path $ScriptRoot "profiles"
+$LogsDir     = Join-Path $ScriptRoot "logs"
+$SnapDir     = Join-Path $ScriptRoot "snapshots"
+
+New-Item -ItemType Directory -Force -Path $ScriptRoot,$CoreDir,$ProfilesDir,$LogsDir,$SnapDir | Out-Null
+
+$ScriptFile = Join-Path $ScriptRoot "Select-Optimization.ps1"
 
 # -------------------------------
 # Auto-elevate to Administrator
 # -------------------------------
-$ScriptRoot = Join-Path $env:TEMP "WindowsOptimizer"
-$ScriptFile = Join-Path $ScriptRoot "Select-Optimization.ps1"
-
 if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
         ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
 
     Write-Host "Restarting script as Administrator..." -ForegroundColor Yellow
-    New-Item -ItemType Directory -Force -Path $ScriptRoot | Out-Null
-
-    # Save current script if running from IRM | IEX
     if ($MyInvocation.ScriptName -eq "") {
+        # Running via IRM/IEX: download self
         Invoke-RestMethod "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Optimizer/Select-Optimization.ps1" -UseBasicParsing | Set-Content $ScriptFile
     }
-
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = "powershell.exe"
     $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptFile`""
@@ -38,38 +45,12 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 }
 
 # -------------------------------
-# Directories
-# -------------------------------
-$CoreDir     = Join-Path $ScriptRoot "core"
-$ProfilesDir = Join-Path $ScriptRoot "profiles"
-$LogsDir     = Join-Path $ScriptRoot "logs"
-$SnapDir     = Join-Path $ScriptRoot "snapshots"
-
-New-Item -ItemType Directory -Force -Path $ScriptRoot,$CoreDir,$ProfilesDir,$LogsDir,$SnapDir | Out-Null
-
-# -------------------------------
 # Metadata
 # -------------------------------
-$ScriptVersion = "2.0.0"
+$ScriptVersion = "2.1.0"
 $AuthorName    = "Shourav"
 $GitHubUser    = "rhshoruav"
 $ProjectName   = "Windows Optimizer"
-
-# -------------------------------
-# Banner
-# -------------------------------
-function Show-Banner {
-    Clear-Host
-    Write-Host "============================================"
-    Write-Host " $ProjectName"
-    Write-Host "============================================"
-    Write-Host " Version : $ScriptVersion"
-    Write-Host " Author  : $AuthorName"
-    Write-Host " GitHub  : https://github.com/$GitHubUser"
-    Write-Host "============================================"
-    Write-Host ""
-}
-Show-Banner
 
 # -------------------------------
 # Functions: Lazy-load Core Modules
@@ -95,21 +76,35 @@ function Load-Profile {
 }
 
 # -------------------------------
-# Load Logger and Telemetry
+# Banner
 # -------------------------------
-Load-CoreModule "Logger.ps1"
-Load-CoreModule "Telemetry.ps1"
+function Show-Banner {
+    Clear-Host
+    Write-Host "============================================"
+    Write-Host " $ProjectName"
+    Write-Host "============================================"
+    Write-Host " Version : $ScriptVersion"
+    Write-Host " Author  : $AuthorName"
+    Write-Host " GitHub  : https://github.com/$GitHubUser"
+    Write-Host "============================================"
+    Write-Host ""
+}
+Show-Banner
+
+# -------------------------------
+# Load Core Modules in Correct Order
+# -------------------------------
+Load-CoreModule "Logger.ps1"           # Needed immediately for Write-Log
+Load-CoreModule "Telemetry.ps1"        # Needed for Show-TelemetryNotice / Send-Telemetry
+Load-CoreModule "Snapshot.ps1"         # Needed for Save-Snapshot
+
+# -------------------------------
+# Initial Logging and Snapshot
+# -------------------------------
 Write-Log "Windows Optimizer started"
 
-# -------------------------------
-# Save Snapshot
-# -------------------------------
-Load-CoreModule "Snapshot.ps1"
 try { Save-Snapshot } catch { Write-Log "Snapshot failed: $_" "ERROR"; Exit 1 }
 
-# -------------------------------
-# Show Telemetry Notice
-# -------------------------------
 Show-TelemetryNotice
 
 # -------------------------------
