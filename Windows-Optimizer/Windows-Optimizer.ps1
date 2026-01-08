@@ -1,9 +1,30 @@
 <#
 Author: rhshourav
-Version: 7.0.b
+Version: 9.0.b
 GitHub: https://github.com/rhshourav
 Notes: Requires Administrator. Tested for PowerShell 5.1 and PowerShell 7.x compatibility.
 #>
+# ===============================
+# Global Paths (Documents-based)
+# ===============================
+$BaseDir = Join-Path ([Environment]::GetFolderPath("MyDocuments")) "WindowsOptimizer"
+$LogDir  = Join-Path $BaseDir "Logs"
+$BenchDir = Join-Path $BaseDir "Benchmarks"
+
+foreach ($dir in @($BaseDir, $LogDir, $BenchDir)) {
+    if (-not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+}
+# ---- Hard validation (FAIL FAST) ----
+if (-not (Test-Path $BenchDir)) {
+    throw "Benchmark directory missing. Initialization failed."
+}
+$Global:LogFile = Join-Path $LogDir ("WinOpt_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+$Global:CompareFile = Join-Path $BenchDir "Benchmark_Comparison.txt"
+
+Start-Transcript -Path $Global:LogFile | Out-Null
+
 
 #region Utilities & Checks
 function Check-Admin {
@@ -19,6 +40,7 @@ function Write-Succ { param($Msg) Write-Host "[OK] $Msg" -ForegroundColor Green 
 function Write-Warn { param($Msg) Write-Host "[! ] $Msg" -ForegroundColor Yellow }
 function Write-Err  { param($Msg) Write-Host "[ERR] $Msg" -ForegroundColor Red }
 #endregion
+
 
 #region Backup & Restore
 function Create-RestorePoint {
@@ -84,34 +106,105 @@ function Rollback-ToRestorePoint {
     }
 }
 #endregion
+#region compare Banchmark
+function Compare-Benchmark {
+    param ($Current)
 
-#region Benchmarks
-function Run-Benchmark {
-    Write-Info 'Running Windows Experience Index (WinSAT formal). This can take several minutes...'
-    try {
-        if (Get-Command winsat -ErrorAction SilentlyContinue) {
-            winsat formal | Out-Null
-            $score = Get-WmiObject -Class Win32_WinSAT -ErrorAction SilentlyContinue
-            if ($score) {
-                Write-Host "Benchmark results (higher = better):"
-                Write-Host "  CPU:    $($score.CPUScore)"
-                Write-Host "  Memory: $($score.MemoryScore)"
-                Write-Host "  Graphics (DX9): $($score.GraphicsScore)"
-                Write-Host "  D3D:    $($score.D3DScore)"
-                Write-Host "  Disk:   $($score.DiskScore)"
-                $logFile = "$env:TEMP\WinOpt_Benchmark_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
-                $score | Select CPUScore,MemoryScore,GraphicsScore,D3DScore,DiskScore | Export-Csv -Path $logFile -NoTypeInformation
-                Write-Succ "Benchmark complete. Results saved to $logFile"
-            } else {
-                Write-Warn "WinSAT ran but no Win32_WinSAT object found."
-            }
-        } else {
-            Write-Warn "winsat command not found on this system."
-        }
-    } catch {
-        Write-Err "Benchmark failed: $_"
+    $history = Get-ChildItem $BenchDir -Filter "Benchmark_*.json" -ErrorAction SilentlyContinue
+
+    if ($history.Count -eq 0) {
+        $Current | ConvertTo-Json | Out-File "$BenchDir\Benchmark_Last.json"
+        Write-Host "[INFO] No previous benchmark found. Baseline saved." -ForegroundColor Yellow
+        return
+    }
+
+    $previous = Get-Content "$BenchDir\Benchmark_Last.json" | ConvertFrom-Json
+
+    Write-Host "`n[COMPARISON] Previous vs Current:" -ForegroundColor Cyan
+
+    $comparison = @(
+    [PSCustomObject]@{ Metric="CPU";      Before=$previous.CPU;      After=$Current.CPU }
+    [PSCustomObject]@{ Metric="Memory";   Before=$previous.Memory;   After=$Current.Memory }
+    [PSCustomObject]@{ Metric="Graphics"; Before=$previous.Graphics; After=$Current.Graphics }
+    [PSCustomObject]@{ Metric="Gaming";   Before=$previous.Gaming;   After=$Current.Gaming }
+    [PSCustomObject]@{
+        Metric="Disk"
+        Before="$($previous.Disk) ($($previous.DiskType))"
+        After="$($Current.Disk) ($($Current.DiskType))"
+    }
+)
+
+$comparison | Format-Table -AutoSize
+$comparison | Out-File $Global:CompareFile -Append
+
+
+    $Current | ConvertTo-Json | Out-File "$BenchDir\Benchmark_Last.json"
+}
+
+#endregion
+#region WinSAT Score
+function Get-WinSATScore {
+    $xmlPath = Get-ChildItem "$env:WinDir\Performance\WinSAT\DataStore" `
+        -Filter "*Formal*.xml" |
+        Sort-Object LastWriteTime |
+        Select-Object -Last 1
+
+    if (-not $xmlPath) {
+        throw "WinSAT XML not found"
+    }
+
+    [xml]$xml = Get-Content $xmlPath.FullName
+
+    return [PSCustomObject]@{
+        CPU      = [math]::Round($xml.WinSAT.WinSPR.CPUScore, 2)
+        Memory   = [math]::Round($xml.WinSAT.WinSPR.MemoryScore, 2)
+        Graphics = [math]::Round($xml.WinSAT.WinSPR.GraphicsScore, 2)
+        Gaming   = [math]::Round($xml.WinSAT.WinSPR.GamingScore, 2)
+        Disk     = [math]::Round($xml.WinSAT.WinSPR.DiskScore, 2)
+        Source   = $xmlPath.FullName
     }
 }
+
+#endregion
+#regin Show Benchmarks
+function Show-BenchmarkResults {
+    param (
+        [Parameter(Mandatory)]
+        $Result
+    )
+
+    Write-Host "`n[RESULT] Current System Benchmark" -ForegroundColor Green
+    Write-Host "Profile : $($Result.Profile)" -ForegroundColor Cyan
+    Write-Host "Disk    : $($Result.Disk) ($($Result.DiskType))" -ForegroundColor Cyan
+    Write-Host ""
+
+    $Result |
+        Select CPU, Memory, Graphics, Gaming, Disk |
+        Format-Table -AutoSize
+}
+
+#endregion
+#region Benchmarks
+function Run-Benchmark {
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $BenchFile = Join-Path $BenchDir "Benchmark_$timestamp.txt"
+
+    Write-Host "`n[ACTION] Running Windows System Assessment (WinSAT)" -ForegroundColor Cyan
+    Write-Host "[INFO] Output file: $BenchFile" -ForegroundColor DarkGray
+    Write-Host "[ACTION] This may take several minutes..." -ForegroundColor Yellow
+
+    winsat formal | Tee-Object -FilePath $BenchFile
+
+    Write-Host "[SUCCESS] Benchmark completed." -ForegroundColor Green
+    Write-Host "[INFO] Raw output saved to:" -ForegroundColor Cyan
+    Write-Host " $BenchFile`n"
+
+    $current = Get-WinSATScore
+    $current | Add-Member Profile $Global:ActiveProfile -Force
+
+    Show-BenchmarkResults $current
+    Compare-Benchmark $current }
+
 #endregion
 
 #region Tweaks (each function prints status)
