@@ -1,170 +1,248 @@
-# 🚀 Windows Optimizer
+# 🚀 Windows Optimization Script (WinOpt)
 
-A **single-file PowerShell Windows optimization utility** focused on **performance, transparency, reversibility, and user control**. This is **not** a shady debloater or placebo tweak pack. Every action is visible, logged, and (where possible) reversible.
+**Version:** 7.0.b
+**Author:** rhshourav
+**GitHub:** [https://github.com/rhshourav](https://github.com/rhshourav)
 
----
+A **single-file, aggressive PowerShell Windows optimization framework** focused on **performance, visibility, and operator control**.
 
-## ⚠️ DISCLAIMER (READ CAREFULLY)
-
-This tool **modifies Windows services, registry settings, power plans, and installed applications**.
-
-* 🧠 Intended for **advanced users**
-* 🛑 Not recommended for corporate or production machines without testing
-* 🔍 Always review logs and snapshots
-* ❗ You are fully responsible for the outcome
-
-If you run scripts you don’t understand, **stop here**.
+This is **not** a placebo tweaker, “FPS booster,” or beginner-safe tool.
+It performs **real system changes**: services, policies, registry, scheduled tasks, and built-in applications.
 
 ---
 
-## ✨ FEATURES
+## ⚠️ DISCLAIMER (READ FIRST)
 
-### 🔐 Admin-Safe Execution
+This script **modifies core Windows behavior**.
 
-* Detects non-admin execution
-* Clearly explains **why elevation is required**
-* Relaunches cleanly (no crash, no instant close)
+* Intended for **advanced users only**
+* Not suitable for managed, enterprise, or production systems
+* Some actions are **partially irreversible** without OS reinstall
+* You are responsible for every change applied
 
-### 📜 Full Logging & Transparency
-
-* Every action printed to screen
-* Persistent log file stored locally
-* Color-coded output for clarity
-* No silent changes
-
-### 💾 Automatic System Snapshot
-
-* Captures key service states before changes
-* Stored locally for rollback or manual restore
-
-### ⚙️ Optimization Profiles
-
-| Profile                  | Purpose                      | Risk   |
-| ------------------------ | ---------------------------- | ------ |
-| 🟢 Level 1 – Balanced    | Minor UI + telemetry tuning  | Low    |
-| 🟡 Level 2 – Performance | Disables background services | Medium |
-| 🔴 Level 3 – Aggressive  | Maximum service reduction    | High   |
-| 🎮 Gaming                | High-performance power plan  | Medium |
-| 🧠 Hardware-Aware        | CPU-aware power tuning       | Low    |
-
-### 🧹 Optional Bloatware Removal
-
-Safely removes **non-essential Microsoft apps only**:
-
-* Xbox components
-* News / Weather
-* Feedback Hub
-* Solitaire Collection
-
-❌ **Never removed**:
-
-* Microsoft Store
-* Windows Update
-* Windows Defender
-* Core shell components
-
-### 📡 Telemetry (Transparent & Disclosed)
-
-Telemetry is **enabled by default** and clearly communicated to the user.
-
-Collected data:
-
-* 👤 Username
-* 💻 Computer name
-* ⚙️ Selected optimization profile
-
-Purpose:
-
-* 📊 Usage analytics
-* 🛠 Script improvement
-
-Telemetry failure **never breaks execution**.
+If you do not understand what Windows services, AppX provisioning, or system restore points are — **do not run Eternal Mode**.
 
 ---
 
-## 🧩 REQUIREMENTS
+## 🎯 DESIGN PRINCIPLES
 
-* Windows 10 / 11
-* PowerShell 5.1+
-* Administrator privileges
-* Internet access (only for telemetry and remote execution)
+* **No silent execution** — every action is printed
+* **No fake optimizations** — only real system changes
+* **No marketing lies** — limitations are disclosed
+* **Control over safety theater**
+
+This tool assumes competence, not consent dialogs.
 
 ---
 
-## ▶️ INSTALL / RUN
+## ✨ CORE FEATURES
 
-### ⚡ One-Line Execution (Recommended)
+### 🔐 Administrator Enforcement
 
-```powershell
-irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Windows-Optimizer/Windows-Optimizer.ps1 | iex
-```
+* Script **refuses to run** without admin privileges
+* Clear error message (no silent exit, no crash)
+* No auto-elevation tricks
 
-### 📦 Manual Execution
+---
 
-1. Download `Windows-Optimizer.ps1`
-2. Open PowerShell **as Administrator**
-3. Run:
+### 📜 Full Transparency & Logging
+
+* Every operation is printed to console
+* Color-coded output:
+
+  * INFO / ACTION
+  * WARNING
+  * ERROR
+* Full PowerShell transcript saved to `%TEMP%`
+
+No background execution. No hidden failures.
+
+---
+
+### 💾 Real System Restore Support (Non-Placebo)
+
+* Creates **actual Windows System Restore points**
+* Uses:
+
+  * `Win32_RestorePoint`
+  * `Win32_SystemRestore`
+* Rollback invokes **native Windows restore**
+* May trigger reboot (by design)
+
+Additionally:
+
+* Services are backed up to CSV
+* Scheduled tasks are exported as XML
+
+> Restore is **best-effort**. Some removed components cannot be fully reconstructed.
+
+---
+
+### 📊 Built-In Benchmarking (Real Metrics)
+
+* Uses `winsat formal`
+* Displays:
+
+  * CPU score
+  * Memory score
+  * Graphics score
+  * D3D score
+  * Disk score
+* Results saved to timestamped logs
+
+Designed for **before / after comparison**, not synthetic hype.
+
+---
+
+## ⚙️ OPTIMIZATION PROFILES
+
+### 🎮 Gaming Performance
+
+* Disables SysMain (Superfetch)
+* Enables Hardware GPU Scheduling
+* Reduces background memory pressure
+
+**Risk:** Medium
+
+---
+
+### 🖥 Low-End System Optimization
+
+* Disables Search indexing
+* Minimizes telemetry via policy
+* Stops low-priority background services
+
+**Risk:** Medium
+**Target:** HDD systems, low RAM machines
+
+---
+
+### 🧠 Developer / Workstation
+
+* Disables UI animations
+* Prioritizes responsiveness over visuals
+
+**Risk:** Low
+
+---
+
+### 🧹 Debloated Minimal OS
+
+* Removes most built-in AppX applications
+* Disables Cortana and web search integration
+
+**Risk:** High
+Microsoft Store **may** be impacted.
+
+---
+
+### ☢️ Custom Aggressive (All Tweaks)
+
+* Defender disabled
+* Windows Update disabled
+* Search disabled
+* AppX removal
+* SysMain disabled
+
+Requires **explicit confirmation**.
+
+**Risk:** Very High
+
+---
+
+### 🧨 Eternal Mode (Bare-Minimum Windows)
+
+Extreme configuration intended for:
+
+* Dedicated gaming installs
+* Lab systems
+* Virtual machines
+* Disposable or purpose-built OS installs
+
+Actions include:
+
+* Disabling Defender, Update, Search, Telemetry
+* Removing AppX packages
+* Disabling diagnostics, print, biometrics, Xbox, maps
+* Disabling UI effects
+* Aggressive service reduction
+
+⚠ **This mode can require OS reinstall to fully undo.**
+
+---
+
+## 🧪 WHAT THIS SCRIPT DOES NOT DO
+
+* ❌ No fake FPS counters
+* ❌ No registry “cleaning”
+* ❌ No telemetry collection
+* ❌ No internet communication
+* ❌ No background persistence
+
+Everything happens **locally**, **visibly**, and **on demand**.
+
+---
+
+## ▶️ HOW TO RUN
+
+### Local Execution (Recommended)
 
 ```powershell
 Set-ExecutionPolicy Bypass -Scope Process
-.\\Windows-Optimizer.ps1
+.\WinOpt.ps1
 ```
 
+Run **PowerShell as Administrator**.
+
 ---
 
-## 📁 RUNTIME FILE STRUCTURE
+### Remote Execution (Only if you trust the source)
 
-Automatically created under `%TEMP%`:
-
-```
-WindowsOptimizer/
-├── logs/
-│   └── optimizer.log
-├── snapshots/
-│   └── snapshot-YYYYMMDD-HHMMSS.txt
+```powershell
+iwr <raw-script-url> | iex
 ```
 
----
-
-## 🧾 LOGGING DETAILS
-
-* 🖥 Console output is color-coded
-* 🗂 Full persistent log stored locally
-* ❌ Errors are non-fatal unless critical
-
-Log levels:
-
-* INFO
-* ACTION
-* WARN
-* ERROR
+You are expected to **read the code first**.
 
 ---
 
-## 🚫 WHAT THIS TOOL IS NOT
+## 📁 FILES & LOGS
 
-* ❌ A fake “FPS booster”
-* ❌ A registry cleaner
-* ❌ A miracle performance button
-* ❌ Safe for beginners
+Stored in `%TEMP%`:
 
-Expect **measured, real improvements**, not magic.
+* `WinOpt_YYYYMMDD_HHMMSS.log` – Full transcript
+* `ServicesBackup_*.csv` – Service state snapshot
+* `TasksBackup_*` – Scheduled task XML backups
+* `WinOpt_Benchmark_*.log` – Benchmark results
 
 ---
 
-## 🛣 ROADMAP
+## 🔁 ROLLBACK PROCEDURE
 
-* 🔍 Dry-run / WhatIf mode
-* 🧬 Windows build detection
-* ♻️ Automated restore from snapshot
-* 🏭 OEM bloatware detection
-* 🤫 Silent / unattended mode
+1. Select **Rollback to Restore Point**
+2. Confirm with `YES`
+3. Windows System Restore takes over
+4. Reboot may occur automatically
+
+If Eternal Mode was used, rollback **may be incomplete**.
+
+---
+
+## 🛣 ROADMAP (REALISTIC)
+
+* Best-effort service/task restore engine
+* Hardware-aware suggestion engine
+* Dry-run (`WhatIf`) mode
+* Windows build detection
+* Optional module packaging
+
+No GUI planned. No beginner mode planned.
 
 ---
 
 ## 👤 AUTHOR
 
-**Shourav**
+**rhshourav**
 Cyber Security Engineer
 GitHub: [https://github.com/rhshourav](https://github.com/rhshourav)
 
@@ -172,10 +250,11 @@ GitHub: [https://github.com/rhshourav](https://github.com/rhshourav)
 
 ## 🧨 FINAL WARNING
 
-You are responsible for the system you run this on.
+This script **does exactly what it says**.
 
-📖 Read the code.
-🧠 Understand the changes.
-📂 Check the logs.
+* Read the code
+* Understand the consequences
+* Check the logs
+* Accept the risk
 
-If that mindset makes you uncomfortable — **do not use this tool**.
+If that mindset is uncomfortable — **do not use this tool**.
