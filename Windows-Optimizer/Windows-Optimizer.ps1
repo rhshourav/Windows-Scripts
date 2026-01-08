@@ -121,6 +121,51 @@ function Backup-ScheduledTasks {
     }
 }
 
+function Show-Progress {
+    param(
+        [string]$Activity,
+        [int]$Seconds = 10
+    )
+
+    for ($i = 0; $i -le 100; $i += (100 / $Seconds)) {
+        Write-Progress -Activity $Activity `
+                       -Status "$i% completed" `
+                       -PercentComplete $i
+        Start-Sleep -Seconds 1
+    }
+
+    Write-Progress -Activity $Activity -Completed
+}
+
+function Invoke-SystemRestoreWithProgress {
+    param(
+        [Parameter(Mandatory)]
+        [uint32]$SequenceNumber
+    )
+
+    Write-Info "Initializing System Restore engine..."
+    Start-Sleep 1
+
+    Write-Info "Submitting restore request to Windows..."
+    $result = Invoke-CimMethod `
+        -Namespace root/default `
+        -ClassName SystemRestore `
+        -MethodName Restore `
+        -Arguments @{ SequenceNumber = $SequenceNumber } `
+        -ErrorAction Stop
+
+    if ($result.ReturnValue -ne 0) {
+        throw "System Restore failed with code $($result.ReturnValue)"
+    }
+
+    Write-Succ "Restore request accepted by system."
+
+    # Fake-but-informative progress
+    Show-Progress -Activity "Preparing system restore (Windows internal)" -Seconds 15
+
+    Write-Warn "Restore is now controlled by Windows."
+    Write-Warn "A reboot may occur automatically."
+}
 
 function Get-RestorePointHistory {
 
@@ -197,8 +242,9 @@ function Rollback-ToRestorePoint {
         $rp = Select-RestorePoint
         if (-not $rp) { return }
 
-        Write-Warn "Selected restore point:"
+        Write-Warn "`nSelected Restore Point:"
         Write-Warn " $($rp.Description)"
+        Write-Warn " $($rp.Created)"
 
         $confirm = Read-Host "Type 'YES' to restore system"
         if ($confirm -ne 'YES') {
@@ -206,18 +252,42 @@ function Rollback-ToRestorePoint {
             return
         }
 
-        $result = Invoke-SystemRestore -SequenceNumber $rp.SequenceNumber
+        Invoke-SystemRestoreWithProgress -SequenceNumber $rp.SequenceNumber
 
-        if ($result.ReturnValue -eq 0) {
-            Write-Succ "System Restore initiated. Reboot will occur."
-        } else {
-            Write-Err "Restore failed with code: $($result.ReturnValue)"
-        }
+    Start-Sleep 2
+
+    if (Test-RestoreInProgress) {
+        Write-Info "System Restore operation is now active."
+        Write-Warn "Windows has taken control of the restore process."
     }
-    catch {
+
+    Write-Succ "Restore request successfully submitted."
+    Write-Warn "The system may reboot automatically."
+    Write-Warn "If it does not, please reboot manually to complete the restore."
+
+    } catch {
         Write-Err "Rollback failed: $($_.Exception.Message)"
     }
 }
+# ---- SYSTEM RESTORE IN-PROGRESS GUARD ----
+function Test-RestoreInProgress {
+    try {
+        Get-CimInstance -Namespace root/default `
+                        -ClassName SystemRestore `
+                        -ErrorAction Stop | Out-Null
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+if (Test-RestoreInProgress) {
+    Write-Warn "System Restore operation detected."
+    Write-Warn "System may be mid-restore or pending reboot."
+    Write-Warn "Windows Optimizer will not run during restore."
+    exit 1
+}
+
 
 function Enable-SystemRestore {
     try {
