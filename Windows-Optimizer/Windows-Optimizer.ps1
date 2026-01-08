@@ -59,15 +59,22 @@ function Write-Err  { param($Msg) Write-Host "[ERR] $Msg" -ForegroundColor Red }
 
 #region Backup & Restore
 function Create-RestorePoint {
-    Write-Info 'Creating system restore point...'
+    Write-Info "Creating system restore point..."
+
+    Enable-SystemRestore
+
     try {
-        $rpName = "WinOpt Restore - $(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss')"
-        Checkpoint-Computer -Description $rpName -RestorePointType 'MODIFY_SETTINGS' -ErrorAction Stop
-        Write-Succ "Restore point created: $rpName"
+        Checkpoint-Computer `
+            -Description "WinOpt Restore - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" `
+            -RestorePointType MODIFY_SETTINGS `
+            -ErrorAction Stop
+
+        Write-Succ "Restore point created successfully."
     } catch {
-        Write-Warn "Failed to create restore point: $_"
+        Write-Warn "Restore point creation failed: $_"
     }
 }
+
 
 function Backup-Services {
     Write-Info 'Backing up current services...'
@@ -115,25 +122,181 @@ function Backup-ScheduledTasks {
 }
 
 
-function Rollback-ToRestorePoint {
-    Write-Info 'Locating latest restore point...'
+function Get-RestorePointHistory {
+
     try {
-        $rp = Get-WmiObject -Class Win32_RestorePoint -ErrorAction SilentlyContinue |
-              Sort-Object SequenceNumber -Descending | Select-Object -First 1
-        if ($rp) {
-            Write-Warn "About to restore to: $($rp.Description) (Seq: $($rp.SequenceNumber)). This will initiate system restore and may reboot."
-            $confirm = Read-Host "Proceed with rollback? Type 'YES' to continue"
-            if ($confirm -ne 'YES') { Write-Info 'Rollback aborted by user.'; return }
-            $systemRestore = Get-WmiObject -Class Win32_SystemRestore
-            $res = $systemRestore.Restore($rp.SequenceNumber)
-            Write-Succ "Restore command issued. Return: $res. System will handle the actual restore process."
-        } else {
-            Write-Warn 'No restore point found to roll back to.'
+        # Primary (modern)
+        return Get-CimInstance `
+            -Namespace root/default `
+            -ClassName SystemRestore `
+            -ErrorAction Stop |
+        Sort-Object SequenceNumber -Descending |
+        Select-Object `
+            SequenceNumber,
+            Description,
+            @{Name='Created';Expression={
+                [Management.ManagementDateTimeConverter]::ToDateTime($_.CreationTime)
+            }}
+    }
+    catch {
+        try {
+            # Fallback for older systems
+            return Get-WmiObject Win32_RestorePoint |
+                Sort-Object SequenceNumber -Descending |
+                Select SequenceNumber, Description, CreationTime
         }
-    } catch {
-        Write-Err "Restore failed: $_"
+        catch {
+            Write-Err "System Restore is unavailable on this system."
+            return $null
+        }
     }
 }
+
+function Select-RestorePoint {
+    $points = Get-RestorePointHistory
+    if (-not $points -or $points.Count -eq 0) {
+        Write-Err "No restore points available."
+        return $null
+    }
+
+    Write-Host "`nAvailable Restore Points:" -ForegroundColor Cyan
+    for ($i = 0; $i -lt $points.Count; $i++) {
+        Write-Host "[$($i+1)] $($points[$i].Description)"
+    }
+
+    $choice = Read-Host "`nSelect restore point number"
+    if ($choice -match '^\d+$' -and
+        $choice -ge 1 -and
+        $choice -le $points.Count) {
+
+        return $points[$choice - 1]
+    }
+
+    Write-Warn "Invalid selection."
+    return $null
+}
+
+function Invoke-SystemRestore {
+    param(
+        [Parameter(Mandatory)]
+        [uint32]$SequenceNumber
+    )
+
+    Invoke-CimMethod `
+        -Namespace root/default `
+        -ClassName SystemRestore `
+        -MethodName Restore `
+        -Arguments @{ SequenceNumber = $SequenceNumber } `
+        -ErrorAction Stop
+}
+
+function Rollback-ToRestorePoint {
+    Write-Info "System Restore Manager"
+
+    try {
+        $rp = Select-RestorePoint
+        if (-not $rp) { return }
+
+        Write-Warn "Selected restore point:"
+        Write-Warn " $($rp.Description)"
+
+        $confirm = Read-Host "Type 'YES' to restore system"
+        if ($confirm -ne 'YES') {
+            Write-Info "Rollback aborted."
+            return
+        }
+
+        $result = Invoke-SystemRestore -SequenceNumber $rp.SequenceNumber
+
+        if ($result.ReturnValue -eq 0) {
+            Write-Succ "System Restore initiated. Reboot will occur."
+        } else {
+            Write-Err "Restore failed with code: $($result.ReturnValue)"
+        }
+    }
+    catch {
+        Write-Err "Rollback failed: $($_.Exception.Message)"
+    }
+}
+
+function Enable-SystemRestore {
+    try {
+        $cfg = Get-CimInstance -Namespace root/default `
+                               -ClassName SystemRestoreConfig `
+                               -ErrorAction Stop
+
+        if ($cfg.EnableStatus -ne 1) {
+            Write-Warn "System Restore is disabled. Enabling on C:\ ..."
+            Enable-ComputerRestore -Drive "C:\" -ErrorAction Stop
+            Write-Succ "System Restore enabled."
+        }
+    } catch {
+        Write-Warn "Unable to verify/enable System Restore: $_"
+    }
+}
+
+function Invoke-ProtectedAction {
+    param(
+        [Parameter(Mandatory)]
+        [scriptblock]$Action,
+        [string]$ProfileName = "Unknown"
+    )
+
+    Write-Info "Creating restore point for profile: $ProfileName"
+    Create-RestorePoint
+
+    & $Action
+}
+function Restore-Services {
+    param(
+        [Parameter(Mandatory)]
+        [string]$CsvFile
+    )
+
+    if (-not (Test-Path $CsvFile)) {
+        Write-Err "Service backup file not found."
+        return
+    }
+
+    $services = Import-Csv $CsvFile
+    foreach ($svc in $services) {
+        try {
+            Set-Service -Name $svc.Name -StartupType $svc.StartType -ErrorAction SilentlyContinue
+            if ($svc.Status -eq 'Running') {
+                Start-Service -Name $svc.Name -ErrorAction SilentlyContinue
+            }
+        } catch {
+            Write-Warn "Failed restoring service: $($svc.Name)"
+        }
+    }
+
+    Write-Succ "Service restore completed."
+}
+function Restore-ScheduledTasks {
+    param(
+        [Parameter(Mandatory)]
+        [string]$BackupPath
+    )
+
+    if (-not (Test-Path $BackupPath)) {
+        Write-Err "Scheduled task backup path not found."
+        return
+    }
+
+    Get-ChildItem $BackupPath -Filter *.xml -Recurse | ForEach-Object {
+        try {
+            Register-ScheduledTask `
+                -TaskName $_.BaseName `
+                -Xml (Get-Content $_.FullName -Raw) `
+                -Force
+        } catch {
+            Write-Warn "Failed restoring task: $($_.Name)"
+        }
+    }
+
+    Write-Succ "Scheduled task restore completed."
+}
+
 #endregion
 #region compare Banchmark
 function Compare-Benchmark {
@@ -409,40 +572,85 @@ while ($true) {
 
     switch ($choice) {
         '1' {
-            Create-RestorePoint; Backup-Services; Backup-ScheduledTasks
-            Optimize-Gaming
-        }
-        '2' {
-            Create-RestorePoint; Backup-Services; Backup-ScheduledTasks
-            Optimize-LowEnd
-        }
-        '3' {
-            Create-RestorePoint; Backup-Services; Backup-ScheduledTasks
-            Optimize-Developer
-        }
-        '4' {
-            Create-RestorePoint; Backup-Services; Backup-ScheduledTasks
-            Optimize-Minimal
-        }
-        '5' {
-            $yn = Read-Host "Apply all aggressive tweaks (DISABLE Defender, Update, Search, etc)? [Y/N]"
-            if ($yn.ToUpper() -eq 'Y') {
-                Create-RestorePoint; Backup-Services; Backup-ScheduledTasks
-                Disable-WindowsDefender
-                Disable-WindowsUpdate
-                Disable-SearchIndexing
-                Disable-CortanaWebSearch
-                Remove-BuiltInApps
-                try { Stop-Service -Name SysMain -Force -ErrorAction SilentlyContinue } catch {}
-                try { Set-Service -Name SysMain -StartupType Disabled -ErrorAction SilentlyContinue } catch {}
-                Write-Succ 'All aggressive changes applied.'
-            } else {
-                Write-Info 'Aborting aggressive changes.'
-            }
-        }
-        '6' {
-            Optimize-Eternal
-        }
+    $Global:ActiveProfile = "Gaming"
+    Invoke-ProtectedAction -ProfileName "Gaming" -Action {
+        Backup-Services
+        Backup-ScheduledTasks
+        Optimize-Gaming
+    }
+}
+
+'2' {
+    $Global:ActiveProfile = "Low-End"
+    Invoke-ProtectedAction -ProfileName "Low-End" -Action {
+        Backup-Services
+        Backup-ScheduledTasks
+        Optimize-LowEnd
+    }
+}
+
+'3' {
+    $Global:ActiveProfile = "Developer"
+    Invoke-ProtectedAction -ProfileName "Developer" -Action {
+        Backup-Services
+        Backup-ScheduledTasks
+        Optimize-Developer
+    }
+}
+
+'4' {
+    $Global:ActiveProfile = "Minimal"
+    Invoke-ProtectedAction -ProfileName "Minimal" -Action {
+        Backup-Services
+        Backup-ScheduledTasks
+        Optimize-Minimal
+    }
+}
+
+'5' {
+    $Global:ActiveProfile = "Aggressive"
+
+    $yn = Read-Host "Apply ALL aggressive tweaks (Defender, Update, Search, Apps)? [Y/N]"
+    if ($yn.ToUpper() -ne 'Y') {
+        Write-Info 'Aggressive mode aborted.'
+        break
+    }
+
+    Invoke-ProtectedAction -ProfileName "Aggressive" -Action {
+        Backup-Services
+        Backup-ScheduledTasks
+
+        Disable-WindowsDefender
+        Disable-WindowsUpdate
+        Disable-SearchIndexing
+        Disable-CortanaWebSearch
+        Remove-BuiltInApps
+
+        try {
+            Stop-Service -Name SysMain -Force -ErrorAction SilentlyContinue
+            Set-Service  -Name SysMain -StartupType Disabled -ErrorAction SilentlyContinue
+        } catch {}
+
+        Write-Succ 'All aggressive changes applied.'
+    }
+}
+
+'6' {
+    $Global:ActiveProfile = "Eternal"
+
+    $confirm = Read-Host "Type 'ETERNAL' to proceed (EXTREME mode)"
+    if ($confirm -ne 'ETERNAL') {
+        Write-Info 'Eternal mode aborted.'
+        break
+    }
+
+    Invoke-ProtectedAction -ProfileName "Eternal" -Action {
+        Backup-Services
+        Backup-ScheduledTasks
+        Optimize-Eternal
+    }
+}
+
         'B' {
             Run-Benchmark
         }
