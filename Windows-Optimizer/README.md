@@ -199,7 +199,7 @@ Run **PowerShell as Administrator**.
 ### Remote Execution (Only if you trust the source)
 
 ```powershell
-iwr <raw-script-url> | iex
+iwr https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/Windows-Optimizer.ps1 | iex
 ```
 
 You are expected to **read the code first**.
