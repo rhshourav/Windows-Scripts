@@ -7,23 +7,38 @@ Notes: Requires Administrator. Tested for PowerShell 5.1 and PowerShell 7.x comp
 # ===============================
 # Global Paths (Documents-based)
 # ===============================
-$BaseDir = Join-Path ([Environment]::GetFolderPath("MyDocuments")) "WindowsOptimizer"
-$LogDir  = Join-Path $BaseDir "Logs"
-$BenchDir = Join-Path $BaseDir "Benchmarks"
+$BaseDir   = Join-Path ([Environment]::GetFolderPath("MyDocuments")) "WindowsOptimizer"
+$LogDir    = Join-Path $BaseDir "Logs"
+$BenchDir  = Join-Path $BaseDir "Benchmarks"
+$BackupDir = Join-Path $BaseDir "Backups"
+$SvcBackupDir  = Join-Path $BackupDir "Services"
+$TaskBackupDir = Join-Path $BackupDir "ScheduledTasks"
 
-foreach ($dir in @($BaseDir, $LogDir, $BenchDir)) {
+# Create required directories
+foreach ($dir in @(
+    $BaseDir,
+    $LogDir,
+    $BenchDir,
+    $BackupDir,
+    $SvcBackupDir,
+    $TaskBackupDir
+)) {
     if (-not (Test-Path $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
 }
+
 # ---- Hard validation (FAIL FAST) ----
 if (-not (Test-Path $BenchDir)) {
     throw "Benchmark directory missing. Initialization failed."
 }
-$Global:LogFile = Join-Path $LogDir ("WinOpt_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+
+# Global files
+$Global:LogFile     = Join-Path $LogDir ("WinOpt_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
 $Global:CompareFile = Join-Path $BenchDir "Benchmark_Comparison.txt"
 
 Start-Transcript -Path $Global:LogFile | Out-Null
+
 
 
 #region Utilities & Checks
@@ -57,34 +72,48 @@ function Create-RestorePoint {
 function Backup-Services {
     Write-Info 'Backing up current services...'
     try {
-        $file = "$env:TEMP\ServicesBackup_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
-        Get-Service | Select Name, Status, StartType | Export-Csv -Path $file -NoTypeInformation -Force
+        $file = Join-Path $SvcBackupDir "Services_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+        Get-Service | Select Name, Status, StartType |
+            Export-Csv -Path $file -NoTypeInformation -Force
         Write-Succ "Services backed up to $file"
     } catch {
         Write-Warn "Failed to backup services: $_"
     }
 }
-
 function Backup-ScheduledTasks {
     Write-Info 'Backing up scheduled tasks...'
     try {
-        $backupPath = "$env:TEMP\TasksBackup_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+        $backupPath = Join-Path $TaskBackupDir (Get-Date -Format 'yyyyMMdd_HHmmss')
         New-Item -ItemType Directory -Path $backupPath -Force | Out-Null
+
         $tasks = Get-ScheduledTask -ErrorAction SilentlyContinue
         foreach ($task in $tasks) {
             try {
-                $xml = Export-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop
-                $taskName = ($task.TaskName -replace '[\\/:\*\?"<>|]','_')
+                $xml = Export-ScheduledTask -TaskName $task.TaskName `
+                                           -TaskPath $task.TaskPath `
+                                           -ErrorAction Stop
+
+                $taskName = ($task.TaskName -replace '[\\/:\*\?"<>|]', '_')
                 $path = Join-Path $backupPath ($task.TaskPath.TrimStart('\'))
-                if (!(Test-Path $path)) { New-Item -ItemType Directory -Path $path -Force | Out-Null }
-                Out-File -FilePath (Join-Path $path "$taskName.xml") -InputObject $xml -Encoding ASCII -Force
-            } catch { Write-Warn "Skipping task $($task.TaskName): $_" }
+
+                if (-not (Test-Path $path)) {
+                    New-Item -ItemType Directory -Path $path -Force | Out-Null
+                }
+
+                Out-File -FilePath (Join-Path $path "$taskName.xml") `
+                         -InputObject $xml `
+                         -Encoding UTF8 `
+                         -Force
+            } catch {
+                Write-Warn "Skipping task $($task.TaskName): $_"
+            }
         }
         Write-Succ "Scheduled tasks backed up to $backupPath"
     } catch {
         Write-Warn "Failed to backup tasks: $_"
     }
 }
+
 
 function Rollback-ToRestorePoint {
     Write-Info 'Locating latest restore point...'
@@ -337,8 +366,6 @@ function Optimize-Eternal {
 
 #region Main UI & Loop
 Check-Admin
-$transcriptFile = "$env:TEMP\WinOpt_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
-Start-Transcript -Path $transcriptFile | Out-Null
 
 Clear-Host
 Write-Host "=== Windows Optimization Script v7.0.b ===" -ForegroundColor Cyan
@@ -433,5 +460,5 @@ while ($true) {
 }
 
 Stop-Transcript
-Write-Host "Log saved to: $transcriptFile" -ForegroundColor Green
+Write-Host "Log saved to: $Global:LogFile" -ForegroundColor Green
 #endregion
