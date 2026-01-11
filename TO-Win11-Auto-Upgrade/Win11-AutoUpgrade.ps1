@@ -1,4 +1,25 @@
+# =========================================================
+# Windows 10 → Windows 11 Automated Upgrade Script
+#
+# Author  : Shourav
+# Role    : Cyber Security Engineer
+# GitHub  : https://github.com/rhshourav
+#
+# Purpose :
+# Fully automated in-place upgrade from Windows 10 to
+# Windows 11 with optional ISO download or manual ISO
+# selection, including unsupported hardware bypass.
+#
+# Warning :
+# This script bypasses Microsoft hardware requirements.
+# Use only on systems you control and understand.
+#
+# Tested On:
+# - Windows 10 x64
+# - PowerShell 5.1
+# =========================================================
 # Check for administrative privileges (requires admin):contentReference[oaicite:7]{index=7}
+
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "Error: This script must be run as administrator." -ForegroundColor Red
     exit 1
