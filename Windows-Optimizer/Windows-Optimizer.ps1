@@ -601,7 +601,7 @@ function Optimize-Eternal {
 Check-Admin
 
 Clear-Host
-Write-Host "=== Windows Optimization Script v7.0.b ===" -ForegroundColor Cyan
+Write-Host "=== Windows Optimization Script v9.0.b ===" -ForegroundColor Cyan
 Write-Host "Author: rhshourav    GitHub: https://github.com/rhshourav" -ForegroundColor Green
 
 while ($true) {
