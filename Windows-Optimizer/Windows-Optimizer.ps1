@@ -483,17 +483,17 @@ function Compare-Benchmark {
 #endregion
 #region WinSAT Score
 function Get-DiskType {
-    # Try modern Storage module first
     try {
         $pd = Get-PhysicalDisk -ErrorAction Stop
         if ($pd) {
-            # If multiple disks, prefer system disk by simple heuristic (MediaType first)
             $media = ($pd | Select-Object -First 1).MediaType
-            return ($media -ne $null) ? $media.ToString() : 'Unknown'
+            if ($media -ne $null) {
+                return $media.ToString()
+            }
+            return 'Unknown'
         }
     } catch { }
 
-    # Fallback: WMI - look for 'SSD' or 'Solid State' in model or media type
     try {
         $drive = Get-CimInstance -ClassName Win32_DiskDrive -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($drive) {
