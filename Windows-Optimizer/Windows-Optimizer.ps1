@@ -292,23 +292,54 @@ function Rollback-ToRestorePoint {
     }
 }
 # ---- SYSTEM RESTORE IN-PROGRESS GUARD ----
-function Test-RestoreInProgress {
+function Test-PendingReboot {
+    <#
+    Returns $true if the system has a pending reboot according to common Windows indicators.
+    This is safer and practical as a guard for operations that shouldn't run while a reboot is pending.
+    #>
+
+    $keysToCheck = @(
+        # Component Based Servicing (CBS)
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
+        # Windows Update reboot flag
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired',
+        # Pending file rename operations (Session Manager)
+        'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
+    )
+
     try {
-        Get-CimInstance -Namespace root/default `
-                        -ClassName SystemRestore `
-                        -ErrorAction Stop | Out-Null
-        return $true
-    } catch {
+        foreach ($key in $keysToCheck) {
+            if (Test-Path $key) {
+                if ($key -like '*Session Manager') {
+                    $value = Get-ItemProperty -Path $key -Name 'PendingFileRenameOperations' -ErrorAction SilentlyContinue
+                    if ($value -and $value.PendingFileRenameOperations) { return $true }
+                } else {
+                    return $true
+                }
+            }
+        }
+
+        # Check Windows Update Agent pending state via WMI (fallback)
+        try {
+            $wu = Get-CimInstance -Namespace root\ccm\ClientSDK -ClassName CCM_SoftwareDistribution -ErrorAction SilentlyContinue
+            if ($wu) { return $true }
+        } catch { }
+
         return $false
+    } catch {
+        # On unexpected failure be conservative and report pending (so caller can decide)
+        return $true
     }
 }
 
-if (Test-RestoreInProgress) {
-    Write-Warn "System Restore operation detected."
-    Write-Warn "System may be mid-restore or pending reboot."
-    Write-Warn "Windows Optimizer will not run during restore."
+# Replace previous usage:
+# if (Test-RestoreInProgress) { ... }
+# with:
+if (Test-PendingReboot) {
+    Write-Warn "Reboot pending detected. Please reboot before running Windows Optimizer."
     exit 1
 }
+
 
 
 function Enable-SystemRestore {
@@ -543,26 +574,55 @@ function Run-Benchmark {
 #endregion
 
 #region Tweaks (each function prints status)
+function Get-DefenderTamperProtected {
+    # Basic heuristic: modern tamper protection blocks registry changes; check known value if available
+    try {
+        $key = 'HKLM:\SOFTWARE\Microsoft\Windows Defender\Features'
+        if (Test-Path $key) {
+            $val = Get-ItemProperty -Path $key -Name 'TamperProtection' -ErrorAction SilentlyContinue
+            if ($val -and $val.TamperProtection -ne $null) {
+                return ($val.TamperProtection -ne 0)
+            }
+        }
+    } catch { }
+
+    # If unknown, assume tamper-protected to avoid misleading changes
+    return $true
+}
 function Disable-WindowsDefender {
     param([Switch]$Force)
-    Write-Info 'Disabling Windows Defender components (policy & realtime)...'
+    Write-Info 'Attempting to disable Windows Defender components (policy & realtime)...'
+
+    if (Get-DefenderTamperProtected) {
+        Write-Warn "Tamper Protection or platform controls detected — cannot reliably disable Defender. Skipping destructive changes."
+        Write-Warn "If you intend to disable Defender, disable Tamper Protection in Windows Security first (not recommended for general use)."
+        return
+    }
+
     try {
-        Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+        Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop
         New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender' -Force | Out-Null
         New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender' -Name 'DisableAntiSpyware' -Value 1 -PropertyType DWord -Force | Out-Null
-        Write-Succ 'Windows Defender disabled via policy (if present).'
+        Write-Succ 'Windows Defender disabled via policy (if the platform allows it).'
     } catch {
-        Write-Warn "Unable to fully disable Defender with cmdlets: $_"
+        Write-Warn "Unable to fully disable Defender with cmdlets/registry: $_"
     }
 }
 
-function Disable-WindowsUpdate {
-    Write-Info 'Stopping and disabling Windows Update (wuauserv)...'
-    try { Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue } catch {}
-    try { Set-Service -Name wuauserv -StartupType Disabled -ErrorAction SilentlyContinue } catch {}
-    Write-Succ 'Windows Update service stopped/disabled (if present).'
-}
 
+function Disable-WindowsUpdate {
+    Write-Info 'Attempting to stop Windows Update (wuauserv) — using Manual startup to avoid system instability...'
+    try {
+        # Stop service for this session
+        Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
+        # Set to Manual rather than Disabled to avoid being forcibly re-enabled by other components
+        Set-Service -Name wuauserv -StartupType Manual -ErrorAction SilentlyContinue
+        Write-Warn 'Windows Update service stopped and set to Manual. Windows may re-enable update services (WaaSMedic, Update Medic) on reboot.'
+        Write-Warn 'Recommendation: prefer deferral policies (Group Policy / MDM) over disabling update services.'
+    } catch {
+        Write-Warn "Unable to change Windows Update service state: $_"
+    }
+}
 function Disable-SearchIndexing {
     Write-Info 'Stopping and disabling Windows Search (WSearch)...'
     try { Stop-Service -Name WSearch -Force -ErrorAction SilentlyContinue } catch {}
