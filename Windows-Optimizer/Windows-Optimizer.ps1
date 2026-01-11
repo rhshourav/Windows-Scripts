@@ -77,11 +77,33 @@ function Create-RestorePoint {
 
 
 function Backup-Services {
-    Write-Info 'Backing up current services...'
+    Write-Info 'Backing up current services (expanded snapshot)...'
     try {
-        $file = Join-Path $SvcBackupDir "Services_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
-        Get-Service | Select Name, Status, StartType |
-            Export-Csv -Path $file -NoTypeInformation -Force
+        $file = Join-Path $SvcBackupDir "Services_$(Get-Date -Format 'yyyyMMdd_HHmmss').json"
+        $services = Get-CimInstance -ClassName Win32_Service | Select-Object Name, DisplayName, State, StartMode, StartName, PathName, ServiceType
+        # Gather DelayedAutoStart from registry (if present)
+        $services = $services | ForEach-Object {
+            $svc = $_
+            $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$($svc.Name)"
+            $delayed = $false
+            try {
+                $val = Get-ItemProperty -Path $regPath -Name 'DelayedAutoStart' -ErrorAction SilentlyContinue
+                if ($val -and $val.DelayedAutoStart -ne $null) { $delayed = [bool]$val.DelayedAutoStart }
+            } catch {}
+            $obj = [PSCustomObject]@{
+                Name = $svc.Name
+                DisplayName = $svc.DisplayName
+                State = $svc.State
+                StartMode = $svc.StartMode
+                StartName = $svc.StartName
+                PathName = $svc.PathName
+                ServiceType = $svc.ServiceType
+                DelayedAutoStart = $delayed
+            }
+            $obj
+        }
+
+        $services | ConvertTo-Json -Depth 4 | Out-File -FilePath $file -Encoding UTF8 -Force
         Write-Succ "Services backed up to $file"
     } catch {
         Write-Warn "Failed to backup services: $_"
@@ -320,27 +342,43 @@ function Invoke-ProtectedAction {
 function Restore-Services {
     param(
         [Parameter(Mandatory)]
-        [string]$CsvFile
+        [string]$JsonFile
     )
 
-    if (-not (Test-Path $CsvFile)) {
+    if (-not (Test-Path $JsonFile)) {
         Write-Err "Service backup file not found."
         return
     }
 
-    $services = Import-Csv $CsvFile
+    $services = Get-Content $JsonFile -Raw | ConvertFrom-Json
     foreach ($svc in $services) {
         try {
-            Set-Service -Name $svc.Name -StartupType $svc.StartType -ErrorAction SilentlyContinue
-            if ($svc.Status -eq 'Running') {
+            # Restore startup mode (Automatic, Manual, Disabled)
+            Set-Service -Name $svc.Name -StartupType $svc.StartMode -ErrorAction SilentlyContinue
+
+            # If DelayedAutoStart flag was true, set the registry value accordingly
+            if ($svc.DelayedAutoStart) {
+                $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$($svc.Name)"
+                if (Test-Path $regPath) {
+                    New-ItemProperty -Path $regPath -Name 'DelayedAutoStart' -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+                }
+            } else {
+                # remove property if present
+                $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$($svc.Name)"
+                try { Remove-ItemProperty -Path $regPath -Name 'DelayedAutoStart' -ErrorAction SilentlyContinue } catch {}
+            }
+
+            if ($svc.State -eq 'Running') {
                 Start-Service -Name $svc.Name -ErrorAction SilentlyContinue
+            } else {
+                # don't stop services arbitrarily; only start those that were running
             }
         } catch {
-            Write-Warn "Failed restoring service: $($svc.Name)"
+            Write-Warn "Failed restoring service: $($svc.Name) - $_"
         }
     }
 
-    Write-Succ "Service restore completed."
+    Write-Succ "Service restore completed (startup modes and DelayedAutoStart attempted)."
 }
 function Restore-ScheduledTasks {
     param(
@@ -353,61 +391,93 @@ function Restore-ScheduledTasks {
         return
     }
 
-    Get-ChildItem $BackupPath -Filter *.xml -Recurse | ForEach-Object {
+    $files = Get-ChildItem $BackupPath -Filter *.xml -Recurse
+    foreach ($file in $files) {
         try {
-            Register-ScheduledTask `
-                -TaskName $_.BaseName `
-                -Xml (Get-Content $_.FullName -Raw) `
-                -Force
+            # Derive original TaskPath from backup folder structure:
+            # If $BackupPath\Some\Sub\TaskName.xml => TaskPath = '\Some\Sub\'
+            $relative = $file.DirectoryName.Substring($BackupPath.Length).TrimStart('\')
+            $taskPath = if ($relative -eq '') { '\' } else { "\" + ($relative -replace '\\','\') + "\" }
+
+            $xml = Get-Content $file.FullName -Raw
+            Register-ScheduledTask -TaskName $file.BaseName -TaskPath $taskPath -Xml $xml -Force -ErrorAction Stop
         } catch {
-            Write-Warn "Failed restoring task: $($_.Name)"
+            Write-Warn "Failed restoring task: $($file.FullName) - $_"
         }
     }
 
     Write-Succ "Scheduled task restore completed."
 }
 
+
 #endregion
 #region compare Banchmark
 function Compare-Benchmark {
     param ($Current)
 
-    $history = Get-ChildItem $BenchDir -Filter "Benchmark_*.json" -ErrorAction SilentlyContinue
+    $lastFile = Join-Path $BenchDir "Benchmark_Last.json"
 
-    if ($history.Count -eq 0) {
-        $Current | ConvertTo-Json | Out-File "$BenchDir\Benchmark_Last.json"
-        Write-Host "[INFO] No previous benchmark found. Baseline saved." -ForegroundColor Yellow
+    if (-not (Test-Path $lastFile)) {
+        $Current | ConvertTo-Json -Depth 4 | Out-File $lastFile -Encoding UTF8 -Force
+        Write-Host "[INFO] No previous benchmark found. Baseline saved to $lastFile" -ForegroundColor Yellow
         return
     }
 
-    $previous = Get-Content "$BenchDir\Benchmark_Last.json" | ConvertFrom-Json
+    $previous = Get-Content $lastFile -Raw | ConvertFrom-Json
 
     Write-Host "`n[COMPARISON] Previous vs Current:" -ForegroundColor Cyan
 
     $comparison = @(
-    [PSCustomObject]@{ Metric="CPU";      Before=$previous.CPU;      After=$Current.CPU }
-    [PSCustomObject]@{ Metric="Memory";   Before=$previous.Memory;   After=$Current.Memory }
-    [PSCustomObject]@{ Metric="Graphics"; Before=$previous.Graphics; After=$Current.Graphics }
-    [PSCustomObject]@{ Metric="Gaming";   Before=$previous.Gaming;   After=$Current.Gaming }
-    [PSCustomObject]@{
-        Metric="Disk"
-        Before="$($previous.Disk) ($($previous.DiskType))"
-        After="$($Current.Disk) ($($Current.DiskType))"
-    }
-)
+        [PSCustomObject]@{ Metric="CPU";      Before=$previous.CPU;      After=$Current.CPU }
+        [PSCustomObject]@{ Metric="Memory";   Before=$previous.Memory;   After=$Current.Memory }
+        [PSCustomObject]@{ Metric="Graphics"; Before=$previous.Graphics; After=$Current.Graphics }
+        [PSCustomObject]@{ Metric="Gaming";   Before=$previous.Gaming;   After=$Current.Gaming }
+        [PSCustomObject]@{ Metric="Disk";     Before="$($previous.Disk) ($($previous.DiskType))"; After="$($Current.Disk) ($($Current.DiskType))" }
+    )
 
-$comparison | Format-Table -AutoSize
-$comparison | Out-File $Global:CompareFile -Append
+    $comparison | Format-Table -AutoSize
 
+    # Append a small summary line to $Global:CompareFile for easy reading
+    $line = "{0} | CPU {1}->{2} | Mem {3}->{4} | Disk {5}->{6}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'),
+            $previous.CPU, $Current.CPU,
+            $previous.Memory, $Current.Memory,
+            "$($previous.Disk)($($previous.DiskType))", "$($Current.Disk)($($Current.DiskType))"
+    Add-Content -Path $Global:CompareFile -Value $line
 
-    $Current | ConvertTo-Json | Out-File "$BenchDir\Benchmark_Last.json"
+    # Update baseline
+    $Current | ConvertTo-Json -Depth 4 | Out-File $lastFile -Encoding UTF8 -Force
 }
+
 
 #endregion
 #region WinSAT Score
+function Get-DiskType {
+    # Try modern Storage module first
+    try {
+        $pd = Get-PhysicalDisk -ErrorAction Stop
+        if ($pd) {
+            # If multiple disks, prefer system disk by simple heuristic (MediaType first)
+            $media = ($pd | Select-Object -First 1).MediaType
+            return ($media -ne $null) ? $media.ToString() : 'Unknown'
+        }
+    } catch { }
+
+    # Fallback: WMI - look for 'SSD' or 'Solid State' in model or media type
+    try {
+        $drive = Get-CimInstance -ClassName Win32_DiskDrive -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($drive) {
+            $model = ($drive.Model -as [string]) -replace '\s+',' '
+            if ($model -match 'SSD|Solid State|NVMe') { return 'SSD' }
+            if ($drive.InterfaceType -match 'IDE|SCSI|SATA') { return 'HDD' }
+            return 'Unknown'
+        }
+    } catch { }
+
+    return 'Unknown'
+}
 function Get-WinSATScore {
     $xmlPath = Get-ChildItem "$env:WinDir\Performance\WinSAT\DataStore" `
-        -Filter "*Formal*.xml" |
+        -Filter "*Formal*.xml" -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime |
         Select-Object -Last 1
 
@@ -423,10 +493,10 @@ function Get-WinSATScore {
         Graphics = [math]::Round($xml.WinSAT.WinSPR.GraphicsScore, 2)
         Gaming   = [math]::Round($xml.WinSAT.WinSPR.GamingScore, 2)
         Disk     = [math]::Round($xml.WinSAT.WinSPR.DiskScore, 2)
+        DiskType = Get-DiskType
         Source   = $xmlPath.FullName
     }
 }
-
 #endregion
 #regin Show Benchmarks
 function Show-BenchmarkResults {
@@ -449,24 +519,27 @@ function Show-BenchmarkResults {
 #region Benchmarks
 function Run-Benchmark {
     $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $BenchFile = Join-Path $BenchDir "Benchmark_$timestamp.txt"
+    $BenchFileJson = Join-Path $BenchDir "Benchmark_$timestamp.json"
+    $BenchFileRaw  = Join-Path $BenchDir "Benchmark_$timestamp.txt"
 
     Write-Host "`n[ACTION] Running Windows System Assessment (WinSAT)" -ForegroundColor Cyan
-    Write-Host "[INFO] Output file: $BenchFile" -ForegroundColor DarkGray
+    Write-Host "[INFO] JSON output: $BenchFileJson" -ForegroundColor DarkGray
+    Write-Host "[INFO] Raw output:  $BenchFileRaw" -ForegroundColor DarkGray
     Write-Host "[ACTION] This may take several minutes..." -ForegroundColor Yellow
 
-    winsat formal | Tee-Object -FilePath $BenchFile
-
-    Write-Host "[SUCCESS] Benchmark completed." -ForegroundColor Green
-    Write-Host "[INFO] Raw output saved to:" -ForegroundColor Cyan
-    Write-Host " $BenchFile`n"
+    # Save raw winsat output
+    winsat formal | Tee-Object -FilePath $BenchFileRaw
 
     $current = Get-WinSATScore
     $current | Add-Member Profile $Global:ActiveProfile -Force
+    $current | ConvertTo-Json -Depth 4 | Out-File -FilePath $BenchFileJson -Encoding UTF8 -Force
+
+    Write-Host "[SUCCESS] Benchmark completed." -ForegroundColor Green
+    Write-Host "[INFO] Raw output saved to: $BenchFileRaw`n" -ForegroundColor Cyan
 
     Show-BenchmarkResults $current
-    Compare-Benchmark $current }
-
+    Compare-Benchmark $current
+}
 #endregion
 
 #region Tweaks (each function prints status)
