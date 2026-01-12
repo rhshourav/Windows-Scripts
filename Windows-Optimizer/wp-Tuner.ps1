@@ -51,7 +51,7 @@ function Show-Banner {
     Write-Host ""
     Write-Host $line -ForegroundColor DarkCyan
     Write-Host "| Windows Performance Tuner                               |" -ForegroundColor Cyan
-    Write-Host "| Version : v18.1.S                                       |" -ForegroundColor Gray
+    Write-Host "| Version : v18.2.S                                       |" -ForegroundColor Gray
     Write-Host "| Author  : rhshourav                                     |" -ForegroundColor Gray
     Write-Host "| GitHub  : https://github.com/rhshourav                  |" -ForegroundColor Gray
     Write-Host $line -ForegroundColor DarkCyan
@@ -280,9 +280,17 @@ foreach ($p in $before.PSObject.Properties.Name) {
 Line
 Write-Host "NOTE: Full performance improvement occurs after reboot." -ForegroundColor Yellow
 
-# ---------- SAFE REBOOT ----------
-for ($i=30; $i -gt 0; $i--) {
-    Write-Host "Rebooting in $i seconds... Press CTRL+C to cancel" -ForegroundColor Red
+# ---------- CLEAN REBOOT COUNTDOWN ----------
+Line
+$seconds = 56
+for ($i = $seconds; $i -ge 0; $i--) {
+    $msg = "Rebooting in $i seconds... Press CTRL+C to cancel"
+    Write-Host ("| " + $msg.PadRight(52) + " |") -ForegroundColor Red -NoNewline
     Start-Sleep 1
+    if ($i -gt 0) {
+        [Console]::SetCursorPosition(0,[Console]::CursorTop)
+    }
 }
+Line
 Restart-Computer -Force
+
