@@ -10,17 +10,18 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# ---------- ADMIN CHECK ----------
-function Require-Admin {
-    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $p  = New-Object Security.Principal.WindowsPrincipal($id)
-    if (-not $p.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)) {
-        Write-Host "Run PowerShell as Administrator." -ForegroundColor Red
-        Pause
-        exit
-    }
+# -----------------------------
+# Auto-Elevate to Admin
+# -----------------------------
+if (-not ([Security.Principal.WindowsPrincipal] `
+    [Security.Principal.WindowsIdentity]::GetCurrent()
+).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+
+    Write-Warning "Script is not running as administrator. Restarting as admin..."
+    $pwsh = (Get-Process -Id $PID).Path
+    Start-Process $pwsh "-NoProfile -File `"$PSCommandPath`"" -Verb RunAs
+    Exit
 }
-Require-Admin
 
 # ---------- UI ----------
 function Line { Write-Host "+------------------------------------------------------+" -ForegroundColor Cyan }
