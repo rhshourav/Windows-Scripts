@@ -184,9 +184,26 @@ Everything happens **locally**, **visibly**, and **on demand**.
 ---
 
 ## ▶️ HOW TO RUN
+### Windows Performance Tuner.
+[Can Run Any Time.]
+### Local Execution
+```
+Set-ExcutionPolicy Bypass -Scope Process
+.\wp-Tuner.ps1
+```
+Run **Powershell As Administrator**.
+---
+### Remote Execution
+
+```
+iex (irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/wp-Tuner.ps1)
+```
+
+### Windows-Optimizer
+[Run Only After windows inallation and Installing Driver.  This Might Revmove Microsoft Apps.]
 
 ### Local Execution (Recommended)
-
+ 
 ```powershell
 Set-ExecutionPolicy Bypass -Scope Process
 .\WinOpt.ps1
@@ -199,7 +216,7 @@ Run **PowerShell as Administrator**.
 ### Remote Execution (Only if you trust the source)
 
 ```powershell
-iwr https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/Windows-Optimizer.ps1 | iex
+irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/Windows-Optimizer.ps1 | iex
 ```
 
 You are expected to **read the code first**.
