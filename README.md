@@ -18,8 +18,16 @@ irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/
 ```powershell
 irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/main-run | iex
 ```
-
-
+---
+## 🤖Windows Optimizer
+## One Line code for Windows Performance Tuner ```[Safe]```
+```powershell
+iex (irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/wp-Tuner.ps1)
+```
+## One Line code for Windows Optimizer `[Eternal Mode only Afeter Windows Installation]`
+```powershell
+irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/Windows-Optimizer.ps1 | iex
+```
 ---
 ([For more  information](https://github.com/rhshourav/Windows-Scripts/tree/main/Windows-Update))
 
