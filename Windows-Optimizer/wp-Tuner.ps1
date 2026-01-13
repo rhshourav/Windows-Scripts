@@ -320,7 +320,7 @@ Write-Host "NOTE: Full performance improvement occurs after reboot." -Foreground
 
 # ---------- CLEAN REBOOT COUNTDOWN ----------
 Title "SYSTEM REBOOT"
-$seconds = 30
+$seconds = 56
 $start = Get-Date
 
 for ($i = 0; $i -le $seconds; $i++) {
