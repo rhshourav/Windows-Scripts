@@ -15,12 +15,20 @@ $ErrorActionPreference = "Stop"
 # -----------------------------
 if (-not ([Security.Principal.WindowsPrincipal] `
     [Security.Principal.WindowsIdentity]::GetCurrent()
-).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)) {
 
-    Write-Warning "Script is not running as administrator. Restarting as admin..."
-    $pwsh = (Get-Process -Id $PID).Path
-    Start-Process $pwsh "-NoProfile -File `"$PSCommandPath`"" -Verb RunAs
-    Exit
+    Write-Host "Requesting Administrator privileges..." -ForegroundColor Yellow
+
+    $argsList = @()
+    foreach ($arg in $MyInvocation.UnboundArguments) {
+        $argsList += '"' + $arg + '"'
+    }
+
+    Start-Process powershell.exe `
+        -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" $($argsList -join ' ')" `
+        -Verb RunAs
+
+    exit
 }
 
 # ---------- UI ----------
@@ -52,7 +60,7 @@ function Show-Banner {
     Write-Host ""
     Write-Host $line -ForegroundColor DarkCyan
     Write-Host "| Windows Performance Tuner                               |" -ForegroundColor Cyan
-    Write-Host "| Version : v19.0.S                                       |" -ForegroundColor Gray
+    Write-Host "| Version : v19.2.S                                       |" -ForegroundColor Gray
     Write-Host "| Author  : rhshourav                                     |" -ForegroundColor Gray
     Write-Host "| GitHub  : https://github.com/rhshourav                  |" -ForegroundColor Gray
     Write-Host $line -ForegroundColor DarkCyan
