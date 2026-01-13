@@ -52,7 +52,7 @@ function Show-Banner {
     Write-Host ""
     Write-Host $line -ForegroundColor DarkCyan
     Write-Host "| Windows Performance Tuner                               |" -ForegroundColor Cyan
-    Write-Host "| Version : v18.2.S                                       |" -ForegroundColor Gray
+    Write-Host "| Version : v19.0.S                                       |" -ForegroundColor Gray
     Write-Host "| Author  : rhshourav                                     |" -ForegroundColor Gray
     Write-Host "| GitHub  : https://github.com/rhshourav                  |" -ForegroundColor Gray
     Write-Host $line -ForegroundColor DarkCyan
@@ -132,6 +132,46 @@ function Invoke-SystemCleanup {
     }
 
     ProgressBar "System cleanup complete" 100 $start
+    Line
+}
+# ---------- ROBUST DRIVER RESTART (SAFE + PROGRESS) ----------
+function Restart-AllDrivers {
+
+    Title "DRIVER RESTART (SAFE MODE)"
+
+    $classes = @("Display","Net","Media","DiskDrive")
+    $devices = Get-PnpDevice -Status OK |
+        Where-Object { $classes -contains $_.Class }
+
+    if (-not $devices) {
+        Write-Host "| No eligible drivers found                            |" -ForegroundColor Yellow
+        Line
+        return
+    }
+
+    $total = $devices.Count
+    $i = 0
+    $start = Get-Date
+
+    foreach ($dev in $devices) {
+        $i++
+        $pct = [math]::Round(($i / $total) * 100)
+
+        ProgressBar "Restarting: $($dev.FriendlyName)" $pct $start
+        Start-Sleep -Milliseconds 300
+
+        try {
+            pnputil /restart-device "$($dev.InstanceId)" | Out-Null
+        } catch {
+            # ignore failures (VM / protected devices)
+        }
+
+        try {
+            [Console]::SetCursorPosition(0,[Console]::CursorTop - 2)
+        } catch {}
+    }
+
+    ProgressBar "Driver restart complete" 100 $start
     Line
 }
 
@@ -253,10 +293,7 @@ if ($gpu.Name -match "NVIDIA") {
 Line
 
 # ---------- DRIVER REFRESH ----------
-Title "DRIVER REFRESH"
-try { pnputil /scan-devices | Out-Null } catch {}
-Write-Host "| Plug and Play rescan attempted                       |" -ForegroundColor Green
-Line
+Restart-AllDrivers
 
 # ---------- POWER PROFILE ----------
 Title "POWER PROFILE"
@@ -282,16 +319,19 @@ Line
 Write-Host "NOTE: Full performance improvement occurs after reboot." -ForegroundColor Yellow
 
 # ---------- CLEAN REBOOT COUNTDOWN ----------
-Line
-$seconds = 56
-for ($i = $seconds; $i -ge 0; $i--) {
-    $msg = "Rebooting in $i seconds... Press CTRL+C to cancel"
-    Write-Host ("| " + $msg.PadRight(52) + " |") -ForegroundColor Red -NoNewline
+Title "SYSTEM REBOOT"
+$seconds = 30
+$start = Get-Date
+
+for ($i = 0; $i -le $seconds; $i++) {
+    $pct = [math]::Round(($i / $seconds) * 100)
+    ProgressBar "Rebooting in $($seconds - $i) seconds (CTRL+C to cancel)" $pct $start
     Start-Sleep 1
-    if ($i -gt 0) {
-        [Console]::SetCursorPosition(0,[Console]::CursorTop)
+    if ($i -lt $seconds) {
+        try { [Console]::SetCursorPosition(0,[Console]::CursorTop - 2) } catch {}
     }
 }
+
 Line
 Restart-Computer -Force
 
