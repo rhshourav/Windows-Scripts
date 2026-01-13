@@ -29,7 +29,6 @@ iex (irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/
 irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/Windows-Optimizer.ps1 | iex
 ```
 ---
-([For more  information](https://github.com/rhshourav/Windows-Scripts/tree/main/Windows-Update))
 
 ## 💠 ERP AUTOMATE 
 ### One Line Code for ERP Setup
