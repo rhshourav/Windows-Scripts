@@ -4,8 +4,8 @@
 # =========================================
 
 param(
-    [ValidateSet("Gaming","Developer","LowImpact")]
-    [string]$Profile = "Gaming"
+    [ValidateSet("Optimal","Developer","LowImpact")]
+    [string]$Profile = "Optimal"
 )
 
 $ErrorActionPreference = "Stop"
@@ -305,9 +305,9 @@ Restart-AllDrivers
 
 # ---------- POWER PROFILE ----------
 Title "POWER PROFILE"
-if ($Profile -eq "Gaming") {
+if ($Profile -eq "Optimal") {
     try { powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c } catch {}
-    Write-Host "| Gaming power profile applied                          |" -ForegroundColor Green
+    Write-Host "| Optimal power profile applied                          |" -ForegroundColor Green
 } elseif ($Profile -eq "Developer") {
     try { powercfg /setactive 381b4222-f694-41f0-9685-ff5bb260df2e } catch {}
     Write-Host "| Developer power profile applied                       |" -ForegroundColor Green
