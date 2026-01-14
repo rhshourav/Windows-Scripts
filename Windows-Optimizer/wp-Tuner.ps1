@@ -61,7 +61,7 @@ function Show-Banner {
     Write-Host ""
     Write-Host $line -ForegroundColor DarkCyan
     Write-Host "| Windows Performance Tuner                               |" -ForegroundColor Cyan
-    Write-Host "| Version : v19.4.S                                       |" -ForegroundColor Gray
+    Write-Host "| Version : v19.5.S                                       |" -ForegroundColor Gray
     Write-Host "| Author  : rhshourav                                     |" -ForegroundColor Gray
     Write-Host "| GitHub  : https://github.com/rhshourav                  |" -ForegroundColor Gray
     Write-Host $line -ForegroundColor DarkCyan
@@ -298,6 +298,82 @@ function Restart-AllDrivers {
     Line
 }
 
+function Clear-StandbyMemory {
+
+    Title "MEMORY OPTIMIZATION"
+
+    $start = Get-Date
+
+    function Get-FreeRAM {
+        (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1024
+    }
+
+    $before = Get-FreeRAM
+
+    # ---------- Phase 1: Trim Working Sets ----------
+    $procs = Get-Process | Where-Object { $_.WorkingSet64 -gt 100MB }
+    $total = $procs.Count
+    $i = 0
+
+    foreach ($p in $procs) {
+        $i++
+        $pct = [math]::Round(($i / $total) * 50)
+
+        ProgressBar "Trimming: $($p.ProcessName)" $pct $start
+        Start-Sleep -Milliseconds 80
+
+        try {
+            $sig = @"
+using System;
+using System.Runtime.InteropServices;
+public class WS {
+    [DllImport("psapi.dll")]
+    public static extern bool EmptyWorkingSet(IntPtr hProcess);
+}
+"@
+            Add-Type $sig -ErrorAction SilentlyContinue
+            [WS]::EmptyWorkingSet($p.Handle) | Out-Null
+        } catch {}
+
+        try { [Console]::SetCursorPosition(0,[Console]::CursorTop - 2) } catch {}
+    }
+
+    # ---------- Phase 2: Purge Standby Cache ----------
+    $pct = 60
+    ProgressBar "Purging standby cache" $pct $start
+
+    try {
+        $sig2 = @"
+using System;
+using System.Runtime.InteropServices;
+public class Mem {
+    [DllImport("ntdll.dll")]
+    public static extern int NtSetSystemInformation(
+        int SystemInformationClass,
+        ref int SystemInformation,
+        int SystemInformationLength
+    );
+}
+"@
+        Add-Type $sig2 -ErrorAction SilentlyContinue
+        $Purge = 4
+        [Mem]::NtSetSystemInformation(80, [ref]$Purge, 4) | Out-Null
+    } catch {}
+
+    Start-Sleep 1
+
+    ProgressBar "Finalizing memory state" 90 $start
+    Start-Sleep 1
+
+    $after = Get-FreeRAM
+    $freed = [math]::Round($after - $before,0)
+
+    ProgressBar "Memory optimization complete" 100 $start
+    Line
+    Write-Host ("| RAM freed: {0,6} MB                                    |" -f $freed) -ForegroundColor Green
+    Line
+}
+
 
 # ---------- BENCHMARK ----------
 function Benchmark {
@@ -317,6 +393,7 @@ function Benchmark {
 
 $before = Benchmark
 Invoke-SystemCleanup
+Clear-StandbyMemory
 
 # ---------- DISM (job with fallback) ----------
 Title "SYSTEM REPAIR - DISM"
