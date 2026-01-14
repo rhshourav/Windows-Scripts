@@ -1,142 +1,124 @@
-Intel-SystemInterrupt-Fix.ps1# ==========================================================
+# ==========================================================
 # INTEL SYSTEM INTERRUPTS AUTO FIX TOOL
-# Safe | Automated | Factory Ready | PowerShell Native | v 1.0.1B
+# Safe | Automated | Factory Ready | PowerShell Native
+# Version: 1.0.5 CLEAN (sandbox + encoding aware)
 # ==========================================================
 
 # -----------------------------
 # ADMIN CHECK
 # -----------------------------
-if (-not ([Security.Principal.WindowsPrincipal]
-    [Security.Principal.WindowsIdentity]::GetCurrent()
-).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Error "Run as Administrator"
+$winIdentity  = [Security.Principal.WindowsIdentity]::GetCurrent()
+$winPrincipal = New-Object Security.Principal.WindowsPrincipal($winIdentity)
+if (-not $winPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Error "Run this script as Administrator"
     exit 1
 }
 
+# -----------------------------
+# GLOBALS
+# -----------------------------
 $ErrorActionPreference = "SilentlyContinue"
 $Log = "$env:SystemDrive\SystemInterruptFix.log"
 Start-Transcript -Path $Log -Append | Out-Null
 
-# -----------------------------
-# HELPER
-# -----------------------------
-function Step($msg,$pct) {
-    Write-Progress -Activity "System Interrupt Optimization" -Status $msg -PercentComplete $pct
+function Step($Msg,$Pct) {
+    Write-Progress -Activity "System Interrupt Optimization" -Status $Msg -PercentComplete $Pct
+}
+
+function Test-PowercfgAvailable {
+    & powercfg /? 2>$null
+    return ($LASTEXITCODE -eq 0)
 }
 
 # -----------------------------
-# SYSTEM VALIDATION
+# CPU CHECK
 # -----------------------------
-Step "Detecting CPU" 2
+Step "Detecting CPU vendor" 5
 $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
 if ($cpu.Manufacturer -notmatch "Intel") {
-    Write-Warning "Non-Intel CPU detected. Script exiting safely."
+    Write-Warning "Non-Intel CPU detected. Exiting safely."
     Stop-Transcript
     exit 0
 }
 
 # -----------------------------
-# BASELINE METRICS
+# INTERRUPT COUNTER (SAFE)
 # -----------------------------
-Step "Measuring baseline interrupts" 5
-$baseline = Get-Counter '\Processor(_Total)\% Interrupt Time'
-$baseInterrupt = [math]::Round($baseline.CounterSamples[0].CookedValue,2)
+Step "Measuring baseline interrupt time" 10
+$baseInterrupt = "N/A"
+$ctr = Get-Counter '\Processor(_Total)\% Interrupt Time' -ErrorAction SilentlyContinue
+if ($ctr -and $ctr.CounterSamples.Count -gt 0) {
+    $val = $ctr.CounterSamples[0].CookedValue
+    if ($val -gt 0) { $baseInterrupt = [math]::Round($val,2) }
+}
 
 # -----------------------------
-# DISABLE SYSMAIN (SUPERFETCH)
+# SYSMAIN
 # -----------------------------
-Step "Disabling SysMain (Superfetch)" 10
-Stop-Service SysMain -Force
-Set-Service SysMain -StartupType Disabled
+Step "Evaluating SysMain" 20
+$hasHDD = Get-PhysicalDisk | Where-Object MediaType -eq "HDD"
+if (-not $hasHDD) {
+    Stop-Service SysMain -Force
+    Set-Service SysMain -StartupType Disabled
+}
 
 # -----------------------------
-# NETWORK ADAPTER OPTIMIZATION
+# NETWORK
 # -----------------------------
-Step "Optimizing network adapters" 20
+Step "Optimizing network adapters" 35
 Get-NetAdapter | Where-Object Status -eq "Up" | ForEach-Object {
-
-    Disable-NetAdapterPowerManagement -Name $_.Name -NoRestart `
-        -WakeOnMagicPacket `
-        -WakeOnPattern `
-        -ErrorAction SilentlyContinue
-
-    Set-NetAdapterAdvancedProperty -Name $_.Name `
-        -DisplayName "Energy Efficient Ethernet" `
-        -DisplayValue "Disabled" `
-        -NoRestart
-
-    Set-NetAdapterAdvancedProperty -Name $_.Name `
-        -DisplayName "Interrupt Moderation" `
-        -DisplayValue "Enabled" `
-        -NoRestart
-
-    Set-NetAdapterRss -Name $_.Name -Enabled $true
+    Disable-NetAdapterPowerManagement -Name $_.Name -WakeOnMagicPacket -WakeOnPattern -NoRestart
+    if ($_.InterfaceDescription -notmatch "Wireless") {
+        Set-NetAdapterRss -Name $_.Name -Enabled $true
+    }
 }
 
 # -----------------------------
-# USB SELECTIVE SUSPEND OFF
+# POWER SETTINGS (SANDBOX SAFE)
 # -----------------------------
-Step "Disabling USB selective suspend" 30
-powercfg -SETACVALUEINDEX SCHEME_CURRENT SUB_USB USBSELECTSUSPEND 0
-powercfg -SETDCVALUEINDEX SCHEME_CURRENT SUB_USB USBSELECTSUSPEND 0
-
-# -----------------------------
-# HIGH PERFORMANCE POWER PLAN
-# -----------------------------
-Step "Applying High Performance power plan" 40
-powercfg /setactive SCHEME_MIN
-
-# -----------------------------
-# PNP DEVICE REFRESH
-# -----------------------------
-Step "Refreshing Plug and Play devices" 50
-pnputil /scan-devices | Out-Null
-
-# -----------------------------
-# TEMP + DNS CLEANUP
-# -----------------------------
-Step "Cleaning temp files and DNS cache" 60
-Remove-Item "$env:TEMP\*" -Recurse -Force
-Remove-Item "C:\Windows\Temp\*" -Recurse -Force
-Remove-Item "C:\Windows\Prefetch\*" -Recurse -Force
-Clear-DnsClientCache
-
-# -----------------------------
-# STORAGE INTERRUPT OPTIMIZATION
-# -----------------------------
-Step "Optimizing storage interrupt behavior" 70
-Get-PhysicalDisk | Where MediaType -ne "Unspecified" | ForEach-Object {
-    Set-PhysicalDisk -FriendlyName $_.FriendlyName -Usage AutoSelect
+Step "Applying power optimizations" 55
+$PowercfgOK = Test-PowercfgAvailable
+if ($PowercfgOK) {
+    powercfg -SETACVALUEINDEX SCHEME_CURRENT SUB_USB USBSELECTSUSPEND 0 | Out-Null
+    powercfg -SETDCVALUEINDEX SCHEME_CURRENT SUB_USB USBSELECTSUSPEND 0 | Out-Null
+    powercfg /setactive SCHEME_MIN | Out-Null
+} else {
+    Write-Warning "powercfg is restricted in this environment. Power optimizations skipped."
 }
 
 # -----------------------------
-# DISABLE FAST STARTUP
+# CLEANUP
 # -----------------------------
-Step "Disabling Fast Startup" 80
-powercfg /hibernate off
+Step "Cleaning temp files" 75
+Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+Clear-DnsClientCache | Out-Null
 
 # -----------------------------
-# FINAL METRICS
+# FINAL INTERRUPTS
 # -----------------------------
-Step "Measuring final interrupt levels" 90
-$final = Get-Counter '\Processor(_Total)\% Interrupt Time'
-$finalInterrupt = [math]::Round($final.CounterSamples[0].CookedValue,2)
+Step "Measuring final interrupt time" 90
+$finalInterrupt = "N/A"
+$ctr = Get-Counter '\Processor(_Total)\% Interrupt Time' -ErrorAction SilentlyContinue
+if ($ctr -and $ctr.CounterSamples.Count -gt 0) {
+    $val = $ctr.CounterSamples[0].CookedValue
+    if ($val -gt 0) { $finalInterrupt = [math]::Round($val,2) }
+}
+
+Write-Progress -Completed -Activity "System Interrupt Optimization"
 
 # -----------------------------
 # RESULTS
 # -----------------------------
-Write-Progress -Completed -Activity "System Interrupt Optimization"
+Write-Host ""
+Write-Host "============= RESULTS =============" -ForegroundColor Cyan
+Write-Host ("Interrupt Time : {0} -> {1}" -f $baseInterrupt, $finalInterrupt)
+Write-Host "SysMain        : Adaptive"
+Write-Host "NIC Power      : Optimized"
+Write-Host "USB Suspend    : Applied if supported"
+Write-Host "Power Profile  : High Performance if supported"
+Write-Host "==================================="
 
 Write-Host ""
-Write-Host "================ RESULTS ================" -ForegroundColor Cyan
-Write-Host "Interrupt Time : $baseInterrupt  ->  $finalInterrupt" -ForegroundColor Green
-Write-Host "SysMain        : Disabled"
-Write-Host "Network Power  : Optimized"
-Write-Host "USB Suspend    : Disabled"
-Write-Host "Power Profile  : High Performance"
-Write-Host "========================================"
-
-Write-Host ""
-Write-Host "Reboot is STRONGLY recommended." -ForegroundColor Yellow
+Write-Host "Reboot recommended." -ForegroundColor Yellow
 
 Stop-Transcript
