@@ -61,7 +61,7 @@ function Show-Banner {
     Write-Host ""
     Write-Host $line -ForegroundColor DarkCyan
     Write-Host "| Windows Performance Tuner                               |" -ForegroundColor Cyan
-    Write-Host "| Version : v19.5.S                                       |" -ForegroundColor Gray
+    Write-Host "| Version : v19.6.S                                       |" -ForegroundColor Gray
     Write-Host "| Author  : rhshourav                                     |" -ForegroundColor Gray
     Write-Host "| GitHub  : https://github.com/rhshourav                  |" -ForegroundColor Gray
     Write-Host $line -ForegroundColor DarkCyan
@@ -110,6 +110,64 @@ function Invoke-SystemCleanup {
     function Log-Failure($msg) {
         $FailLog += $msg
     }
+    function Stop-ServiceSilent($name) {
+        try {
+            $svc = Get-CimInstance Win32_Service -Filter "Name='$name'" -ErrorAction SilentlyContinue
+            if ($svc -and $svc.State -ne "Stopped") {
+                $svc.StopService() | Out-Null
+                for ($i=0; $i -lt 25; $i++) {
+                    $svc = Get-CimInstance Win32_Service -Filter "Name='$name'"
+                    if ($svc.State -eq "Stopped") { return }
+                    Start-Sleep -Milliseconds 400
+                }
+            }
+        } catch {}
+    }
+
+    function Start-ServiceSilent($name) {
+        try {
+            $svc = Get-CimInstance Win32_Service -Filter "Name='$name'" -ErrorAction SilentlyContinue
+            if ($svc -and $svc.State -ne "Running") {
+                $svc.StartService() | Out-Null
+                for ($i=0; $i -lt 40; $i++) {
+                    $svc = Get-CimInstance Win32_Service -Filter "Name='$name'"
+                    if ($svc.State -eq "Running") { return }
+                    Start-Sleep -Milliseconds 500
+                }
+            }
+        } catch {}
+    }
+
+    function Start-ServiceThemed($name, $pct, $start) {
+        try {
+            $svc = Get-Service $name -ErrorAction SilentlyContinue
+            if (-not $svc) { return }
+
+            if ($svc.Status -ne "Running") {
+                Start-Service $name -ErrorAction SilentlyContinue
+            }
+
+            for ($i=0; $i -lt 40; $i++) {
+                $svc.Refresh()
+
+                if ($svc.Status -eq "Running") { return }
+
+                if ($svc.Status -eq "StartPending") {
+                    ProgressBar "Waiting for service: $name" $pct $start
+                } else {
+                    ProgressBar "Starting service: $name" $pct $start
+                }
+
+                Start-Sleep -Milliseconds 500
+                try { [Console]::SetCursorPosition(0,[Console]::CursorTop - 2) } catch {}
+            }
+
+            Log-Failure "Service start timeout: $name"
+        } catch {
+        Log-Failure "Service start error: $name"
+        }
+    }
+
 
     function Take-Ownership($path) {
         try {
@@ -181,10 +239,13 @@ function Invoke-SystemCleanup {
 
         try {
 
-            # Stop locking services
+            
+            # Stop locking services (themed, silent)
             if ($t.Service) {
                 $t.Service.Split(",") | ForEach-Object {
-                    Stop-Service $_ -Force -ErrorAction SilentlyContinue
+                ProgressBar "Stopping service: $_" $pct $start
+                Stop-ServiceSilent $_
+                try { [Console]::SetCursorPosition(0,[Console]::CursorTop - 2) } catch {}
                 }
             }
 
@@ -217,11 +278,16 @@ function Invoke-SystemCleanup {
             }
 
             # Restart services
+            # Restart services (themed, silent)
             if ($t.Service) {
                 $t.Service.Split(",") | ForEach-Object {
-                    Start-Service $_ -ErrorAction SilentlyContinue
+                ProgressBar "Starting service: $_" $pct $start
+                Start-ServiceSilent $_
+                try { [Console]::SetCursorPosition(0,[Console]::CursorTop - 2) } catch {}
                 }
             }
+
+
 
         } catch {
             Log-Failure "Task failed: $($t.Name)"
@@ -469,6 +535,63 @@ if ($useJob -and $sfcJob) {
     ProgressBar "SFC Scan (sync)" 100 $start
 }
 Line
+function Optimize-DiskIO {
+
+    Title "STORAGE OPTIMIZATION"
+
+    $start = Get-Date
+
+    $steps = @(
+        "Disabling legacy NTFS behaviors",
+        "Optimizing NTFS metadata",
+        "Enabling large system cache",
+        "Enabling write-back caching",
+        "Optimizing storage queues"
+    )
+
+    $i = 0
+    foreach ($s in $steps) {
+        $i++
+        $pct = [math]::Round(($i / $steps.Count) * 100)
+        ProgressBar $s $pct $start
+        Start-Sleep -Milliseconds 600
+
+        try {
+            switch ($i) {
+
+                1 {
+                    fsutil behavior set disablelastaccess 1   | Out-Null
+                    fsutil behavior set encryptpagingfile 0 | Out-Null
+                }
+
+                2 {
+                    fsutil behavior set memoryusage 2        | Out-Null
+                }
+
+                3 {
+                    reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" `
+                        /v LargeSystemCache /t REG_DWORD /d 1 /f | Out-Null
+                }
+
+                4 {
+                    Get-Disk | Where-Object BusType -ne USB | ForEach-Object {
+                        Set-Disk -Number $_.Number -IsWriteCacheEnabled $true -ErrorAction SilentlyContinue
+                    }
+                }
+
+                5 {
+                    reg add "HKLM\SYSTEM\CurrentControlSet\Services\storahci\Parameters\Device" `
+                        /v IoQueueDepth /t REG_DWORD /d 64 /f | Out-Null
+                }
+            }
+        } catch {}
+
+        try { [Console]::SetCursorPosition(0,[Console]::CursorTop - 2) } catch {}
+    }
+
+    ProgressBar "Storage optimized" 100 $start
+    Line
+}
 
 # ---------- NETWORK (NO DNS) ----------
 Title "NETWORK OPTIMIZATION"
@@ -491,6 +614,9 @@ if ($gpu.Name -match "NVIDIA") {
     Write-Host "| Intel or unknown GPU detected |" -ForegroundColor Green
 }
 Line
+
+# ----------- Disk Optimization -------
+Optimize-DiskIO
 
 # ---------- DRIVER REFRESH ----------
 Restart-AllDrivers
