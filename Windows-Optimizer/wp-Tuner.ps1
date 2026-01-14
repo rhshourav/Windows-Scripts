@@ -61,7 +61,7 @@ function Show-Banner {
     Write-Host ""
     Write-Host $line -ForegroundColor DarkCyan
     Write-Host "| Windows Performance Tuner                               |" -ForegroundColor Cyan
-    Write-Host "| Version : v19.3.S                                       |" -ForegroundColor Gray
+    Write-Host "| Version : v19.4.S                                       |" -ForegroundColor Gray
     Write-Host "| Author  : rhshourav                                     |" -ForegroundColor Gray
     Write-Host "| GitHub  : https://github.com/rhshourav                  |" -ForegroundColor Gray
     Write-Host $line -ForegroundColor DarkCyan
@@ -130,6 +130,34 @@ function Invoke-SystemCleanup {
         }
     }
 
+    function Unlock-And-Delete($Path) {
+        if (-not (Test-Path $Path)) { return }
+
+        try {
+            $locking = Get-Process | Where-Object {
+                try {
+                    $_.Modules | Where-Object { $_.FileName -like "$Path*" } | Out-Null
+                } catch { $false }
+            }
+
+            foreach ($p in $locking) {
+                try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
+            }
+
+            Start-Sleep -Milliseconds 500
+
+            takeown /f $Path /r /d y | Out-Null
+            icacls  $Path /grant Administrators:F /t /c | Out-Null
+
+            Get-ChildItem $Path -Force -Recurse -ErrorAction SilentlyContinue |
+                Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        catch {
+            Log-Failure "Unlock delete failed: $Path"
+        }
+    }
+
+
     $tasks = @(
         @{ Name="Windows Update Cache"; Path="C:\Windows\SoftwareDistribution\Download"; Service="wuauserv,bits,cryptsvc" },
         @{ Name="Windows Temp";        Path="C:\Windows\Temp" },
@@ -161,7 +189,8 @@ function Invoke-SystemCleanup {
             }
 
             if ($t.Path) {
-                Force-Delete $t.Path
+                Unlock-And-Delete $t.Path
+
             }
 
             if ($t.Action -eq "DNS") {
