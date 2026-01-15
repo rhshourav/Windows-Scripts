@@ -61,7 +61,7 @@ function Show-Banner {
     Write-Host ""
     Write-Host $line -ForegroundColor DarkCyan
     Write-Host "| Windows Performance Tuner                               |" -ForegroundColor Cyan
-    Write-Host "| Version : v19.7.S                                       |" -ForegroundColor Gray
+    Write-Host "| Version : v19.8.S                                       |" -ForegroundColor Gray
     Write-Host "| Author  : rhshourav                                     |" -ForegroundColor Gray
     Write-Host "| GitHub  : https://github.com/rhshourav                  |" -ForegroundColor Gray
     Write-Host $line -ForegroundColor DarkCyan
@@ -189,46 +189,57 @@ function Invoke-SystemCleanup {
     }
 
     function Nuke-Folder($path) {
+        if (-not (Test-Path $path)) { return }
+
+        # Take ownership ONLY on root (fast)
         try {
-            if (-not (Test-Path $path)) { return }
+            takeown /f $path | Out-Null
+            icacls  $path /grant Administrators:F | Out-Null
+        } catch {}
 
-            # NTFS-level delete
-            cmd /c "rd /s /q `"$path`"" | Out-Null
-
-            # Recreate empty container so Windows doesn't freak out
-            New-Item -ItemType Directory -Path $path -Force | Out-Null
-        }
-        catch {
-            Log-Failure "NTFS delete failed: $path"
+        # Delete children without ACL recursion
+        Get-ChildItem $path -Force -ErrorAction SilentlyContinue | ForEach-Object {
+            try {
+                Remove-Item $_.FullName -Recurse -Force -ErrorAction Stop
+            } catch {
+                # locked → will be caught next pass
+            }
         }
     }
 
-    function Unlock-And-Delete($Path) {
-        if (-not (Test-Path $Path)) { return }
 
-        try {
-            $locking = Get-Process | Where-Object {
-                try {
-                    $_.Modules | Where-Object { $_.FileName -like "$Path*" } | Out-Null
-                } catch { $false }
-            }
+    function MultiPass-Purge($path, $label, $pct, $start) {
+        if (-not (Test-Path $path)) { return }
 
-            foreach ($p in $locking) {
-                try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
-            }
-
-            Start-Sleep -Milliseconds 500
-
-            takeown /f $Path /r /d y | Out-Null
-            icacls  $Path /grant Administrators:F /t /c | Out-Null
-
-            Get-ChildItem $Path -Force -Recurse -ErrorAction SilentlyContinue |
-                Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-        }
-        catch {
-            Log-Failure "Unlock delete failed: $Path"
+        for ($pass = 1; $pass -le 3; $pass++) {
+            ProgressBar "Purging ($pass/3): $label" $pct $start
+            Nuke-Folder $path
+            Start-Sleep -Milliseconds 600
+            try { [Console]::SetCursorPosition(0,[Console]::CursorTop - 2) } catch {}
         }
     }
+
+   
+
+    function Clean-InstallerCache {
+        try {
+            $used = Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Installer\UserData\*\Products\*\InstallProperties -ErrorAction SilentlyContinue |
+                    Select-Object -ExpandProperty LocalPackage -ErrorAction SilentlyContinue
+
+            $used = $used | ForEach-Object { $_.ToLower() }
+
+            Get-ChildItem "C:\Windows\Installer" -Filter *.msi -ErrorAction SilentlyContinue | ForEach-Object {
+                if ($_.FullName.ToLower() -notin $used) {
+                    try { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
+                    catch { Log-Failure "Installer orphan locked: $($_.Name)" }
+                }
+            }
+        }
+        catch {
+            Log-Failure "Installer cache scan failed"
+        }
+    }
+
 
 
     $tasks = @(
@@ -236,6 +247,7 @@ function Invoke-SystemCleanup {
         @{ Name="Windows Temp";        Path="C:\Windows\Temp" },
         @{ Name="User Temp";           Path="$env:TEMP" },
         @{ Name="Prefetch";            Path="C:\Windows\Prefetch"; Service="SysMain" },
+        @{ Name="Installer Cache"; Action="MSI" },
         @{ Name="DNS Cache";            Action="DNS" },
         @{ Name="Recycle Bin";          Action="RECYCLE" },
         @{ Name="Browser Caches";       Action="BROWSER" }
@@ -265,17 +277,9 @@ function Invoke-SystemCleanup {
             }
 
             if ($t.Path) {
+                MultiPass-Purge $t.Path $t.Name $pct $start
+            }
 
-                if ($t.Path -like "*Prefetch*") {
-                ProgressBar "Waiting for SysMain handles to close" $pct $start
-                Wait-For-HandleRelease $t.Path | Out-Null
-                try { [Console]::SetCursorPosition(0,[Console]::CursorTop - 2) } catch {}
-                }
-
-            ProgressBar "Purging NTFS: $($t.Name)" $pct $start
-            Nuke-Folder $t.Path
-            try { [Console]::SetCursorPosition(0,[Console]::CursorTop - 2) } catch {}
-        }
 
 
             if ($t.Action -eq "DNS") {
@@ -300,6 +304,12 @@ function Invoke-SystemCleanup {
                     if (Test-Path $p) { Force-Delete $p }
                 }
             }
+            if ($t.Action -eq "MSI") {
+                ProgressBar "Scanning Installer Cache" $pct $start
+                Clean-InstallerCache
+                try { [Console]::SetCursorPosition(0,[Console]::CursorTop - 2) } catch {}
+            }
+
 
             # Restart services
             # Restart services (themed, silent)
