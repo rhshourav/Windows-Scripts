@@ -277,8 +277,19 @@ function Invoke-SystemCleanup {
             }
 
             if ($t.Path) {
-                MultiPass-Purge $t.Path $t.Name $pct $start
+
+                # Special wait for Prefetch (SysMain locks)
+                if ($t.Path -like "*Prefetch*") {
+                ProgressBar "Waiting for SysMain handles to close" $pct $start
+                Wait-For-HandleRelease $t.Path | Out-Null
+                try { [Console]::SetCursorPosition(0,[Console]::CursorTop - 2) } catch {}
+                }
+
+                ProgressBar "Purging NTFS: $($t.Name)" $pct $start
+                Nuke-Folder $t.Path
+                try { [Console]::SetCursorPosition(0,[Console]::CursorTop - 2) } catch {}
             }
+
 
 
 
