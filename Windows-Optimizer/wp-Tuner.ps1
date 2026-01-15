@@ -61,7 +61,7 @@ function Show-Banner {
     Write-Host ""
     Write-Host $line -ForegroundColor DarkCyan
     Write-Host "| Windows Performance Tuner                               |" -ForegroundColor Cyan
-    Write-Host "| Version : v19.6.S                                       |" -ForegroundColor Gray
+    Write-Host "| Version : v19.7.S                                       |" -ForegroundColor Gray
     Write-Host "| Author  : rhshourav                                     |" -ForegroundColor Gray
     Write-Host "| GitHub  : https://github.com/rhshourav                  |" -ForegroundColor Gray
     Write-Host $line -ForegroundColor DarkCyan
@@ -188,6 +188,21 @@ function Invoke-SystemCleanup {
         }
     }
 
+    function Nuke-Folder($path) {
+        try {
+            if (-not (Test-Path $path)) { return }
+
+            # NTFS-level delete
+            cmd /c "rd /s /q `"$path`"" | Out-Null
+
+            # Recreate empty container so Windows doesn't freak out
+            New-Item -ItemType Directory -Path $path -Force | Out-Null
+        }
+        catch {
+            Log-Failure "NTFS delete failed: $path"
+        }
+    }
+
     function Unlock-And-Delete($Path) {
         if (-not (Test-Path $Path)) { return }
 
@@ -250,9 +265,18 @@ function Invoke-SystemCleanup {
             }
 
             if ($t.Path) {
-                Unlock-And-Delete $t.Path
 
-            }
+                if ($t.Path -like "*Prefetch*") {
+                ProgressBar "Waiting for SysMain handles to close" $pct $start
+                Wait-For-HandleRelease $t.Path | Out-Null
+                try { [Console]::SetCursorPosition(0,[Console]::CursorTop - 2) } catch {}
+                }
+
+            ProgressBar "Purging NTFS: $($t.Name)" $pct $start
+            Nuke-Folder $t.Path
+            try { [Console]::SetCursorPosition(0,[Console]::CursorTop - 2) } catch {}
+        }
+
 
             if ($t.Action -eq "DNS") {
                 try { Clear-DnsClientCache } catch { Log-Failure "DNS flush failed" }
