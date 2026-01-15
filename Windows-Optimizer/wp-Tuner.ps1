@@ -53,6 +53,56 @@ function ProgressBar($label,$pct,$start) {
     Write-Host ("| {0,-50} |" -f $label) -ForegroundColor Cyan
     Write-Host ("| [{0}] {1,3}% ETA {2,-8} |" -f $bar,$pct,$eta) -ForegroundColor Green
 }
+# ---------- RUN CONTEXT ----------
+# ---------- RUN CONTEXT (PS 5.1 SAFE) ----------
+$Global:WPT = [ordered]@{
+    StartTime   = Get-Date
+    Profile     = $Profile
+    ProgramData = Join-Path $env:ProgramData "WPT"
+    RunId       = (Get-Date -Format "yyyyMMdd-HHmmss")
+    LogDir      = ""
+    BackupDir   = ""
+    LogFile     = ""
+    FailLog     = New-Object System.Collections.Generic.List[string]
+    Flags       = [ordered]@{
+        Cleanup      = $true
+        Repair       = $true
+        Network      = $true
+        Tune         = $false
+        Drivers      = $false
+        MemoryPurge  = $false
+    }
+}
+
+switch ($Profile) {
+    "LowImpact" { }
+    "Developer" { }
+    "Optimal" {
+        $Global:WPT.Flags.Tune = $true
+        $Global:WPT.Flags.Drivers = $true
+        $Global:WPT.Flags.MemoryPurge = $true
+    }
+}
+
+
+switch ($Profile) {
+    "LowImpact" {
+        $WPT.Flags.Tune = $false
+        $WPT.Flags.Drivers = $false
+        $WPT.Flags.MemoryPurge = $false
+    }
+    "Developer" {
+        $WPT.Flags.Tune = $false
+        $WPT.Flags.Drivers = $false
+        $WPT.Flags.MemoryPurge = $false
+    }
+    "Optimal" {
+        $WPT.Flags.Tune = $true
+        $WPT.Flags.Drivers = $true
+        $WPT.Flags.MemoryPurge = $true
+    }
+}
+
 function Show-Banner {
     Clear-Host
 
@@ -61,7 +111,7 @@ function Show-Banner {
     Write-Host ""
     Write-Host $line -ForegroundColor DarkCyan
     Write-Host "| Windows Performance Tuner                               |" -ForegroundColor Cyan
-    Write-Host "| Version : v19.8.S                                       |" -ForegroundColor Gray
+    Write-Host "| Version : v19.9.S                                       |" -ForegroundColor Gray
     Write-Host "| Author  : rhshourav                                     |" -ForegroundColor Gray
     Write-Host "| GitHub  : https://github.com/rhshourav                  |" -ForegroundColor Gray
     Write-Host $line -ForegroundColor DarkCyan
@@ -70,8 +120,70 @@ function Show-Banner {
     Write-Host $line -ForegroundColor DarkCyan
     Write-Host ""
 }
+function Add-Failure($msg) {
+    try { $Global:WPT.FailLog.Add($msg) } catch {}
+}
+
+function Start-WPTLogging {
+    try {
+        $base = $Global:WPT.ProgramData
+        New-Item -ItemType Directory -Path $base -Force | Out-Null
+
+        $Global:WPT.LogDir = Join-Path $base ("Logs\" + $Global:WPT.RunId)
+        $Global:WPT.BackupDir = Join-Path $base ("Backups\" + $Global:WPT.RunId)
+
+        New-Item -ItemType Directory -Path $Global:WPT.LogDir -Force | Out-Null
+        New-Item -ItemType Directory -Path $Global:WPT.BackupDir -Force | Out-Null
+
+        $Global:WPT.LogFile = Join-Path $Global:WPT.LogDir "WPT.log"
+        Start-Transcript -Path $Global:WPT.LogFile -Append | Out-Null
+    } catch {
+        # Fallback to user profile if ProgramData fails
+        try {
+            $fallback = Join-Path $env:USERPROFILE ("WPT\" + $Global:WPT.RunId)
+            $Global:WPT.LogDir = $fallback
+            $Global:WPT.BackupDir = Join-Path $fallback "Backups"
+            New-Item -ItemType Directory -Path $Global:WPT.LogDir -Force | Out-Null
+            New-Item -ItemType Directory -Path $Global:WPT.BackupDir -Force | Out-Null
+
+            $Global:WPT.LogFile = Join-Path $Global:WPT.LogDir "WPT.log"
+            Start-Transcript -Path $Global:WPT.LogFile -Append | Out-Null
+            Add-Failure "Logging fallback used: $fallback"
+        } catch {
+            Add-Failure "Logging failed completely"
+        }
+    }
+}
+
+
+function Stop-WPTLogging {
+    try { Stop-Transcript | Out-Null } catch {}
+}
+
+function Show-FinalSummary {
+    Title "RUN SUMMARY"
+    $elapsed = (Get-Date) - $Global:WPT.StartTime
+    Write-Host ("| Elapsed : {0,-41} |" -f $elapsed.ToString()) -ForegroundColor Gray
+    $logPath = if ($null -ne $Global:WPT.LogFile -and $Global:WPT.LogFile -ne "") { $Global:WPT.LogFile } else { "N/A" }
+    $bakPath = if ($null -ne $Global:WPT.BackupDir -and $Global:WPT.BackupDir -ne "") { $Global:WPT.BackupDir } else { "N/A" }
+
+    Write-Host ("| Log     : {0,-41} |" -f $logPath) -ForegroundColor Gray
+    Write-Host ("| Backup  : {0,-41} |" -f $bakPath) -ForegroundColor Gray
+
+    Write-Host ("| Failures: {0,-41} |" -f $Global:WPT.FailLog.Count) -ForegroundColor Yellow
+    Line
+
+    if ($Global:WPT.FailLog.Count -gt 0) {
+        foreach ($f in $Global:WPT.FailLog) {
+            Write-Host ("| - {0,-48} |" -f ($f.Substring(0, [Math]::Min(48,$f.Length)))) -ForegroundColor DarkYellow
+        }
+        Line
+    }
+}
+Start-WPTLogging
 
 Show-Banner
+
 # ---------- SYSTEM INFO ----------
 Title "SYSTEM CONFIGURATION"
 $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
@@ -281,7 +393,6 @@ function Invoke-SystemCleanup {
                 # Special wait for Prefetch (SysMain locks)
                 if ($t.Path -like "*Prefetch*") {
                 ProgressBar "Waiting for SysMain handles to close" $pct $start
-                Wait-For-HandleRelease $t.Path | Out-Null
                 try { [Console]::SetCursorPosition(0,[Console]::CursorTop - 2) } catch {}
                 }
 
@@ -688,6 +799,9 @@ foreach ($p in $before.PSObject.Properties.Name) {
 }
 Line
 Write-Host "NOTE: Full performance improvement occurs after reboot." -ForegroundColor Yellow
+
+Show-FinalSummary
+Stop-WPTLogging
 
 # ---------- CLEAN REBOOT COUNTDOWN ----------
 Title "SYSTEM REBOOT"
