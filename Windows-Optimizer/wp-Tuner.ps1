@@ -111,7 +111,7 @@ function Show-Banner {
     Write-Host ""
     Write-Host $line -ForegroundColor DarkCyan
     Write-Host "| Windows Performance Tuner                               |" -ForegroundColor Cyan
-    Write-Host "| Version : v20.2.S                                       |" -ForegroundColor Gray
+    Write-Host "| Version : v20.3.S                                       |" -ForegroundColor Gray
     Write-Host "| Author  : rhshourav                                     |" -ForegroundColor Gray
     Write-Host "| GitHub  : https://github.com/rhshourav                  |" -ForegroundColor Gray
     Write-Host $line -ForegroundColor DarkCyan
@@ -608,6 +608,8 @@ function Invoke-WeChatCleanup {
 
     $cacheFolders = @(Get-WeChatCacheFolders)
     $fullRoots    = @(Get-WeChatFullWipeRoots)
+    $ThresholdBytes = 100MB
+
 
     # SILENT SKIP
     if ((-not $cacheFolders -or $cacheFolders.Count -eq 0) -and
@@ -624,6 +626,7 @@ function Invoke-WeChatCleanup {
     $fullSize = 0L
     foreach ($p in $fullRoots) { $fullSize += (Get-FolderSizeBytes $p) }
 
+
     $cachePretty = Format-Bytes $cacheSize
     $fullPretty  = Format-Bytes $fullSize
 
@@ -631,7 +634,10 @@ function Invoke-WeChatCleanup {
     Write-Host ("| Full wipe can clean : {0,-30} |" -f $fullPretty)  -ForegroundColor Cyan
     Line
     Write-Host ""
-
+    # ---------- THRESHOLD CHECK (100 MB) ----------
+    if ($cacheSize -lt $ThresholdBytes -and $fullSize -lt $ThresholdBytes) {
+        return   # silent skip, nothing worth cleaning
+    }
     # MENU (PS 5.1 safe)
     $choiceList = New-Object System.Collections.Generic.List[System.Management.Automation.Host.ChoiceDescription]
 
