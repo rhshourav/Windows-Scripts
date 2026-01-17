@@ -111,7 +111,7 @@ function Show-Banner {
     Write-Host ""
     Write-Host $line -ForegroundColor DarkCyan
     Write-Host "| Windows Performance Tuner                               |" -ForegroundColor Cyan
-    Write-Host "| Version : v20.0.S                                       |" -ForegroundColor Gray
+    Write-Host "| Version : v20.1.S                                       |" -ForegroundColor Gray
     Write-Host "| Author  : rhshourav                                     |" -ForegroundColor Gray
     Write-Host "| GitHub  : https://github.com/rhshourav                  |" -ForegroundColor Gray
     Write-Host $line -ForegroundColor DarkCyan
@@ -480,20 +480,15 @@ function Invoke-SystemCleanup {
 }
 
 # ==========================================
-# WECHAT FULL WIPE (ENTIRE FOLDER DELETION)
-# - Silent skip if not found
-# - Shows total size
-# - Confirms (choice + type DELETE)
-# - Closes WeChat then deletes root folders
+# WECHAT CLEANUP MODULE (CACHE vs FULL WIPE)
 # ==========================================
 
 function Get-FolderSizeBytes($path) {
     try {
         if (-not (Test-Path -LiteralPath $path)) { return 0L }
         $sum = 0L
-        Get-ChildItem -LiteralPath $path -Force -Recurse -ErrorAction SilentlyContinue -File | ForEach-Object {
-            $sum += $_.Length
-        }
+        Get-ChildItem -LiteralPath $path -Force -Recurse -ErrorAction SilentlyContinue -File |
+            ForEach-Object { $sum += $_.Length }
         return $sum
     } catch { return 0L }
 }
@@ -509,144 +504,187 @@ function Format-Bytes($bytes) {
 function Stop-WeChatProcesses {
     $names = @("WeChat","WeChatApp","XWeChat","wechat")
     foreach ($n in $names) {
-        try {
-            Get-Process -Name $n -ErrorAction SilentlyContinue | ForEach-Object {
-                try { $_.CloseMainWindow() | Out-Null } catch {}
-            }
-        } catch {}
+        Get-Process -Name $n -ErrorAction SilentlyContinue | ForEach-Object {
+            try { $_.CloseMainWindow() | Out-Null } catch {}
+        }
     }
-
     Start-Sleep -Milliseconds 800
-
     foreach ($n in $names) {
-        try {
-            Get-Process -Name $n -ErrorAction SilentlyContinue | ForEach-Object {
-                try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch {}
-            }
-        } catch {}
+        Get-Process -Name $n -ErrorAction SilentlyContinue | ForEach-Object {
+            try { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } catch {}
+        }
     }
-
     Start-Sleep -Milliseconds 800
 }
 
-function Get-WeChatRootFolders {
+# ---------- CACHE PATH DETECTION ----------
+function Get-WeChatCacheFolders {
+
     $usersRoot = "C:\Users"
+    $wechatRoots = @("WeChat Files","WeChat","We","XWeChat","XWe","xwechat","xwechat_files")
+    $cacheRel = @("Cache","Temp","FileStorage\Cache","Video\Cache","Image\Cache")
 
-    # Your requested names + common ones
-    $wechatRoots = @(
-        "WeChat Files",
-        "WeChat",
-        "We",
-        "XWeChat",
-        "XWe",
-        "xwechat",
-        "xwechat_files"
-        
-    )
-
-    $roots = New-Object System.Collections.Generic.List[string]
+    $out = New-Object System.Collections.Generic.List[string]
 
     foreach ($u in Get-ChildItem -LiteralPath $usersRoot -Directory -ErrorAction SilentlyContinue) {
-
-        # NOTE: wrap Join-Path calls in () inside arrays (PS 5.1 parsing rule)
-        $docCandidates = @(
+        $docs = @(
             (Join-Path $u.FullName "Documents"),
             (Join-Path $u.FullName "OneDrive\Documents")
         )
 
-        foreach ($docs in $docCandidates) {
-            if (-not (Test-Path -LiteralPath $docs)) { continue }
+        foreach ($d in $docs) {
+            if (-not (Test-Path -LiteralPath $d)) { continue }
 
             foreach ($wr in $wechatRoots) {
-                $base = Join-Path $docs $wr
-                if (Test-Path -LiteralPath $base) {
-                    $roots.Add($base)
+                $base = Join-Path $d $wr
+                if (-not (Test-Path -LiteralPath $base)) { continue }
+
+                $wxids = Get-ChildItem -LiteralPath $base -Directory -Filter "wxid_*" -ErrorAction SilentlyContinue
+                foreach ($w in $wxids) {
+                    foreach ($c in $cacheRel) {
+                        $p = Join-Path $w.FullName $c
+                        if (Test-Path -LiteralPath $p) { $out.Add($p) }
+                    }
                 }
             }
         }
     }
 
+    return $out | Select-Object -Unique
+}
+
+# ---------- FULL WIPE ROOTS (DERIVED FROM CACHE) ----------
+function Get-WeChatFullWipeRoots {
+
+    $cache = @(Get-WeChatCacheFolders)
+    if (-not $cache -or $cache.Count -eq 0) { return @() }
+
+    $roots = New-Object System.Collections.Generic.List[string]
+
+    foreach ($p in $cache) {
+        try {
+            $cur = Split-Path $p -Parent
+            while ($cur -and (Split-Path $cur -Leaf) -notlike "wxid_*") {
+                $cur = Split-Path $cur -Parent
+            }
+            if ($cur -and (Split-Path $cur -Leaf) -like "wxid_*") {
+                $root = Split-Path $cur -Parent
+                if ($root -and (Test-Path -LiteralPath $root)) {
+                    $roots.Add($root)
+                }
+            }
+        } catch {}
+    }
+
     return $roots | Select-Object -Unique
 }
 
-function Invoke-WeChatFullWipe {
+# ---------- MAIN ENTRY ----------
+function Invoke-WeChatCleanup {
 
-    # -------- SILENT SKIP --------
-    $roots = @(Get-WeChatRootFolders)
-    if (-not $roots -or $roots.Count -eq 0) { return }
+    $cacheFolders = @(Get-WeChatCacheFolders)
+    $fullRoots    = @(Get-WeChatFullWipeRoots)
 
-    # -------- SIZE SCAN + UI --------
-    Title "WECHAT FULL WIPE CHECK"
-
-    $start = Get-Date
-    $total = 0L
-    $i = 0
-    $n = $roots.Count
-
-    foreach ($p in $roots) {
-        $i++
-        $pct = [math]::Round(($i / $n) * 100)
-        ProgressBar ("Scanning: " + $p) $pct $start
-        $total += (Get-FolderSizeBytes $p)
-        try { [Console]::SetCursorPosition(0,[Console]::CursorTop - 2) } catch {}
+    # SILENT SKIP
+    if ((-not $cacheFolders -or $cacheFolders.Count -eq 0) -and
+        (-not $fullRoots   -or $fullRoots.Count   -eq 0)) {
+        return
     }
 
-    ProgressBar "WeChat folder scan complete" 100 $start
+    Title "WECHAT CLEANUP ANALYSIS"
+
+    # ---- SIZE CALC ----
+    $cacheSize = 0L
+    foreach ($p in $cacheFolders) { $cacheSize += Get-FolderSizeBytes $p }
+
+    $fullSize = 0L
+    foreach ($p in $fullRoots) { $fullSize += Get-FolderSizeBytes $p }
+
+    $cachePretty = Format-Bytes $cacheSize
+    $fullPretty  = Format-Bytes $fullSize
+
+    Write-Host ("| Cache wipe can clean: {0,-30} |" -f $cachePretty) -ForegroundColor Cyan
+    Write-Host ("| Full wipe can clean : {0,-30} |" -f $fullPretty)  -ForegroundColor Cyan
     Line
     Write-Host ""
 
-    $pretty = Format-Bytes $total
-    Write-Host ("| WeChat data detected: {0,-30} |" -f $pretty) -ForegroundColor Cyan
-    Write-Host ("| Root folders found : {0,-30} |" -f $roots.Count) -ForegroundColor Gray
-    Line
+    # ---- MENU ----
+    $choiceList = New-Object System.Collections.Generic.List[System.Management.Automation.Host.ChoiceDescription]
 
-    Write-Host "| WARNING: This will DELETE chat data and attachments.   |" -ForegroundColor Red
-    Write-Host "| It is a full wipe, not cache cleanup.                  |" -ForegroundColor Red
-    Line
+    if ($fullSize -gt 0) {
+        $choiceList.Add(
+            (New-Object System.Management.Automation.Host.ChoiceDescription -ArgumentList @(
+                "&Full Wipe",
+                ("Delete ALL WeChat data (" + $fullPretty + ")")
+            ))
+        )
+    }
 
-    # Confirm choice (won't be hidden by cursor moves)
-    $choices = [System.Management.Automation.Host.ChoiceDescription[]]@(
-        (New-Object System.Management.Automation.Host.ChoiceDescription "&Yes","Close WeChat and delete ALL detected WeChat folders"),
-        (New-Object System.Management.Automation.Host.ChoiceDescription "&No","Skip WeChat wipe")
+    if ($cacheSize -gt 0) {
+        $choiceList.Add(
+            (New-Object System.Management.Automation.Host.ChoiceDescription -ArgumentList @(
+                "&Cache Wipe",
+                ("Delete ONLY cache/temp (" + $cachePretty + ")")
+            ))
+        )
+    }
+
+    $choiceList.Add(
+        (New-Object System.Management.Automation.Host.ChoiceDescription -ArgumentList @(
+            "&Cancel",
+            "Do nothing"
+        ))
     )
-    $decision = $Host.UI.PromptForChoice("WeChat Full Wipe", "Proceed to delete ALL detected WeChat folders?", $choices, 1)
-    if ($decision -ne 0) {
-        Write-Host "| Skipped by user                                        |" -ForegroundColor Yellow
+
+    $choices = $choiceList.ToArray()
+    $selection = $Host.UI.PromptForChoice(
+        "WeChat Cleanup Mode",
+        "Select what you want to delete:",
+        $choices,
+        $choices.Length - 1
+    )
+
+    $picked = $choices[$selection].Label.Replace("&","")
+    if ($picked -eq "Cancel") { return }
+
+    if ($picked -eq "Full Wipe") {
+        Write-Host "| WARNING: FULL WIPE deletes chats & media               |" -ForegroundColor Red
         Line
-        return
+        $c = Read-Host "Type FULLWIPE to confirm"
+        if ($c -ne "FULLWIPE") { return }
+        $targets = $fullRoots
+        $mode = "FULL"
+    } else {
+        $targets = $cacheFolders
+        $mode = "CACHE"
     }
 
-    # Second-factor confirmation (prevents accidental keypress wipe)
-    $confirm = Read-Host "Type DELETE to confirm full wipe"
-    if ($confirm -ne "DELETE") {
-        Write-Host "| Confirmation failed. Wipe canceled.                    |" -ForegroundColor Yellow
-        Line
-        return
-    }
+    Title ("WECHAT " + $mode + " WIPE")
 
-    Title "WECHAT FULL WIPE (DELETING)"
-    Write-Host "| Closing WeChat (foreground/background)                 |" -ForegroundColor Yellow
+    Write-Host "| Closing WeChat                                         |" -ForegroundColor Yellow
     try { Stop-WeChatProcesses } catch { try { Add-Failure "WeChat close failed" } catch {} }
     Line
 
     $start = Get-Date
     $i = 0
+    $n = $targets.Count
 
-    foreach ($p in $roots) {
+    foreach ($p in $targets) {
         $i++
         $pct = [math]::Round(($i / $n) * 100)
-        ProgressBar ("Deleting: " + $p) $pct $start
+        $label = "Deleting: " + (Split-Path $p -Leaf)
+        ProgressBar $label $pct $start
 
         try {
             Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
         } catch {
-            try { Add-Failure "WeChat wipe failed: $p" } catch {}
+            try { Add-Failure ("WeChat delete failed: " + $p) } catch {}
         }
 
         try { [Console]::SetCursorPosition(0,[Console]::CursorTop - 2) } catch {}
     }
 
-    ProgressBar "WeChat full wipe complete" 100 $start
+    ProgressBar ("WeChat " + $mode + " wipe complete") 100 $start
     Line
 }
 
@@ -785,7 +823,7 @@ function Benchmark {
 }
 $before = Benchmark
 Invoke-SystemCleanup
-Invoke-WeChatFullWipe
+Invoke-WeChatCleanup
 Clear-StandbyMemory
 
 # ---------- DISM (job with fallback) ----------
