@@ -849,20 +849,64 @@ public class Mem {
 
 
 # ---------- BENCHMARK ----------
-function Benchmark {
-    $cpu = (Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 5).CounterSamples |
-           Measure-Object CookedValue -Average | Select-Object -ExpandProperty Average
-    $mem = (Get-Counter '\Memory\Available MBytes').CounterSamples[0].CookedValue
-    $dpc = (Get-Counter '\Processor(_Total)\% DPC Time').CounterSamples[0].CookedValue
-    $disk = (Get-Counter '\PhysicalDisk(_Total)\Avg. Disk Queue Length').CounterSamples[0].CookedValue
-
-    [PSCustomObject]@{
-        CPU_Load    = [math]::Round($cpu,2)
-        Free_Mem_MB = [math]::Round($mem,0)
-        DPC_Latency = [math]::Round($dpc,3)
-        Disk_Queue  = [math]::Round($disk,3)
+function Get-CounterSafe($path, $sampleInterval = 1, $maxSamples = 3) {
+    try {
+        $r = Get-Counter $path -SampleInterval $sampleInterval -MaxSamples $maxSamples -ErrorAction Stop
+        if ($r -and $r.CounterSamples -and $r.CounterSamples.Count -gt 0) {
+            return $r.CounterSamples | Select-Object -ExpandProperty CookedValue
+        }
+        return $null
+    } catch {
+        return $null
     }
 }
+
+function Benchmark {
+
+    # CPU Load
+    $cpuVals = Get-CounterSafe '\Processor(_Total)\% Processor Time' 1 5
+    $cpuLoad = $null
+    if ($cpuVals) {
+        $cpuLoad = [math]::Round((($cpuVals | Measure-Object -Average).Average), 2)
+    } else {
+        # Fallback via CIM
+        try {
+            $cpuLoad = [math]::Round((Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty LoadPercentage), 2)
+        } catch {
+            $cpuLoad = "N/A"
+        }
+    }
+
+    # Free Mem (MB)
+    $memVal = Get-CounterSafe '\Memory\Available MBytes' 1 1
+    $freeMem = $null
+    if ($memVal) {
+        $freeMem = [math]::Round($memVal[0], 0)
+    } else {
+        # Fallback via CIM (FreePhysicalMemory is KB)
+        try {
+            $freeMem = [math]::Round(((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1024), 0)
+        } catch {
+            $freeMem = "N/A"
+        }
+    }
+
+    # DPC Time (may not exist)
+    $dpcVal = Get-CounterSafe '\Processor(_Total)\% DPC Time' 1 1
+    $dpc = if ($dpcVal) { [math]::Round($dpcVal[0], 3) } else { "N/A" }
+
+    # Disk Queue (may not exist)
+    $dqVal = Get-CounterSafe '\PhysicalDisk(_Total)\Avg. Disk Queue Length' 1 1
+    $dq = if ($dqVal) { [math]::Round($dqVal[0], 3) } else { "N/A" }
+
+    [PSCustomObject]@{
+        CPU_Load    = $cpuLoad
+        Free_Mem_MB = $freeMem
+        DPC_Latency = $dpc
+        Disk_Queue  = $dq
+    }
+}
+
 $before = Benchmark
 Invoke-SystemCleanup
 Invoke-WeChatCleanup
