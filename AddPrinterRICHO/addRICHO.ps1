@@ -6,7 +6,7 @@
   Shourav (rhshourav)
 
 .VERSION
-  1.8.1
+  1.8.2
 
 .DESCRIPTION
   Fixes:
@@ -52,9 +52,9 @@ function Log {
   param([string]$Message, [ValidateSet("Info","Warn","Error")] [string]$Level="Info")
   $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
   $prefix = "[$ts]"
-  if ($Level -eq "Info")  { Write-Host "$prefix $Message" }
-  if ($Level -eq "Warn")  { Write-Host "$prefix $Message" -ForegroundColor Yellow }
-  if ($Level -eq "Error") { Write-Host "$prefix $Message" -ForegroundColor Red }
+  #if ($Level -eq "Info")  { Write-Host "$prefix $Message" }
+  #if ($Level -eq "Warn")  { Write-Host "$prefix $Message" -ForegroundColor Yellow }
+  #if ($Level -eq "Error") { Write-Host "$prefix $Message" -ForegroundColor Red }
 }
 
 $script:LastBarText = ""
