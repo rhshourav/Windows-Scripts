@@ -19,7 +19,9 @@ A hardened, **CLI-only** PowerShell auto-installer for Windows 10/11 that:
 
 Run in an **elevated PowerShell** (Run as Administrator):
 
-
+```
+Set-ExecutionPolicy Bypass -Scope Process -Force
+```
 ```powershell
 iex (irm "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Auto-App-Installer-Framework/autoInstallFromLocal.ps1")
 ````
