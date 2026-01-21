@@ -6,14 +6,16 @@
   Shourav (rhshourav)
 
 .VERSION
-  1.8.2
+  1.8.3
 
 .DESCRIPTION
-  Fixes:
+  Fixes / Hardening:
   - Uses standard TCP/IP port name: IP_<ip>
   - Verifies ports via Win32_TCPIPPrinterPort (CIM/WMI) instead of parsing prnport output
   - prnport.vbs calls fail loud with exit code + stderr
   - Wait loop after creating port to avoid spooler race
+  - Download is hardened: tries BITS, then falls back to IWR, curl.exe, certutil
+  - Logging re-enabled (your old Log() was muted)
 #>
 
 [CmdletBinding()]
@@ -52,9 +54,11 @@ function Log {
   param([string]$Message, [ValidateSet("Info","Warn","Error")] [string]$Level="Info")
   $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
   $prefix = "[$ts]"
-  #if ($Level -eq "Info")  { Write-Host "$prefix $Message" }
-  #if ($Level -eq "Warn")  { Write-Host "$prefix $Message" -ForegroundColor Yellow }
-  #if ($Level -eq "Error") { Write-Host "$prefix $Message" -ForegroundColor Red }
+  switch ($Level) {
+    "Info"  { Write-Host "$prefix $Message" }
+    "Warn"  { Write-Host "$prefix $Message" -ForegroundColor Yellow }
+    "Error" { Write-Host "$prefix $Message" -ForegroundColor Red }
+  }
 }
 
 $script:LastBarText = ""
@@ -101,6 +105,20 @@ function Finish-Bar {
   Write-Host ""
 }
 
+# ---------------- HELPERS ----------------
+function Invoke-NativeChecked {
+  param(
+    [Parameter(Mandatory)][string]$CommandLine,
+    [string]$FailMessage = "Native command failed."
+  )
+  $out = cmd.exe /c "$CommandLine" 2>&1
+  $code = $LASTEXITCODE
+  if ($code -ne 0) {
+    throw "$FailMessage`nCommand: $CommandLine`nExitCode: $code`nOutput:`n$out"
+  }
+  return $out
+}
+
 # ---------------- SYSTEM ----------------
 function Assert-Admin {
   $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -116,7 +134,16 @@ function Stop-SpoolerHard {
   Get-Process spoolsv -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
   Start-Sleep -Seconds 2
 }
-function Start-Spooler { Start-Service Spooler -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2 }
+
+function Start-Spooler {
+  try {
+    $svc = Get-Service Spooler -ErrorAction Stop
+    if ($svc.Status -ne "Running") { Start-Service Spooler -ErrorAction SilentlyContinue }
+  } catch {
+    throw "Print Spooler service not available or cannot be started: $($_.Exception.Message)"
+  }
+  Start-Sleep -Seconds 2
+}
 
 function Clear-SpoolFiles {
   $dir = Join-Path $env:WINDIR "System32\spool\PRINTERS"
@@ -128,22 +155,26 @@ function Clear-SpoolFiles {
 # ---------------- PRINTUI ----------------
 function PrintUI-DeletePrinter {
   param([string]$Name)
-  cmd.exe /c ("rundll32 printui.dll,PrintUIEntry /dl /n `"{0}`" /q" -f $Name) | Out-Null
+  $cmd = "rundll32 printui.dll,PrintUIEntry /dl /n `"$Name`" /q"
+  $null = cmd.exe /c $cmd 2>&1
 }
 
 function PrintUI-DeleteDriver {
   param([string]$ModelName)
-  cmd.exe /c ("rundll32 printui.dll,PrintUIEntry /dd /m `"{0}`" /q" -f $ModelName) | Out-Null
+  $cmd = "rundll32 printui.dll,PrintUIEntry /dd /m `"$ModelName`" /q"
+  $null = cmd.exe /c $cmd 2>&1
 }
 
 function PrintUI-InstallDriverFromInf {
   param([string]$InfPath, [string]$ModelName)
-  cmd.exe /c ("rundll32 printui.dll,PrintUIEntry /ia /m `"{0}`" /f `"{1}`"" -f $ModelName, $InfPath) | Out-Null
+  $cmd = "rundll32 printui.dll,PrintUIEntry /ia /m `"$ModelName`" /f `"$InfPath`""
+  Invoke-NativeChecked -CommandLine $cmd -FailMessage "Driver install failed."
 }
 
 function PrintUI-InstallPrinter {
   param([string]$PrinterName,[string]$PortName,[string]$DriverName,[string]$InfPath)
-  cmd.exe /c ("rundll32 printui.dll,PrintUIEntry /if /b `"{0}`" /r `"{1}`" /m `"{2}`" /f `"{3}`"" -f $PrinterName,$PortName,$DriverName,$InfPath) | Out-Null
+  $cmd = "rundll32 printui.dll,PrintUIEntry /if /b `"$PrinterName`" /r `"$PortName`" /m `"$DriverName`" /f `"$InfPath`""
+  Invoke-NativeChecked -CommandLine $cmd -FailMessage "Printer install failed."
 }
 
 # ---------------- PRNPORT + PORT VERIFY (HARDENED) ----------------
@@ -176,22 +207,17 @@ function Ensure-LprPort {
 
   $vbs = Get-PrnPortVbs
 
-  # Prefer explicit double-spool enable switch (-2e). If this build doesn't support it,
-  # we retry without the -2* flag.
+  # Prefer explicit double-spool enable switch (-2e). If unsupported, retry without.
   $cmd1 = "cscript //nologo `"$vbs`" -a -s localhost -r `"$PortName`" -h $IP -o lpr -q $Queue -2e"
   $out1 = cmd.exe /c $cmd1 2>&1
-
   if ($LASTEXITCODE -eq 0) { return }
 
-  # Retry without -2e (some variants are picky)
   $cmd2 = "cscript //nologo `"$vbs`" -a -s localhost -r `"$PortName`" -h $IP -o lpr -q $Queue"
   $out2 = cmd.exe /c $cmd2 2>&1
-
   if ($LASTEXITCODE -ne 0) {
     throw "prnport.vbs failed.`nAttempt1: $cmd1`n$out1`nAttempt2: $cmd2`n$out2"
   }
 }
-
 
 function Delete-PortBestEffort {
   param([string]$PortName)
@@ -199,7 +225,6 @@ function Delete-PortBestEffort {
   $cmd = "cscript //nologo `"$vbs`" -d -s localhost -r `"$PortName`""
   $null = cmd.exe /c $cmd 2>&1
 }
-
 
 function Wait-Port {
   param([string]$Name,[int]$Seconds = 15)
@@ -211,50 +236,104 @@ function Wait-Port {
   return $true
 }
 
-# ---------------- ZIP DOWNLOAD + EXTRACT ----------------
-function Ensure-Bits {
-  $svc = Get-Service -Name BITS -ErrorAction SilentlyContinue
-  if (-not $svc) { throw "BITS service not found." }
-  if ($svc.Status -ne "Running") { Start-Service BITS -ErrorAction SilentlyContinue; Start-Sleep 1 }
+# ---------------- DOWNLOAD (HARDENED) ----------------
+function Set-TlsDefaults {
+  try {
+    [Net.ServicePointManager]::SecurityProtocol = `
+      [Net.SecurityProtocolType]::Tls12 -bor `
+      ([Net.SecurityProtocolType]::Tls13 2>$null)
+  } catch {}
 }
 
-function Download-ZipWithBits {
-  param([string]$Url,[string]$OutFile)
+function Assert-DownloadedFile {
+  param([string]$Path, [int64]$MinBytes = 10240)
+  if (-not (Test-Path $Path)) { throw "Download failed: file not found: $Path" }
+  $len = (Get-Item $Path -ErrorAction Stop).Length
+  if ($len -lt $MinBytes) { throw "Download failed: file too small ($len bytes): $Path" }
+}
 
-  Ensure-Bits
+function Download-FileHardened {
+  param(
+    [Parameter(Mandatory)][string]$Url,
+    [Parameter(Mandatory)][string]$OutFile,
+    [int]$ProgressBase = 5,
+    [int]$ProgressSpan = 20
+  )
+
+  Set-TlsDefaults
   if (Test-Path $OutFile) { Remove-Item $OutFile -Force -ErrorAction SilentlyContinue }
 
-  $job = Start-BitsTransfer -Source $Url -Destination $OutFile -Asynchronous -DisplayName "RicohDrvZip" -ErrorAction Stop
+  $errors = New-Object System.Collections.Generic.List[string]
 
-  while ($true) {
-    if ($job.JobState -eq "Error") {
-      $msg = $job.ErrorDescription
-      try { Remove-BitsTransfer -BitsJob $job -Confirm:$false -ErrorAction SilentlyContinue } catch {}
-      throw "BITS download failed: $msg"
+  # Method 1: BITS
+  try {
+    $bitsSvc = Get-Service -Name BITS -ErrorAction SilentlyContinue
+    if ($bitsSvc -and $bitsSvc.Status -ne "Running") {
+      try { Start-Service BITS -ErrorAction SilentlyContinue } catch {}
     }
-
-    if ($job.JobState -eq "Transferred") {
-      Complete-BitsTransfer -BitsJob $job -ErrorAction SilentlyContinue
-      break
+    if ($bitsSvc) {
+      Render-Bar -Percent $ProgressBase -Phase "Download" -Detail "BITS" -Mood "Good"
+      Start-BitsTransfer -Source $Url -Destination $OutFile -ErrorAction Stop
+      Assert-DownloadedFile -Path $OutFile
+      return
+    } else {
+      $errors.Add("BITS service not present.")
     }
-
-    $pct = 0
-    if ($job.BytesTotal -gt 0) {
-      $pct = [int](($job.BytesTransferred / $job.BytesTotal) * 100)
-    }
-
-    $overall = 5 + [int](($pct/100) * 20)
-    Render-Bar -Percent $overall -Phase "Download" -Detail ("{0}%" -f $pct) -Mood "Good"
-
-    Start-Sleep -Milliseconds 200
-    $job = Get-BitsTransfer -AllUsers | Where-Object { $_.DisplayName -eq "RicohDrvZip" } | Select-Object -First 1
-    if (-not $job) {
-      if (Test-Path $OutFile) { break }
-      throw "BITS job vanished unexpectedly and ZIP not found."
-    }
+  } catch {
+    $errors.Add(("BITS failed: {0}" -f $_.Exception.Message))
   }
+
+  # Method 2: Invoke-WebRequest
+  try {
+    Render-Bar -Percent ($ProgressBase + [int]($ProgressSpan*0.33)) -Phase "Download" -Detail "IWR" -Mood "Warn"
+    $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) PowerShellDownloader"
+    Invoke-WebRequest -Uri $Url -OutFile $OutFile -Headers @{ "User-Agent" = $ua } -UseBasicParsing -ErrorAction Stop
+    Assert-DownloadedFile -Path $OutFile
+    return
+  } catch {
+    $errors.Add(("Invoke-WebRequest failed: {0}" -f $_.Exception.Message))
+    if (Test-Path $OutFile) { Remove-Item $OutFile -Force -ErrorAction SilentlyContinue }
+  }
+
+  # Method 3: curl.exe
+  try {
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($curl) {
+      Render-Bar -Percent ($ProgressBase + [int]($ProgressSpan*0.66)) -Phase "Download" -Detail "curl" -Mood "Warn"
+      $args = @("-L","--retry","3","--retry-delay","1","--connect-timeout","20","-o",$OutFile,$Url)
+      $p = Start-Process -FilePath $curl.Source -ArgumentList $args -Wait -PassThru -NoNewWindow
+      if ($p.ExitCode -ne 0) { throw "curl.exe exit code: $($p.ExitCode)" }
+      Assert-DownloadedFile -Path $OutFile
+      return
+    } else {
+      $errors.Add("curl.exe not found.")
+    }
+  } catch {
+    $errors.Add(("curl.exe failed: {0}" -f $_.Exception.Message))
+    if (Test-Path $OutFile) { Remove-Item $OutFile -Force -ErrorAction SilentlyContinue }
+  }
+
+  # Method 4: certutil
+  try {
+    $certutil = Get-Command certutil.exe -ErrorAction SilentlyContinue
+    if ($certutil) {
+      Render-Bar -Percent ($ProgressBase + $ProgressSpan) -Phase "Download" -Detail "certutil" -Mood "Warn"
+      $p = Start-Process -FilePath $certutil.Source -ArgumentList @("-urlcache","-split","-f",$Url,$OutFile) -Wait -PassThru -NoNewWindow
+      if ($p.ExitCode -ne 0) { throw "certutil exit code: $($p.ExitCode)" }
+      Assert-DownloadedFile -Path $OutFile
+      return
+    } else {
+      $errors.Add("certutil.exe not found.")
+    }
+  } catch {
+    $errors.Add(("certutil failed: {0}" -f $_.Exception.Message))
+    if (Test-Path $OutFile) { Remove-Item $OutFile -Force -ErrorAction SilentlyContinue }
+  }
+
+  throw ("All download methods failed.`n- " + ($errors -join "`n- "))
 }
 
+# ---------------- ZIP EXTRACT ----------------
 function Extract-DriverZip {
   param([string]$ZipPath,[string]$DestDir)
 
@@ -283,8 +362,23 @@ function Extract-DriverZip {
   return $inf
 }
 
+# ---------------- VERIFY ----------------
+function Test-PrinterInstalled {
+  param([string]$Name)
+  try {
+    if (Get-Command Get-Printer -ErrorAction SilentlyContinue) {
+      return [bool](Get-Printer -Name $Name -ErrorAction SilentlyContinue)
+    }
+    $filter = "Name='{0}'" -f $Name.Replace("'","''")
+    $p = Get-CimInstance -ClassName Win32_Printer -Filter $filter -ErrorAction SilentlyContinue
+    return [bool]$p
+  } catch {
+    return $false
+  }
+}
+
 # ---------------- MAIN ----------------
-Show-Banner -Title "RICOH Network Printer Auto-Installer (ZIP Driver Source) - Hardened" -Version "1.8.1" -Author "Shourav (rhshourav)"
+Show-Banner -Title "RICOH Network Printer Auto-Installer (ZIP Driver Source) - Hardened" -Version "1.8.3" -Author "Shourav (rhshourav)"
 New-BarLine
 
 try {
@@ -304,7 +398,7 @@ try {
 
   Render-Bar -Percent 5 -Phase "Download" -Detail "Starting" -Mood "Good"
   $zipPath = Join-Path $env:TEMP "r_print_driver.zip"
-  Download-ZipWithBits -Url $ZipUrl -OutFile $zipPath
+  Download-FileHardened -Url $ZipUrl -OutFile $zipPath -ProgressBase 5 -ProgressSpan 20
 
   Render-Bar -Percent 25 -Phase "Extract" -Detail "Unpacking" -Mood "Good"
   try { Unblock-File -Path $zipPath -ErrorAction SilentlyContinue } catch {}
@@ -339,18 +433,21 @@ try {
   Ensure-LprPort -PortName $PortName -IP $PrinterIP -Queue $LprQueue
 
   # Wait until spooler registers it
-  if (-not (Wait-Port -Name $PortName -Seconds 15)) {
-    # Provide quick diagnostics
+  if (-not (Wait-Port -Name $PortName -Seconds 20)) {
     $ports = Get-CimInstance Win32_TCPIPPrinterPort -ErrorAction SilentlyContinue |
       Select-Object -First 30 Name,HostAddress,Protocol,PortNumber
-    throw "LPR port '$PortName' was not registered in time. Existing ports sample: $($ports | Out-String)"
+    throw "LPR port '$PortName' was not registered in time. Existing ports sample:`n$($ports | Out-String)"
   }
 
   Render-Bar -Percent 95 -Phase "Printer" -Detail "Install printer" -Mood "Good"
   PrintUI-InstallPrinter -PrinterName $PrinterName -PortName $PortName -DriverName $DriverName -InfPath $infPath
 
+  if (-not (Test-PrinterInstalled -Name $PrinterName)) {
+    throw "Printer installation command completed but printer '$PrinterName' is not visible in the system yet."
+  }
+
   Finish-Bar -Final "Completed" -Mood "Good"
-  Log ("SUCCESS: Installed '{0}' using '{1}' on port '{2}'" -f $PrinterName,$DriverName,$PortName)
+  Log ("SUCCESS: Installed '{0}' using '{1}' on port '{2}' (LPR queue '{3}')" -f $PrinterName,$DriverName,$PortName,$LprQueue)
 
 } catch {
   Finish-Bar -Final "Failed" -Mood "Fail"
