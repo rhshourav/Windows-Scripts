@@ -32,7 +32,7 @@ If your hosted script supports parameters, pass them after the expression is loa
 
 ```powershell
 Set-ExecutionPolicy Bypass -Scope Process -Force
-$script = irm "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Auto-App-Installer-Framework/auto.ps1"
+$script = irm "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Auto-App-Installer-Framework/autoInstallFromLocal.ps1"
 iex $script
 # Then run the entry script/function if your framework defines one, or re-run with parameters if implemented as a script.
 ```
@@ -46,7 +46,7 @@ iex $script
 Download to disk, review, optionally verify hash/signature, then execute:
 
 ```powershell
-$u = "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Auto-App-Installer-Framework/auto.ps1"
+$u = "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Auto-App-Installer-Framework/autoInstallFromLocal.ps1"
 $dst = "$env:TEMP\auto_app_installer.ps1"
 
 irm $u -OutFile $dst
@@ -63,7 +63,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $dst
 Avoid “moving target” URLs by pinning to a specific commit hash:
 
 ```powershell
-$u = "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/<COMMIT_SHA>/Auto-App-Installer-Framework/auto.ps1"
+$u = "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/<COMMIT_SHA>/Auto-App-Installer-Framework/autoInstallFromLocal.ps1"
 ```
 
 ---
@@ -100,7 +100,7 @@ $u = "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/<COMMIT_SHA>/A
 If enabled, you will be asked before *each* selected installer:
 
 ```powershell
-.\auto.ps1 -ConfirmEach
+.\autoInstallFromLocal.ps1 -ConfirmEach
 ```
 
 ### Local fallback installers folder (optional)
@@ -108,7 +108,7 @@ If enabled, you will be asked before *each* selected installer:
 If network shares are unavailable, the script can fall back to a local folder (default: `.\Installers` relative to script):
 
 ```powershell
-.\auto.ps1 -LocalFallbackDir "C:\Installers"
+.\autoInstallFromLocal.ps1  -LocalFallbackDir "C:\Installers"
 ```
 
 ---
