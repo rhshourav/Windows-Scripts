@@ -41,8 +41,28 @@ try {
     Clear-Host
 } catch {}
 
+function Show-Logo {
+    Write-Host @"
+__        ___           _                     ____            _       _       
+\ \      / (_)_ __   __| | _____      _____  / ___|  ___ _ __(_)_ __ | |_ ___ 
+ \ \ /\ / /| | '_ \ / _` |/ _ \ \ /\ / / __| \___ \ / __| '__| | '_ \| __/ __|
+  \ V  V / | | | | | (_| | (_) \ V  V /\__ \  ___) | (__| |  | | |_) | |_\__ \
+   \_/\_/  |_|_| |_|\__,_|\___/ \_/\_/ |___/ |____/ \___|_|  |_| .__/ \__|___/
+                                                                |_|            
+
+"@ -ForegroundColor Cyan
+}
+
+
 function Write-Header {
     Clear-Host
+try {
+        $Host.UI.RawUI.BackgroundColor = 'Black'
+        $Host.UI.RawUI.ForegroundColor = 'White'
+    } catch {}
+    Clear-Host
+
+    Show-Logo
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host "                    Windows Scripts (Menu)" -ForegroundColor Cyan
     Write-Host "          Author: rhshourav | GitHub: Windows-Scripts" -ForegroundColor DarkCyan
