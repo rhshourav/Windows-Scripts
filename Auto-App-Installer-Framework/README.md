@@ -138,5 +138,3 @@ Intended use: internal IT automation for Windows 10/11 endpoints.
 
 If you want this README to match your exact repo structure, replace the raw URL(s) above with your actual script path(s) in GitHub.
 
-```
-```
