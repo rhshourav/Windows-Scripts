@@ -40,21 +40,58 @@ function Write-Good { param([string]$m) Write-Host ('[+] {0}' -f $m) -Foreground
 function Write-Warn { param([string]$m) Write-Host ('[!] {0}' -f $m) -ForegroundColor Yellow }
 function Write-Bad  { param([string]$m) Write-Host ('[-] {0}' -f $m) -ForegroundColor Red }
 
+
+# Proper Admin elevation
+function Escape-SingleQuote {
+    param([string]$s)
+    if ($null -eq $s) { return '' }
+    return ($s -replace "'", "''")
+}
+
 function Ensure-Admin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
     $p  = New-Object Security.Principal.WindowsPrincipal($id)
+
     if (-not $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        Write-Warn 'Not running as Administrator. Relaunching elevated...'
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName  = 'powershell.exe'
-        $psi.Arguments = ('-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $PSCommandPath)
-        $psi.Verb      = 'runas'
-        try { [System.Diagnostics.Process]::Start($psi) | Out-Null } catch {
-            Write-Bad ('Elevation cancelled or failed: {0}' -f $_.Exception.Message)
+        Write-Host "[!] Not running as Administrator. Relaunching elevated..." -ForegroundColor Yellow
+
+        $wd     = (Get-Location).Path
+        $script = $PSCommandPath
+
+        # Preserve any args passed to this script (best-effort)
+        $argStr = ''
+        if ($MyInvocation.UnboundArguments -and $MyInvocation.UnboundArguments.Count -gt 0) {
+            $quoted = foreach ($a in $MyInvocation.UnboundArguments) {
+                '"' + ($a -replace '"','`"') + '"'
+            }
+            $argStr = ($quoted -join ' ')
         }
+
+        $wdEsc     = Escape-SingleQuote $wd
+        $scriptEsc = Escape-SingleQuote $script
+
+        # Wrapper runs your script in a CHILD powershell process, so 'exit' inside your script
+        # does NOT kill the wrapper. Wrapper then pauses so the window stays open.
+        $cmd = @"
+Set-Location -LiteralPath '$wdEsc'
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File '$scriptEsc' $argStr
+`$ec = `$LASTEXITCODE
+Write-Host ''
+Write-Host ('[i] Finished. ExitCode={0}' -f `$ec) -ForegroundColor Cyan
+Read-Host 'Press Enter to close'
+"@
+
+        Start-Process powershell.exe -Verb RunAs -ArgumentList @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-NoExit',
+            '-Command', $cmd
+        ) | Out-Null
+
         exit
     }
 }
+#End
 
 function New-Log {
     $root = Join-Path $env:TEMP 'rhshourav\WindowsScripts\AutoAppInstaller'
