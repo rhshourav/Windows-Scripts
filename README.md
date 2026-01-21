@@ -1,51 +1,185 @@
-# Windows-Scripts
----
-## 🗝️ For Windows Act1ve.
-### Change Edition , 0hook, HWID, TSF0rge, 0nline KM5
-- Try this:
-```powershell
-irm https://tinyurl.com/RUN-MSA | iex
-```
-OR
-```powershell
-irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/run | iex
-```
----
-## 🌐 One-Line Remote Execution (PowerShell)
+# Windows Scripts
 
-### Disable / Enable Windows Update
+<div align="center">
 
-```powershell
-irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/main-run | iex
-```
----
-## 🤖Windows Optimizer
-## One Line code for Windows Performance Tuner ```[Safe]```
-```powershell
-iex (irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/wp-Tuner.ps1)
-```
-## One Line code for Windows Optimizer `[Eternal Mode only Afeter Windows Installation]`
-```powershell
-irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/Windows-Optimizer.ps1 | iex
-```
+<!-- LOGO PLACEHOLDER (CENTERED) -->
+<!-- Add your logo file to: assets/logo.png -->
+<!-- Then replace the placeholder below with this line: -->
+<!-- <img src="assets/logo.png" alt="Windows Scripts Logo" width="280" /> -->
+
+<!-- Placeholder box (remove once logo is added) -->
+<svg width="280" height="140" viewBox="0 0 280 140" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Logo placeholder">
+  <rect x="6" y="6" width="268" height="128" rx="18" fill="#0b0f14" stroke="#00e5ff" stroke-width="2"/>
+  <text x="140" y="70" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="18" fill="#d7e2ee">LOGO</text>
+  <text x="140" y="98" text-anchor="middle" font-family="Consolas, Menlo, monospace" font-size="12" fill="#9fb3c8">assets/logo.png</text>
+</svg>
+
+**Windows automation (PowerShell)**  
+Author: **rhshourav**  
+GitHub: **https://github.com/rhshourav/Windows-Scripts**
+
+</div>
+
 ---
 
-## 💠 ERP AUTOMATE 
-### One Line Code for ERP Setup
-1. Run `Powershell` as an administrator
-2. Run:
+## Overview
+
+`windowsScripts.ps1` is an **admin-elevating PowerShell menu** that launches a set of common Windows IT automation tasks (apps, Office installs, ERP setup, printers, optimization, Windows Update control, and fixes).
+
+Design goals:
+- Works on **Windows 10 (older builds) through Windows 11**
+- **Elevates once** at start (UAC prompt when needed)
+- **Single-key menu** (press `1`, `2`, … `A`, `B`, etc. — no Enter)
+- Each action runs in a **new elevated PowerShell window**
+- Returns to the menu so you can run **multiple tasks** in one session
+
+---
+
+## Quick start
+
+### Option 1 — One-line run (PowerShell)
+
+Runs the latest menu directly from GitHub:
+
 ```powershell
-irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/run_Auto-ERP.ps1 | iex
-```
-### One line Code for ERP Font Install
-1. Run `Powershell` as an administrator
-2. Run:
-```powershell
-irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/font_install.ps1 | iex
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/windowsScripts.ps1')"
 ```
 
-## 🏪 Install Microsoft Store On Windows 10 / 11 LTSC or LTSB edition
-### Try
+Notes:
+- Expect a **UAC prompt** (this tool needs admin rights).
+- `-ExecutionPolicy Bypass` applies only to this process run; it does not permanently change your policy.
+
+### Option 2 — Download and run (recommended): `run.cmd`
+
+1) Download **run.cmd**  
+2) Right-click → **Run as administrator** (or double-click and accept UAC)  
+3) The launcher downloads `windowsScripts.ps1` to `%TEMP%` and starts it.
+
+---
+
+## One-line commands (direct tools)
+
+If you want to run a specific tool directly (without the menu), use the following **one-line** commands.
+
+### App Setup
+
 ```powershell
-irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/LTSC-ADD-MS_Store-2019/DL-RUN.ps1 | iex
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Auto-App-Installer-Framework/autoInstallFromLocal.ps1')"
 ```
+
+### Office
+
+**Office 365 Install**
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/office-Install/install-o365.ps1')"
+```
+
+**Office LTSC 2021 Install**
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/office-Install/install-ltsc2021.ps1')"
+```
+
+**Microsoft Store for LTSC**
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/LTSC-ADD-MS_Store-2019/DL-RUN.ps1')"
+```
+
+**New Outlook Uninstaller**
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/New%20Outlook%20Uninstaller/uninstall-NOU.ps1')"
+```
+
+### ERP Auto Setup
+
+**ERP Setup**
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/run_Auto-ERP.ps1')"
+```
+
+**ERP Font Setup**
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/font_install.ps1')"
+```
+
+### Printer Setup
+
+**RICHO B&W**
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addRICHO.ps1')"
+```
+
+**RICHO Color**
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addColorRICHO.ps1')"
+```
+
+### Activation & Edition
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/run.ps1')"
+```
+
+### Windows Optimization
+
+**Windows Tuner**
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/wp-Tuner.ps1')"
+```
+
+**Windows Optimizer**
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/Windows-Optimizer.ps1')"
+```
+
+### Windows Update
+
+**Disable Windows Update**
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Disable-WindowsUpdate.ps1')"
+```
+
+**Enable Windows Update**
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Enable-WindowsUpdate.ps1')"
+```
+
+**Upgrade Windows 10 to 11**
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/TO-Win11-Auto-Upgrade/Win11-AutoUpgrade.ps1')"
+```
+
+### Windows System Interrupt Fix
+
+**Intel System Interrupt Fix**
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/SystemInterrupt-Fix/Intel-SystemInterrupt-Fix.ps1')"
+```
+
+**WPT Interrupt Fix**
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/SystemInterrupt-Fix/wpt_interrupt_fix_plus.ps1')"
+```
+
+---
+
+## Requirements
+
+- Windows 10 / 11
+- PowerShell 5.1+ (built-in on Windows 10/11)
+- Internet access to `raw.githubusercontent.com`
+- Administrator rights (UAC prompt)
+
+---
+
+## Security notes (do not skip)
+
+- Running remote scripts is a trust decision. Use only on machines you control or where you have explicit authorization.
+- For production environments, pin to a **specific commit hash** instead of `main` to avoid unexpected upstream changes.
+- Consider reviewing the script in a browser before executing in a high-control environment.
+
+---
+
+## License
+
+This project is licensed under the **MIT License**. See [`LICENSE`](LICENSE).
+
