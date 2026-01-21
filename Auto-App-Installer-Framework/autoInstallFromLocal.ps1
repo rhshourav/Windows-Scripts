@@ -106,14 +106,47 @@ function Resolve-InstallBasePath {
         @{ Label='Staff PC (19.44)';       Path='\\192.168.19.44\it\PC Setup\Staff pc' }
     )
 
+    # Find all reachable sources (not just first)
+    $available = @()
     foreach ($loc in $locations) {
         if (Test-Path -LiteralPath $loc.Path) {
-            Write-Good ('Using network location: {0} -> {1}' -f $loc.Label, $loc.Path)
-            Log-Line OK ('BasePath={0} ({1})' -f $loc.Path, $loc.Label)
-            return $loc.Path
+            $available += $loc
         }
     }
 
+    if ($available.Count -gt 0) {
+        Write-Host ''
+        Write-Header 'Select Installation Source (CLI)'
+
+        for ($i = 0; $i -lt $available.Count; $i++) {
+            $n = $i + 1
+            Write-Host ('[{0}] {1} -> {2}' -f $n, $available[$i].Label, $available[$i].Path) -ForegroundColor Cyan
+        }
+
+        Write-Host ''
+        Write-Host ('Press ENTER for default [1], or choose 1-{0}.' -f $available.Count) -ForegroundColor Yellow
+        $choice = Read-Host 'Source'
+
+        if ([string]::IsNullOrWhiteSpace($choice)) { $choice = '1' }
+
+        if ($choice -match '^\d+$') {
+            $idx = [int]$choice
+            if ($idx -ge 1 -and $idx -le $available.Count) {
+                $selected = $available[$idx - 1]
+                Write-Good ('Selected: {0} -> {1}' -f $selected.Label, $selected.Path)
+                Log-Line OK ('BasePath={0} ({1})' -f $selected.Path, $selected.Label)
+                return $selected.Path
+            }
+        }
+
+        Write-Warn 'Invalid selection. Defaulting to [1].'
+        $selected = $available[0]
+        Write-Good ('Selected: {0} -> {1}' -f $selected.Label, $selected.Path)
+        Log-Line OK ('BasePath={0} ({1})' -f $selected.Path, $selected.Label)
+        return $selected.Path
+    }
+
+    # None available: same fallback behavior as before
     Write-Bad 'No valid network location found.'
     Log-Line WARN 'NoNetworkLocation'
 
@@ -132,9 +165,9 @@ function Resolve-InstallBasePath {
 
     Write-Warn ('Local fallback folder not found: {0}' -f $LocalFallbackDir)
     Write-Warn 'Optional: download framework script (NOT auto-executed).'
-    $choice = Read-Host 'Download framework script to TEMP for manual review? (Y/N)'
+    $dl = Read-Host 'Download framework script to TEMP for manual review? (Y/N)'
 
-    if ($choice -match '^[Yy]$') {
+    if ($dl -match '^[Yy]$') {
         try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
         $dst = Join-Path $env:TEMP ('rhshourav_framework_{0}.ps1' -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
         try {
@@ -150,6 +183,7 @@ function Resolve-InstallBasePath {
 
     return $null
 }
+
 
 function Get-Installers {
     param([string]$BasePath)
@@ -376,7 +410,7 @@ function Install-Apps {
 # Main
 # ---------------------------
 Ensure-Admin
-Write-Header 'Auto App Installer – v1.2.0 (CLI only) (by rhshourav)'
+Write-Header 'Auto App Installer v1.2.0 (CLI only) (by rhshourav)'
 New-Log
 
 try {
