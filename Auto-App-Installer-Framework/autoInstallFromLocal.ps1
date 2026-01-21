@@ -15,15 +15,7 @@
   - Graceful fallback after 30s with progress bar (NO IEX)
   - Windows 10 / 11 compatible, PowerShell 5.1+
 #>
-if (-not ([Security.Principal.WindowsPrincipal] `
-    [Security.Principal.WindowsIdentity]::GetCurrent()
-).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
 
-    Write-Warning "Script is not running as administrator. Restarting as admin..."
-    $pwsh = (Get-Process -Id $PID).Path
-    Start-Process $pwsh "-NoProfile -File `"$PSCommandPath`"" -Verb RunAs
-    Exit
-}
 [CmdletBinding()]
 param(
     [switch]$ConfirmEach = $false,
