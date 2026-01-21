@@ -2,17 +2,7 @@
 
 <div align="center">
 
-<!-- LOGO PLACEHOLDER (CENTERED) -->
-<!-- Add your logo file to: assets/logo.png -->
-<!-- Then replace the placeholder below with this line: -->
-<!-- <img src="assets/logo.png" alt="Windows Scripts Logo" width="280" /> -->
-
-<!-- Placeholder box (remove once logo is added) -->
-<svg width="280" height="140" viewBox="0 0 280 140" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Logo placeholder">
-  <rect x="6" y="6" width="268" height="128" rx="18" fill="#0b0f14" stroke="#00e5ff" stroke-width="2"/>
-  <text x="140" y="70" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="18" fill="#d7e2ee">LOGO</text>
-  <text x="140" y="98" text-anchor="middle" font-family="Consolas, Menlo, monospace" font-size="12" fill="#9fb3c8">assets/logo.png</text>
-</svg>
+<img src="assets/logo.png" alt="Windows Scripts Logo" width="280" />
 
 **Windows automation (PowerShell)**  
 Author: **rhshourav**  
