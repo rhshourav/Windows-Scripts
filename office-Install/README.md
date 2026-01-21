@@ -2,8 +2,7 @@
 
 Automated installers for Microsoft Office (O365 / LTSC) using the **Office Deployment Tool (ODT)**.
 
-These scripts download a pre-built ZIP containing `setup.exe` + XML configuration, extract it, and run the ODT to **download and install Office silently**. ([installoffice.org][1])
-
+These scripts download a pre-built ZIP containing `setup.exe` + XML configuration, extract it, and run the ODT to **download and install Office silently**.
 ---
 
 ## 🗂️ Included Scripts
