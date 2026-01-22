@@ -2,7 +2,7 @@
 
 <div align="center">
 
-<img src="assets/logo.png" alt="Windows Scripts Logo" width="280" />
+<img src="assets/Windows-Scripts-Logo.png" alt="Windows Scripts Logo" width="280" />
 
 **Windows automation (PowerShell)**  
 Author: **rhshourav**  
