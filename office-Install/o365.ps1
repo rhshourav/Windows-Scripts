@@ -22,6 +22,15 @@ if (-not $admin) {
     Write-Error "Run this script as Administrator."
     exit 1
 }
+# -----------------------------
+# UI: black background + bright colors
+# -----------------------------
+try {
+    $raw = $Host.UI.RawUI
+    $raw.BackgroundColor = 'Black'
+    $raw.ForegroundColor = 'White'
+    Clear-Host
+} catch {}
 
 # -------- SETUP DIR --------
 New-Item -ItemType Directory -Path $Base -Force | Out-Null
