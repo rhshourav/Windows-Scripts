@@ -1,3 +1,13 @@
+# -----------------------------
+# UI: black background + bright colors
+# -----------------------------
+try {
+    $raw = $Host.UI.RawUI
+    $raw.BackgroundColor = 'Black'
+    $raw.ForegroundColor = 'White'
+    Clear-Host
+} catch {}
+
 # Function to check New Outlook via Registry
 function Check-NewOutlook {
     $RegPath = "HKCU:\Software\Microsoft\Office\16.0\Outlook\Setup"
