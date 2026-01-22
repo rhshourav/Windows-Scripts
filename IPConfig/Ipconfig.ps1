@@ -90,6 +90,15 @@ function Confirm-YesNoKey([string]$Prompt) {
   $k = Read-MenuKey -Prompt ("{0} [Y/N]: " -f $Prompt) -ValidKeys @("Y","N")
   return ($k -eq "Y")
 }
+# -----------------------------
+# UI: black background + bright colors
+# -----------------------------
+try {
+    $raw = $Host.UI.RawUI
+    $raw.BackgroundColor = 'Black'
+    $raw.ForegroundColor = 'White'
+    Clear-Host
+} catch {}
 
 # -----------------------------
 # Admin / Elevation
