@@ -1,38 +1,28 @@
 <#
 .SYNOPSIS
-  Force set Windows time zone to Dhaka, force time sync, validate vs Dhaka time,
-  and apply chosen date/time display formats to ALL users (existing + future) with refresh.
+  Set Dhaka time zone, force time sync (timeout-safe), and apply date/time formats for ALL users,
+  with immediate refresh for the CURRENT user.
 
 .DESCRIPTION
-  - Sets time zone to "Bangladesh Standard Time" (Dhaka) (machine-wide)
-  - Forces Windows Time (w32time) service configuration and resync (best-effort)
-  - Validates local time vs computed Dhaka time within threshold
-  - Prompts once for date + time format and applies to:
-      * All loaded user hives (HKEY_USERS\<SID>)
-      * All user profiles by loading each NTUSER.DAT (unloaded users)
-      * Default profile (C:\Users\Default\NTUSER.DAT) for future users
-      * HKEY_USERS\.DEFAULT (system/logon context)
-  - Broadcasts settings change to refresh CURRENT session immediately (best-effort)
+  Order is intentional:
+  1) Prompt + apply formats first (so current user sees it immediately)
+  2) Refresh current session (WM_SETTINGCHANGE + optional Explorer restart)
+  3) Force time zone Dhaka and time sync (resync has a hard timeout)
 
 .AUTHOR
   Shourav (rhshourav)
 .GITHUB
   https://github.com/rhshourav
 .VERSION
-  1.2.0
-
-.NOTES
-  - Must run as Administrator (script auto-elevates).
-  - Format changes for other users who are currently logged in typically require
-    sign-out/sign-in in their sessions. Script applies registry values for them,
-    but cannot force their UI to refresh without disrupting their session.
+  1.3.0
 #>
 
 [CmdletBinding()]
 param(
   [int]$MaxAllowedDriftSeconds = 5,
   [switch]$SkipFormatPrompt,
-  [switch]$RestartExplorerForCurrentUser
+  [switch]$RestartExplorerForCurrentUser,
+  [int]$ResyncTimeoutSeconds = 15
 )
 
 $ErrorActionPreference = "Stop"
@@ -61,7 +51,8 @@ if (-not (Is-Admin)) {
     "-NoProfile",
     "-ExecutionPolicy", "Bypass",
     "-File", "`"$PSCommandPath`"",
-    "-MaxAllowedDriftSeconds", $MaxAllowedDriftSeconds
+    "-MaxAllowedDriftSeconds", $MaxAllowedDriftSeconds,
+    "-ResyncTimeoutSeconds", $ResyncTimeoutSeconds
   )
   if ($SkipFormatPrompt) { $argList += "-SkipFormatPrompt" }
   if ($RestartExplorerForCurrentUser) { $argList += "-RestartExplorerForCurrentUser" }
@@ -71,7 +62,7 @@ if (-not (Is-Admin)) {
 }
 
 # -----------------------------
-# Core constants
+# Constants
 # -----------------------------
 $DhakaWindowsTzId = "Bangladesh Standard Time"
 
@@ -80,71 +71,48 @@ function Get-DhakaNow {
   [TimeZoneInfo]::ConvertTimeFromUtc((Get-Date).ToUniversalTime(), $tz)
 }
 
-function Ensure-TimeZoneDhaka {
-  $before = (tzutil /g 2>$null).Trim()
-  Write-Info "Current Windows time zone: $before"
-  if ($before -ne $DhakaWindowsTzId) {
-    Write-Info "Setting time zone to Dhaka: $DhakaWindowsTzId"
-    tzutil /s $DhakaWindowsTzId | Out-Null
-  } else {
-    Write-OK "Time zone already set to Dhaka."
-  }
-  $after = (tzutil /g 2>$null).Trim()
-  if ($after -ne $DhakaWindowsTzId) {
-    throw "Failed to set time zone. Current is still: $after"
-  }
-  @{ Before = $before; After = $after }
-}
+# -----------------------------
+# Safe process runner (timeout)
+# -----------------------------
+function Invoke-ProcessWithTimeout {
+  param(
+    [Parameter(Mandatory)] [string] $FilePath,
+    [Parameter(Mandatory)] [string[]] $ArgumentList,
+    [int] $TimeoutSeconds = 15
+  )
 
-function Force-TimeSync {
-  Write-Info "Ensuring Windows Time service (w32time) is enabled and running..."
-  try { Set-Service -Name w32time -StartupType Automatic } catch { }
+  $outFile = Join-Path $env:TEMP ("ps_out_{0}.txt" -f ([guid]::NewGuid().ToString("N")))
+  $errFile = Join-Path $env:TEMP ("ps_err_{0}.txt" -f ([guid]::NewGuid().ToString("N")))
 
-  $svc = Get-Service -Name w32time -ErrorAction Stop
-  if ($svc.Status -ne "Running") { Start-Service -Name w32time }
-
-  # Best-effort peers; domain time policy may override
-  $peers = "time.windows.com,0x9 pool.ntp.org,0x9"
-  Write-Info "Configuring NTP peers (best-effort): $peers"
   try {
-    & w32tm /config /manualpeerlist:$peers /syncfromflags:manual /reliable:no /update | Out-Null
-  } catch {
-    Write-Warn "w32tm /config failed (continuing): $($_.Exception.Message)"
+    $p = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -NoNewWindow `
+      -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+
+    $done = $p | Wait-Process -Timeout $TimeoutSeconds -ErrorAction SilentlyContinue
+    if (-not $done) {
+      try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch { }
+      return @{
+        TimedOut = $true
+        ExitCode = $null
+        StdOut   = (Get-Content $outFile -ErrorAction SilentlyContinue | Out-String).Trim()
+        StdErr   = (Get-Content $errFile -ErrorAction SilentlyContinue | Out-String).Trim()
+      }
+    }
+
+    return @{
+      TimedOut = $false
+      ExitCode = $p.ExitCode
+      StdOut   = (Get-Content $outFile -ErrorAction SilentlyContinue | Out-String).Trim()
+      StdErr   = (Get-Content $errFile -ErrorAction SilentlyContinue | Out-String).Trim()
+    }
   }
-
-  Write-Info "Restarting w32time (best-effort)..."
-  try {
-    Stop-Service -Name w32time -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 1
-    Start-Service -Name w32time -ErrorAction Stop
-  } catch { }
-
-  Write-Info "Forcing time resync..."
-  $resyncOut = ""
-  try { $resyncOut = (& w32tm /resync /force 2>&1 | Out-String).Trim() } catch { $resyncOut = $_.Exception.Message }
-
-  $statusOut = ""
-  try { $statusOut = (& w32tm /query /status 2>&1 | Out-String).Trim() } catch { }
-
-  @{ ResyncOutput = $resyncOut; StatusOutput = $statusOut }
-}
-
-function Test-DhakaTimeMatch([int]$ThresholdSeconds) {
-  $localNow = Get-Date
-  $dhakaNow = Get-DhakaNow
-  $drift = [Math]::Abs(($localNow - $dhakaNow).TotalSeconds)
-
-  @{
-    LocalNow = $localNow
-    DhakaNow = $dhakaNow
-    DriftSeconds = [Math]::Round($drift, 3)
-    Threshold = $ThresholdSeconds
-    IsMatch = ($drift -le $ThresholdSeconds)
+  finally {
+    Remove-Item $outFile, $errFile -Force -ErrorAction SilentlyContinue
   }
 }
 
 # -----------------------------
-# Format (ALL users) helpers
+# Format (ALL users)
 # -----------------------------
 function Prompt-Choice([string]$Title, [hashtable]$Options, [string]$CurrentValue) {
   Write-Line
@@ -163,7 +131,6 @@ function Prompt-Choice([string]$Title, [hashtable]$Options, [string]$CurrentValu
 
 function Set-IntlInHive([string]$HiveRoot, [string]$ShortDate, [string]$LongDate, [string]$TimeFmt) {
   $intlPath = Join-Path $HiveRoot "Control Panel\International"
-
   if (-not (Test-Path $intlPath)) {
     try { New-Item -Path $intlPath -Force | Out-Null } catch { return $null }
   }
@@ -263,7 +230,7 @@ function Apply-FormatsAllUsers([string]$ShortDate, [string]$TimeFmt) {
     $sid = $p.PSChildName
     $mountName = $null
     try {
-      if (Test-Path "Registry::HKEY_USERS\$sid") { continue } # already loaded & handled
+      if (Test-Path "Registry::HKEY_USERS\$sid") { continue }
 
       $profilePath = (Get-ItemProperty $p.PSPath -ErrorAction Stop).ProfileImagePath
       if ([string]::IsNullOrWhiteSpace($profilePath)) { continue }
@@ -286,8 +253,8 @@ function Apply-FormatsAllUsers([string]$ShortDate, [string]$TimeFmt) {
   }
 
   @{
-    Applied = $applied
-    Failed  = $failed
+    Applied   = $applied
+    Failed    = $failed
     ShortDate = $ShortDate
     LongDate  = $LongDate
     TimeFmt   = $TimeFmt
@@ -297,7 +264,6 @@ function Apply-FormatsAllUsers([string]$ShortDate, [string]$TimeFmt) {
 function Refresh-IntlSettingsCurrentSession([switch]$RestartExplorer) {
   Write-Info "Refreshing international settings for current session (best-effort)..."
 
-  # Broadcast WM_SETTINGCHANGE "intl"
   try {
     Add-Type -Namespace Win32 -Name NativeMethods -MemberDefinition @"
 using System;
@@ -330,7 +296,6 @@ public static class NativeMethods {
     Write-Warn "WM_SETTINGCHANGE broadcast failed: $($_.Exception.Message)"
   }
 
-  # Nudge per-user parameters
   try {
     & rundll32.exe user32.dll,UpdatePerUserSystemParameters 1, $true | Out-Null
     Write-OK "Updated per-user system parameters."
@@ -352,29 +317,85 @@ public static class NativeMethods {
 }
 
 # -----------------------------
-# Run
+# Time zone + sync
 # -----------------------------
-Write-Head "Dhaka TZ + Forced Sync + ALL-Users Formats (Refresh) | v1.2.0 | rhshourav"
-
-$tzResult = Ensure-TimeZoneDhaka
-
-$syncResult = Force-TimeSync
-if ($syncResult.ResyncOutput) {
-  if ($syncResult.ResyncOutput -match "completed|success|sent|resync") {
-    Write-OK "Resync output: $($syncResult.ResyncOutput)"
+function Ensure-TimeZoneDhaka {
+  $before = (tzutil /g 2>$null).Trim()
+  Write-Info "Current Windows time zone: $before"
+  if ($before -ne $DhakaWindowsTzId) {
+    Write-Info "Setting time zone to Dhaka: $DhakaWindowsTzId"
+    tzutil /s $DhakaWindowsTzId | Out-Null
   } else {
-    Write-Warn "Resync output: $($syncResult.ResyncOutput)"
+    Write-OK "Time zone already set to Dhaka."
+  }
+  $after = (tzutil /g 2>$null).Trim()
+  if ($after -ne $DhakaWindowsTzId) {
+    throw "Failed to set time zone. Current is still: $after"
+  }
+  @{ Before = $before; After = $after }
+}
+
+function Force-TimeSync([int]$TimeoutSeconds) {
+  Write-Info "Ensuring Windows Time service (w32time) is enabled and running..."
+  try { Set-Service -Name w32time -StartupType Automatic } catch { }
+
+  $svc = Get-Service -Name w32time -ErrorAction Stop
+  if ($svc.Status -ne "Running") { Start-Service -Name w32time }
+
+  $peers = "time.windows.com,0x9 pool.ntp.org,0x9"
+  Write-Info "Configuring NTP peers (best-effort): $peers"
+  try {
+    & w32tm /config /manualpeerlist:$peers /syncfromflags:manual /reliable:no /update | Out-Null
+  } catch {
+    Write-Warn "w32tm /config failed (continuing): $($_.Exception.Message)"
+  }
+
+  Write-Info "Restarting w32time (best-effort)..."
+  try {
+    Stop-Service -Name w32time -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+    Start-Service -Name w32time -ErrorAction Stop
+  } catch { }
+
+  Write-Info "Forcing time resync (timeout ${TimeoutSeconds}s)..."
+  $res = Invoke-ProcessWithTimeout -FilePath "w32tm.exe" -ArgumentList @("/resync","/force") -TimeoutSeconds $TimeoutSeconds
+
+  if ($res.TimedOut) {
+    Write-Warn "w32tm /resync timed out. Continuing."
+  } elseif ($res.ExitCode -ne 0) {
+    Write-Warn "w32tm /resync failed (exit $($res.ExitCode)). Continuing."
+  } else {
+    Write-OK "w32tm /resync completed."
+  }
+
+  $st = Invoke-ProcessWithTimeout -FilePath "w32tm.exe" -ArgumentList @("/query","/status") -TimeoutSeconds 10
+  @{
+    ResyncTimedOut = $res.TimedOut
+    ResyncExitCode = $res.ExitCode
+    ResyncStdOut   = $res.StdOut
+    ResyncStdErr   = $res.StdErr
+    StatusOutput   = ($st.StdOut + "`n" + $st.StdErr).Trim()
   }
 }
 
-$match = Test-DhakaTimeMatch -ThresholdSeconds $MaxAllowedDriftSeconds
-Write-Info ("Local time : {0:yyyy-MM-dd HH:mm:ss.fff}" -f $match.LocalNow)
-Write-Info ("Dhaka time : {0:yyyy-MM-dd HH:mm:ss.fff}" -f $match.DhakaNow)
-if ($match.IsMatch) {
-  Write-OK ("Time matches Dhaka within {0}s (drift: {1}s)." -f $match.Threshold, $match.DriftSeconds)
-} else {
-  Write-Warn ("Time does NOT match Dhaka within {0}s (drift: {1}s). Domain policy or blocked NTP can prevent correction." -f $match.Threshold, $match.DriftSeconds)
+function Test-DhakaTimeMatch([int]$ThresholdSeconds) {
+  $localNow = Get-Date
+  $dhakaNow = Get-DhakaNow
+  $drift = [Math]::Abs(($localNow - $dhakaNow).TotalSeconds)
+
+  @{
+    LocalNow = $localNow
+    DhakaNow = $dhakaNow
+    DriftSeconds = [Math]::Round($drift, 3)
+    Threshold = $ThresholdSeconds
+    IsMatch = ($drift -le $ThresholdSeconds)
+  }
 }
+
+# -----------------------------
+# MAIN
+# -----------------------------
+Write-Head "Dhaka TZ + Sync + ALL-Users Formats (Formats First) | v1.3.0 | rhshourav"
 
 $formatsResult = $null
 if (-not $SkipFormatPrompt) {
@@ -403,10 +424,10 @@ if (-not $SkipFormatPrompt) {
     if (-not $newShortDate) { $newShortDate = $(if ($curShort) { $curShort } else { "dd-MM-yyyy" }) }
     if (-not $newTimeFmt)   { $newTimeFmt   = $(if ($curTime)  { $curTime }  else { "HH:mm:ss" }) }
 
-    Write-Info "Applying chosen formats to ALL users..."
+    Write-Info "Applying chosen formats to ALL users (now)..."
     $formatsResult = Apply-FormatsAllUsers -ShortDate $newShortDate -TimeFmt $newTimeFmt
     Refresh-IntlSettingsCurrentSession -RestartExplorer:$RestartExplorerForCurrentUser
-    Write-OK "Formats written for all users. Current session refreshed (best-effort)."
+    Write-OK "Formats written for all users; current session refreshed."
   } else {
     Write-Info "No format changes selected."
   }
@@ -414,9 +435,21 @@ if (-not $SkipFormatPrompt) {
   Write-Info "Format prompt skipped."
 }
 
+# Time zone + sync AFTER formats (so format feels immediate)
+$tzResult = Ensure-TimeZoneDhaka
+$syncResult = Force-TimeSync -TimeoutSeconds $ResyncTimeoutSeconds
+
+$match = Test-DhakaTimeMatch -ThresholdSeconds $MaxAllowedDriftSeconds
+Write-Info ("Local time : {0:yyyy-MM-dd HH:mm:ss.fff}" -f $match.LocalNow)
+Write-Info ("Dhaka time : {0:yyyy-MM-dd HH:mm:ss.fff}" -f $match.DhakaNow)
+if ($match.IsMatch) {
+  Write-OK ("Time matches Dhaka within {0}s (drift: {1}s)." -f $match.Threshold, $match.DriftSeconds)
+} else {
+  Write-Warn ("Time does NOT match Dhaka within {0}s (drift: {1}s). Domain policy or blocked NTP can prevent correction." -f $match.Threshold, $match.DriftSeconds)
+}
+
 Write-Head "Summary"
 Write-Host ("Time zone: {0} -> {1}" -f $tzResult.Before, $tzResult.After) -ForegroundColor Gray
-Write-Host ("Drift vs Dhaka: {0}s (threshold {1}s) => {2}" -f $match.DriftSeconds, $match.Threshold, $(if ($match.IsMatch) {"OK"} else {"WARN"})) -ForegroundColor Gray
 
 if ($formatsResult) {
   Write-Host ("Formats: ShortDate={0} | LongDate={1} | TimeFormat={2}" -f $formatsResult.ShortDate, $formatsResult.LongDate, $formatsResult.TimeFmt) -ForegroundColor Gray
