@@ -9,6 +9,15 @@
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+# -----------------------------
+# UI: black background + bright colors
+# -----------------------------
+try {
+    $raw = $Host.UI.RawUI
+    $raw.BackgroundColor = 'Black'
+    $raw.ForegroundColor = 'White'
+    Clear-Host
+} catch {}
 
 # -----------------------------
 # Auto-Elevate
