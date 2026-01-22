@@ -1,30 +1,38 @@
 <#
 .SYNOPSIS
   Force set Windows time zone to Dhaka, force time sync, validate vs Dhaka time,
-  and apply chosen date/time display formats to ALL users (existing + future).
+  and apply chosen date/time display formats to ALL users (existing + future) with refresh.
 
 .DESCRIPTION
-  - Sets time zone to "Bangladesh Standard Time" (Dhaka)
-  - Forces w32time service and resync (best-effort; domain policy may override)
+  - Sets time zone to "Bangladesh Standard Time" (Dhaka) (machine-wide)
+  - Forces Windows Time (w32time) service configuration and resync (best-effort)
   - Validates local time vs computed Dhaka time within threshold
   - Prompts once for date + time format and applies to:
       * All loaded user hives (HKEY_USERS\<SID>)
-      * All profile hives by loading each NTUSER.DAT (unloaded users)
-      * C:\Users\Default\NTUSER.DAT (future users)
+      * All user profiles by loading each NTUSER.DAT (unloaded users)
+      * Default profile (C:\Users\Default\NTUSER.DAT) for future users
       * HKEY_USERS\.DEFAULT (system/logon context)
+  - Broadcasts settings change to refresh CURRENT session immediately (best-effort)
 
 .AUTHOR
   Shourav (rhshourav)
 .GITHUB
   https://github.com/rhshourav
 .VERSION
-  1.1.0
+  1.2.0
+
+.NOTES
+  - Must run as Administrator (script auto-elevates).
+  - Format changes for other users who are currently logged in typically require
+    sign-out/sign-in in their sessions. Script applies registry values for them,
+    but cannot force their UI to refresh without disrupting their session.
 #>
 
 [CmdletBinding()]
 param(
   [int]$MaxAllowedDriftSeconds = 5,
-  [switch]$SkipFormatPrompt
+  [switch]$SkipFormatPrompt,
+  [switch]$RestartExplorerForCurrentUser
 )
 
 $ErrorActionPreference = "Stop"
@@ -50,12 +58,14 @@ function Is-Admin {
 if (-not (Is-Admin)) {
   Write-Warn "Administrator rights are required. Elevating..."
   $argList = @(
-    "-NoProfile"
-    "-ExecutionPolicy", "Bypass"
-    "-File", "`"$PSCommandPath`""
+    "-NoProfile",
+    "-ExecutionPolicy", "Bypass",
+    "-File", "`"$PSCommandPath`"",
     "-MaxAllowedDriftSeconds", $MaxAllowedDriftSeconds
   )
   if ($SkipFormatPrompt) { $argList += "-SkipFormatPrompt" }
+  if ($RestartExplorerForCurrentUser) { $argList += "-RestartExplorerForCurrentUser" }
+
   Start-Process powershell -Verb RunAs -ArgumentList $argList
   exit
 }
@@ -93,7 +103,7 @@ function Force-TimeSync {
   $svc = Get-Service -Name w32time -ErrorAction Stop
   if ($svc.Status -ne "Running") { Start-Service -Name w32time }
 
-  # Best-effort peers; domain may override and that's normal.
+  # Best-effort peers; domain time policy may override
   $peers = "time.windows.com,0x9 pool.ntp.org,0x9"
   Write-Info "Configuring NTP peers (best-effort): $peers"
   try {
@@ -152,14 +162,10 @@ function Prompt-Choice([string]$Title, [hashtable]$Options, [string]$CurrentValu
 }
 
 function Set-IntlInHive([string]$HiveRoot, [string]$ShortDate, [string]$LongDate, [string]$TimeFmt) {
-  # HiveRoot examples:
-  #  - Registry::HKEY_USERS\S-1-5-21-...\Control Panel\International
-  #  - Registry::HKEY_USERS\.DEFAULT\Control Panel\International
   $intlPath = Join-Path $HiveRoot "Control Panel\International"
 
   if (-not (Test-Path $intlPath)) {
-    # Some system hives may not have it yet; create if needed
-    try { New-Item -Path $intlPath -Force | Out-Null } catch { return $false }
+    try { New-Item -Path $intlPath -Force | Out-Null } catch { return $null }
   }
 
   $changes = @{}
@@ -181,13 +187,10 @@ function Set-IntlInHive([string]$HiveRoot, [string]$ShortDate, [string]$LongDate
       $changes["iTime"] = $(if ($is24) { "1" } else { "0" })
     } catch { }
   }
-
-  # Return changes for reporting
-  return $changes
+  $changes
 }
 
 function Load-UserHive([string]$NtUserDatPath, [string]$MountName) {
-  # MountName will appear under HKU\<MountName>
   $mount = "HKU\$MountName"
   $out = & reg.exe load $mount $NtUserDatPath 2>&1
   if ($LASTEXITCODE -ne 0) { throw "reg load failed: $out" }
@@ -200,31 +203,28 @@ function Unload-UserHive([string]$MountName) {
 }
 
 function Apply-FormatsAllUsers([string]$ShortDate, [string]$TimeFmt) {
-  # Long date: keep it readable and consistent
   $LongDate = "dddd, dd MMMM yyyy"
 
   $applied = New-Object System.Collections.Generic.List[string]
   $failed  = New-Object System.Collections.Generic.List[string]
 
-  # 1) Apply to all already-loaded user hives
+  # 1) Loaded user hives
   Write-Info "Applying formats to loaded user hives..."
   $loadedSids = Get-ChildItem Registry::HKEY_USERS -ErrorAction SilentlyContinue |
-    Where-Object {
-      $_.Name -match 'HKEY_USERS\\S-1-5-21-' -and $_.Name -notmatch '_Classes$'
-    } |
-    ForEach-Object { ($_).PSChildName }
+    Where-Object { $_.Name -match 'HKEY_USERS\\S-1-5-21-' -and $_.Name -notmatch '_Classes$' } |
+    ForEach-Object { $_.PSChildName }
 
   foreach ($sid in $loadedSids) {
     try {
       $root = "Registry::HKEY_USERS\$sid"
-      $changes = Set-IntlInHive -HiveRoot $root -ShortDate $ShortDate -LongDate $LongDate -TimeFmt $TimeFmt
+      [void](Set-IntlInHive -HiveRoot $root -ShortDate $ShortDate -LongDate $LongDate -TimeFmt $TimeFmt)
       $applied.Add("$sid (loaded)") | Out-Null
     } catch {
       $failed.Add("$sid (loaded): $($_.Exception.Message)") | Out-Null
     }
   }
 
-  # 2) Apply to .DEFAULT (system/logon context)
+  # 2) .DEFAULT
   Write-Info "Applying formats to HKEY_USERS\.DEFAULT..."
   try {
     $root = "Registry::HKEY_USERS\.DEFAULT"
@@ -234,20 +234,18 @@ function Apply-FormatsAllUsers([string]$ShortDate, [string]$TimeFmt) {
     $failed.Add(".DEFAULT: $($_.Exception.Message)") | Out-Null
   }
 
-  # 3) Apply to Default user profile (future users): C:\Users\Default\NTUSER.DAT
+  # 3) Default profile (future users)
   $defaultNtUser = Join-Path $env:SystemDrive "Users\Default\NTUSER.DAT"
   if (Test-Path $defaultNtUser) {
     Write-Info "Applying formats to Default profile (future users)..."
     $mountName = "TEMP_DEFAULT_PROFILE"
     try {
-      # Load, apply, unload
       Load-UserHive -NtUserDatPath $defaultNtUser -MountName $mountName
       $root = "Registry::HKEY_USERS\$mountName"
       [void](Set-IntlInHive -HiveRoot $root -ShortDate $ShortDate -LongDate $LongDate -TimeFmt $TimeFmt)
       Unload-UserHive -MountName $mountName
       $applied.Add("DefaultProfile (C:\Users\Default)") | Out-Null
     } catch {
-      # Attempt unload if partially loaded
       try { Unload-UserHive -MountName $mountName } catch { }
       $failed.Add("DefaultProfile: $($_.Exception.Message)") | Out-Null
     }
@@ -255,17 +253,17 @@ function Apply-FormatsAllUsers([string]$ShortDate, [string]$TimeFmt) {
     $failed.Add("DefaultProfile: NTUSER.DAT not found at $defaultNtUser") | Out-Null
   }
 
-  # 4) Apply to ALL user profiles by loading their NTUSER.DAT (for users not currently logged in)
-  Write-Info "Applying formats to all user profiles (loading NTUSER.DAT where needed)..."
+  # 4) Offline users (ProfileList)
+  Write-Info "Applying formats to offline user hives (ProfileList)..."
   $profileList = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
   $profiles = Get-ChildItem $profileList -ErrorAction SilentlyContinue |
     Where-Object { $_.PSChildName -match '^S-1-5-21-' }
 
   foreach ($p in $profiles) {
     $sid = $p.PSChildName
+    $mountName = $null
     try {
-      # If already loaded, we already did it. Skip.
-      if (Test-Path "Registry::HKEY_USERS\$sid") { continue }
+      if (Test-Path "Registry::HKEY_USERS\$sid") { continue } # already loaded & handled
 
       $profilePath = (Get-ItemProperty $p.PSPath -ErrorAction Stop).ProfileImagePath
       if ([string]::IsNullOrWhiteSpace($profilePath)) { continue }
@@ -282,15 +280,12 @@ function Apply-FormatsAllUsers([string]$ShortDate, [string]$TimeFmt) {
 
       $applied.Add("$sid (offline hive)") | Out-Null
     } catch {
-      # Try unload if something went wrong mid-way
-      try {
-        if ($mountName) { Unload-UserHive -MountName $mountName }
-      } catch { }
+      try { if ($mountName) { Unload-UserHive -MountName $mountName } } catch { }
       $failed.Add("$sid (offline hive): $($_.Exception.Message)") | Out-Null
     }
   }
 
-  return @{
+  @{
     Applied = $applied
     Failed  = $failed
     ShortDate = $ShortDate
@@ -299,10 +294,67 @@ function Apply-FormatsAllUsers([string]$ShortDate, [string]$TimeFmt) {
   }
 }
 
+function Refresh-IntlSettingsCurrentSession([switch]$RestartExplorer) {
+  Write-Info "Refreshing international settings for current session (best-effort)..."
+
+  # Broadcast WM_SETTINGCHANGE "intl"
+  try {
+    Add-Type -Namespace Win32 -Name NativeMethods -MemberDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class NativeMethods {
+  public const int HWND_BROADCAST = 0xffff;
+  public const int WM_SETTINGCHANGE = 0x001A;
+  public const int SMTO_ABORTIFHUNG = 0x0002;
+
+  [DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+  public static extern IntPtr SendMessageTimeout(
+    IntPtr hWnd, int Msg, IntPtr wParam, string lParam,
+    int fuFlags, int uTimeout, out IntPtr lpdwResult
+  );
+}
+"@ -ErrorAction SilentlyContinue | Out-Null
+
+    $result = [IntPtr]::Zero
+    [void][Win32.NativeMethods]::SendMessageTimeout(
+      [IntPtr][Win32.NativeMethods]::HWND_BROADCAST,
+      [Win32.NativeMethods]::WM_SETTINGCHANGE,
+      [IntPtr]::Zero,
+      "intl",
+      [Win32.NativeMethods]::SMTO_ABORTIFHUNG,
+      5000,
+      [ref]$result
+    )
+    Write-OK "Broadcasted WM_SETTINGCHANGE (intl)."
+  } catch {
+    Write-Warn "WM_SETTINGCHANGE broadcast failed: $($_.Exception.Message)"
+  }
+
+  # Nudge per-user parameters
+  try {
+    & rundll32.exe user32.dll,UpdatePerUserSystemParameters 1, $true | Out-Null
+    Write-OK "Updated per-user system parameters."
+  } catch {
+    Write-Warn "UpdatePerUserSystemParameters failed: $($_.Exception.Message)"
+  }
+
+  if ($RestartExplorer) {
+    try {
+      Write-Warn "Restarting Explorer for current user (UI refresh; brief disruption)..."
+      Get-Process explorer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+      Start-Sleep -Seconds 1
+      Start-Process explorer.exe | Out-Null
+      Write-OK "Explorer restarted."
+    } catch {
+      Write-Warn "Explorer restart failed: $($_.Exception.Message)"
+    }
+  }
+}
+
 # -----------------------------
 # Run
 # -----------------------------
-Write-Head "Dhaka Time Zone + Forced Time Sync + ALL-Users Formats | v1.1.0 | rhshourav"
+Write-Head "Dhaka TZ + Forced Sync + ALL-Users Formats (Refresh) | v1.2.0 | rhshourav"
 
 $tzResult = Ensure-TimeZoneDhaka
 
@@ -326,7 +378,6 @@ if ($match.IsMatch) {
 
 $formatsResult = $null
 if (-not $SkipFormatPrompt) {
-  # Get current formats from current user as "Current" reference
   $curIntl = Get-ItemProperty "HKCU:\Control Panel\International" -ErrorAction SilentlyContinue
   $curShort = $curIntl.sShortDate
   $curTime  = $curIntl.sTimeFormat
@@ -345,18 +396,17 @@ if (-not $SkipFormatPrompt) {
     "4" = "hh:mm:ss tt"
   }
 
-  $newShortDate = Prompt-Choice -Title "Select Short Date format (will apply to ALL users)" -Options $dateOptions -CurrentValue $curShort
-  $newTimeFmt   = Prompt-Choice -Title "Select Time format (will apply to ALL users)"       -Options $timeOptions -CurrentValue $curTime
+  $newShortDate = Prompt-Choice -Title "Select Short Date format (applies to ALL users)" -Options $dateOptions -CurrentValue $curShort
+  $newTimeFmt   = Prompt-Choice -Title "Select Time format (applies to ALL users)"       -Options $timeOptions -CurrentValue $curTime
 
   if ($newShortDate -or $newTimeFmt) {
-    # If user keeps one, preserve current for that one (fallback to a safe default if null)
     if (-not $newShortDate) { $newShortDate = $(if ($curShort) { $curShort } else { "dd-MM-yyyy" }) }
     if (-not $newTimeFmt)   { $newTimeFmt   = $(if ($curTime)  { $curTime }  else { "HH:mm:ss" }) }
 
     Write-Info "Applying chosen formats to ALL users..."
     $formatsResult = Apply-FormatsAllUsers -ShortDate $newShortDate -TimeFmt $newTimeFmt
-
-    Write-OK "Formats applied. Note: users may need to sign out/in for some apps to reflect changes."
+    Refresh-IntlSettingsCurrentSession -RestartExplorer:$RestartExplorerForCurrentUser
+    Write-OK "Formats written for all users. Current session refreshed (best-effort)."
   } else {
     Write-Info "No format changes selected."
   }
@@ -370,9 +420,9 @@ Write-Host ("Drift vs Dhaka: {0}s (threshold {1}s) => {2}" -f $match.DriftSecond
 
 if ($formatsResult) {
   Write-Host ("Formats: ShortDate={0} | LongDate={1} | TimeFormat={2}" -f $formatsResult.ShortDate, $formatsResult.LongDate, $formatsResult.TimeFmt) -ForegroundColor Gray
-  Write-Host ("Applied to: {0}" -f $formatsResult.Applied.Count) -ForegroundColor Gray
+  Write-Host ("Applied targets: {0}" -f $formatsResult.Applied.Count) -ForegroundColor Gray
   if ($formatsResult.Failed.Count -gt 0) {
-    Write-Warn ("Failed: {0}" -f $formatsResult.Failed.Count)
+    Write-Warn ("Failed targets: {0}" -f $formatsResult.Failed.Count)
     foreach ($f in ($formatsResult.Failed | Select-Object -First 15)) { Write-Host "  $f" -ForegroundColor DarkGray }
     if ($formatsResult.Failed.Count -gt 15) { Write-Host "  ... (truncated)" -ForegroundColor DarkGray }
   }
