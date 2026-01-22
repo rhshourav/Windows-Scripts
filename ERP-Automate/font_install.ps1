@@ -2,6 +2,15 @@
 # ERP Font Installer (Network → GitHub Fallback)
 # Windows 10/11 Compatible – Verified Installation
 # =============================================================
+# -----------------------------
+# UI: black background + bright colors
+# -----------------------------
+try {
+    $raw = $Host.UI.RawUI
+    $raw.BackgroundColor = 'Black'
+    $raw.ForegroundColor = 'White'
+    Clear-Host
+} catch {}
 
 # -----------------------------
 # Script Info
