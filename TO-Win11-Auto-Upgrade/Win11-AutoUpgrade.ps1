@@ -24,6 +24,15 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     Write-Host "Error: This script must be run as administrator." -ForegroundColor Red
     exit 1
 }
+# -----------------------------
+# UI: black background + bright colors
+# -----------------------------
+try {
+    $raw = $Host.UI.RawUI
+    $raw.BackgroundColor = 'Black'
+    $raw.ForegroundColor = 'White'
+    Clear-Host
+} catch {}
 
 # Ensure the current OS is Windows 10:contentReference[oaicite:8]{index=8}
 $osCaption = (Get-CimInstance Win32_OperatingSystem).Caption
