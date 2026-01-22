@@ -21,6 +21,15 @@ if (-not $IsAdmin) {
         -Verb RunAs
     exit
 }
+# -----------------------------
+# UI: black background + bright colors
+# -----------------------------
+try {
+    $raw = $Host.UI.RawUI
+    $raw.BackgroundColor = 'Black'
+    $raw.ForegroundColor = 'White'
+    Clear-Host
+} catch {}
 
 Write-Host ""
 Write-Host "============================================="
