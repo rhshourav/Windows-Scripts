@@ -29,7 +29,7 @@
 .GITHUB
   https://github.com/rhshourav
 .VERSION
-  1.3.2
+  1.3.3
 #>
 
 [CmdletBinding()]
@@ -438,7 +438,7 @@ function Prompt-InputAction([string]$Title) {
 # -----------------------------
 # MAIN
 # -----------------------------
-Write-Head "IPv4 Configurator + IPv6 Toggle | v1.3.2 | rhshourav"
+Write-Head "IPv4 Configurator + IPv6 Toggle | v1.3.3 | rhshourav"
 
 # USL profile config
 $USL_DefaultX = 18
