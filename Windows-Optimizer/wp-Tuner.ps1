@@ -31,6 +31,15 @@ if (-not ([Security.Principal.WindowsPrincipal] `
 
     exit
 }
+# -----------------------------
+# UI: black background + bright colors
+# -----------------------------
+try {
+    $raw = $Host.UI.RawUI
+    $raw.BackgroundColor = 'Black'
+    $raw.ForegroundColor = 'White'
+    Clear-Host
+} catch {}
 
 # ---------- UI ----------
 function Line { Write-Host "+------------------------------------------------------+" -ForegroundColor Cyan }
