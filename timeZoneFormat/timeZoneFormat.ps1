@@ -62,6 +62,17 @@ if (-not (Is-Admin)) {
 }
 
 # -----------------------------
+# UI: black background + bright colors
+# -----------------------------
+try {
+    $raw = $Host.UI.RawUI
+    $raw.BackgroundColor = 'Black'
+    $raw.ForegroundColor = 'White'
+    Clear-Host
+} catch {}
+
+
+# -----------------------------
 # Constants
 # -----------------------------
 $DhakaWindowsTzId = "Bangladesh Standard Time"
