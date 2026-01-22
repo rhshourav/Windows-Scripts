@@ -12,6 +12,7 @@
 
 [CmdletBinding()]
 param()
+
 # -----------------------------
 # UI: black background + bright colors
 # -----------------------------
@@ -92,15 +93,12 @@ function Confirm-YesNo($prompt) {
 # -----------------------------
 $DefaultOut = "C:\Extracted-DRivers"
 
-# What to scan (extensions)
 $ScanExt = @(
   ".zip",".cab",".msi",".exe",
   ".7z",".rar",".tar",".gz",".tgz",".bz2",".xz",
   ".wim",".esd",".iso"
 )
 
-# Exclusions (prefix-based; normalized lower-case)
-# These are common noise / protected / huge trees.
 $ExcludeFragments = @(
   "\windows\",
   "\program files\",
@@ -116,11 +114,7 @@ $ExcludeFragments = @(
   "\nvidia\"
 )
 
-# NOTE: We exclude \Users\ by default because it is enormous and mostly irrelevant.
-# If you DO want to scan user downloads/desktops too, set this to $true:
 $IncludeUsersTree = $false
-
-# If true, copy the package file into the extraction folder under "_source"
 $CopyPackageIntoOutput = $true
 
 # -----------------------------
@@ -140,13 +134,6 @@ function Normalize-PathLower([string]$p) {
 function Is-ExcludedPath([string]$fullPathLower) {
     if ([string]::IsNullOrWhiteSpace($fullPathLower)) { return $true }
 
-    if ($IncludeUsersTree -eq $false) {
-        # keep the base exclude list as-is (includes \users\)
-    } else {
-        # remove users exclusion dynamically
-        # (don’t mutate global list; just skip users check)
-    }
-
     foreach ($frag in $ExcludeFragments) {
         if ($IncludeUsersTree -and $frag -eq "\users\") { continue }
         if ($fullPathLower -like ("*{0}*" -f $frag)) { return $true }
@@ -155,8 +142,6 @@ function Is-ExcludedPath([string]$fullPathLower) {
 }
 
 function Get-LocalDrives {
-    # Use Win32_LogicalDisk for drive type accuracy:
-    # 2=Removable, 3=Fixed, 4=Network, 5=CDROM, 6=RAMDisk
     $disks = Get-CimInstance Win32_LogicalDisk -ErrorAction SilentlyContinue
     $targets = @()
     foreach ($d in $disks) {
@@ -164,9 +149,9 @@ function Get-LocalDrives {
             $root = ($d.DeviceID + "\")
             if (Test-Path -LiteralPath $root) {
                 $targets += [pscustomobject]@{
-                    DeviceID  = $d.DeviceID
-                    Root      = $root
-                    DriveType = $d.DriveType
+                    DeviceID  = $d.DeviceID     # e.g. "C:"
+                    Root      = $root           # e.g. "C:\"
+                    DriveType = $d.DriveType    # 2 removable, 3 fixed
                     Volume    = $d.VolumeName
                 }
             }
@@ -256,6 +241,79 @@ function Sanitize-Name([string]$name) {
 }
 
 # -----------------------------
+# NEW: Drive multi-selector (numbers and/or letters)
+# -----------------------------
+function Choose-Drives {
+    param([Parameter(Mandatory)] $Drives)
+
+    if (-not $Drives -or $Drives.Count -eq 0) { return @() }
+
+    while ($true) {
+        Title "DRIVE SELECTION"
+        Write-Host "| Select drives by number or letter. Multi-select ok.   |" -ForegroundColor Gray
+        Write-Host "| Examples: 1,3     OR     C,D     OR     1,D     OR all |" -ForegroundColor Gray
+        Write-Host "| Press Enter for ALL. Type Q to cancel.                |" -ForegroundColor Gray
+        Line
+
+        for ($i=0; $i -lt $Drives.Count; $i++) {
+            $d = $Drives[$i]
+            $t = if ($d.DriveType -eq 3) { "Fixed" } else { "Removable" }
+            $vol = if ([string]::IsNullOrWhiteSpace($d.Volume)) { "" } else { $d.Volume }
+            Write-Host ("| {0,2}. {1,-3} {2,-9} {3,-33} |" -f ($i+1), $d.DeviceID, $t, ($d.Root + " " + $vol)) -ForegroundColor Gray
+        }
+        Line
+
+        $rawSel = (Read-Host "Select drives").Trim()
+        if ([string]::IsNullOrWhiteSpace($rawSel)) { return @($Drives) }
+
+        $lower = $rawSel.Trim().ToLowerInvariant()
+        if ($lower -eq "q" -or $lower -eq "quit" -or $lower -eq "exit") { return @() }
+        if ($lower -eq "all") { return @($Drives) }
+
+        $tokens = $lower -split '[,; ]+' | Where-Object { $_ -and $_.Trim() -ne "" }
+        $picked = New-Object System.Collections.Generic.List[object]
+
+        foreach ($tok in $tokens) {
+            $t = $tok.Trim()
+
+            # numeric index
+            if ($t -match '^\d+$') {
+                $idx = [int]$t
+                if ($idx -ge 1 -and $idx -le $Drives.Count) {
+                    $picked.Add($Drives[$idx-1]) | Out-Null
+                }
+                continue
+            }
+
+            # drive letter "c" or "c:"
+            if ($t -match '^[a-z](:)?$') {
+                $letter = ($t[0].ToString().ToUpperInvariant() + ":")
+                $match = $Drives | Where-Object { $_.DeviceID -eq $letter } | Select-Object -First 1
+                if ($match) { $picked.Add($match) | Out-Null }
+                continue
+            }
+        }
+
+        $picked = @($picked | Select-Object -Unique)
+        if ($picked.Count -gt 0) {
+            Title "SELECTED DRIVES"
+            foreach ($d in $picked) {
+                $t = if ($d.DriveType -eq 3) { "Fixed" } else { "Removable" }
+                Write-Host ("| {0,-3} {1,-9} {2,-37} |" -f $d.DeviceID, $t, ($d.Root + " " + $d.Volume)) -ForegroundColor Gray
+            }
+            Line
+            if (Confirm-YesNo "Proceed with these selected drives?") {
+                return @($picked)
+            }
+            # else loop again
+            continue
+        }
+
+        Write-Host "Invalid selection. Use numbers, letters, or 'all'." -ForegroundColor Yellow
+    }
+}
+
+# -----------------------------
 # FAST-ish scan with pruning (manual recursion)
 # -----------------------------
 function Scan-DriveForPackages {
@@ -274,7 +332,6 @@ function Scan-DriveForPackages {
 
         if (Is-ExcludedPath $dirLower) { continue }
 
-        # enumerate children
         $items = $null
         try {
             $items = Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue
@@ -355,11 +412,9 @@ function Extract-Msi([string]$pkg,[string]$outDir) {
 }
 
 function Extract-Exe([string]$pkg,[string]$outDir,[string]$sevenZip) {
-    # Prefer 7-Zip first
     $z = Extract-With7Zip -pkg $pkg -outDir $outDir -sevenZip $sevenZip
     if ($z.Ok) { return @{Ok=$true; Note="EXE extracted (7-Zip)"} }
 
-    # Fallback silent extract switches
     $candidates = @(
         @("/extract:`"$outDir`" /quiet"),
         @("/extract:`"$outDir`""),
@@ -427,7 +482,6 @@ function Extract-Package([string]$pkg,[string]$rootOut,[string]$driveId,[string]
 Show-Banner
 $startAll = Get-Date
 
-# Output root (default guaranteed)
 $outRoot = Choose-OutputRoot -DefaultPath $DefaultOut
 try { Ensure-Dir $outRoot } catch { $outRoot = $DefaultOut; Ensure-Dir $outRoot }
 
@@ -444,16 +498,15 @@ Line
 
 # Drives
 $drives = Get-LocalDrives
-Title "DRIVES"
-Info "Count" $drives.Count
-foreach ($d in $drives) {
-    $t = if ($d.DriveType -eq 3) { "Fixed" } else { "Removable" }
-    Write-Host ("| {0,-3} {1,-9} {2,-37} |" -f $d.DeviceID, $t, ($d.Root + " " + $d.Volume)) -ForegroundColor Gray
+if (-not $drives -or $drives.Count -eq 0) {
+    Write-Host "No local fixed/removable drives detected." -ForegroundColor Yellow
+    exit 1
 }
-Line
 
-if (-not (Confirm-YesNo "Scan ALL these drives for driver packages?")) {
-    Write-Host "Cancelled." -ForegroundColor Yellow
+# NEW: select drives (multi)
+$selectedDrives = Choose-Drives -Drives $drives
+if (-not $selectedDrives -or $selectedDrives.Count -eq 0) {
+    Write-Host "Cancelled (no drives selected)." -ForegroundColor Yellow
     exit 0
 }
 
@@ -476,15 +529,15 @@ if (-not $sevenZip) {
 }
 
 # -----------------------------
-# SCAN
+# SCAN (only selected drives)
 # -----------------------------
 Title "SYSTEM SCAN"
 $scanStart = Get-Date
 $allFound = New-Object System.Collections.Generic.List[object]
 $driveIndex = 0
-$totalDrives = $drives.Count
+$totalDrives = $selectedDrives.Count
 
-foreach ($d in $drives) {
+foreach ($d in $selectedDrives) {
     $driveIndex++
     $pct = [math]::Round(($driveIndex / $totalDrives) * 100)
     ProgressBar ("Scanning drive: " + $d.DeviceID) $pct $scanStart
@@ -567,10 +620,10 @@ Info "INF"     $infTotal
 Info "Elapsed" ((Get-Date) - $startAll)
 Line
 
-# Write summary file
 @(
   "Output: $outRoot"
   "LogDir: $logDir"
+  "SelectedDrives: $($selectedDrives.DeviceID -join ', ')"
   "Found : $($allFound.Count)"
   "OK    : $($ok.Count)"
   "Fail  : $($bad.Count)"
