@@ -31,6 +31,15 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
     exit 1
 }
 #endregion
+# -----------------------------
+# UI: black background + bright colors
+# -----------------------------
+try {
+    $raw = $Host.UI.RawUI
+    $raw.BackgroundColor = 'Black'
+    $raw.ForegroundColor = 'White'
+    Clear-Host
+} catch {}
 
 #region HELPERS
 function Log($msg) { $t = Get-Date -Format o; Write-Host "[$t] $msg"; Add-Content -Path $LogFile -Value "[$t] $msg" }
