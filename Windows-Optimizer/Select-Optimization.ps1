@@ -44,6 +44,15 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
     [System.Diagnostics.Process]::Start($psi) | Out-Null
     Exit
 }
+# -----------------------------
+# UI: black background + bright colors
+# -----------------------------
+try {
+    $raw = $Host.UI.RawUI
+    $raw.BackgroundColor = 'Black'
+    $raw.ForegroundColor = 'White'
+    Clear-Host
+} catch {}
 
 # -------------------------------
 $ScriptVersion = "2.3.0"
