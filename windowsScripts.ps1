@@ -85,28 +85,29 @@ function Show-Menu {
     Write-Host "  6) ERP Setup"
     Write-Host "  7) ERP Font Setup"
     Write-Host ""
-    Write-Host "Time Setup:" -ForegroundColor Yellow
+    Write-Host "Time & IP Setup:" -ForegroundColor Yellow
     Write-Host " 8) Time Sync & Format For All Users"
+    Write-Host " 9) IP Config"
     Write-Host ""
     Write-Host "Printer Setup:" -ForegroundColor Yellow
-    Write-Host "  9) RICHO B&W"
-    Write-Host "  A) RICHO Color"
+    Write-Host "  A) RICHO B&W"
+    Write-Host "  B) RICHO Color"
     Write-Host ""
     Write-Host "Other:" -ForegroundColor Yellow
-    Write-Host "  B) Active & Change Edition"
+    Write-Host "  C) Active & Change Edition"
     Write-Host ""
     Write-Host "Windows Optimization:" -ForegroundColor Yellow
-    Write-Host "  C) Windows Tuner"
-    Write-Host "  D) Windows Optimizer"
+    Write-Host "  D) Windows Tuner"
+    Write-Host "  E) Windows Optimizer"
     Write-Host ""
     Write-Host "Windows Update:" -ForegroundColor Yellow
-    Write-Host "  E) Disable Windows Update"
-    Write-Host "  F) Enable Windows Update"
-    Write-Host "  G) Upgrade Windows 10 to 11"
+    Write-Host "  F) Disable Windows Update"
+    Write-Host "  G) Enable Windows Update"
+    Write-Host "  H) Upgrade Windows 10 to 11"
     Write-Host ""
     Write-Host "Windows System Interrupt Fix:" -ForegroundColor Yellow
-    Write-Host "  H) Intel System Interrupt Fix"
-    Write-Host "  I) WPT Interrupt Fix"
+    Write-Host "  I) Intel System Interrupt Fix"
+    Write-Host "  J) WPT Interrupt Fix"
     Write-Host ""
     Write-Host "  Q) Quit" -ForegroundColor Red
     Write-Host ""
@@ -163,21 +164,22 @@ $Actions = @{
     '7' = @{ Title="ERP Font Setup"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/font_install.ps1" }
 
     '8' = @{ Title="Time Sync & Format For All Users"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/timeZoneFormat/timeZoneFormat.ps1" }
+    '9' = @{ Title="IP Config"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/IPConfig/Ipconfig.ps1"}
 
-    '9' = @{ Title="RICHO B&W"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addRICHO.ps1" }
-    'A' = @{ Title="RICHO Color"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addColorRICHO.ps1" }
+    'A' = @{ Title="RICHO B&W"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addRICHO.ps1" }
+    'B' = @{ Title="RICHO Color"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addColorRICHO.ps1" }
 
-    'B' = @{ Title="Active & Change Edition"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/run" }
+    'C' = @{ Title="Active & Change Edition"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/run" }
 
-    'C' = @{ Title="Windows Tuner"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/wp-Tuner.ps1" }
-    'D' = @{ Title="Windows Optimizer"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/Windows-Optimizer.ps1" }
+    'D' = @{ Title="Windows Tuner"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/wp-Tuner.ps1" }
+    'E' = @{ Title="Windows Optimizer"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/Windows-Optimizer.ps1" }
 
-    'E' = @{ Title="Disable Windows Update"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Disable-WindowsUpdate.ps1" }
-    'F' = @{ Title="Enable Windows Update"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Enable-WindowsUpdate.ps1" }
-    'G' = @{ Title="Upgrade Windows 10 to 11"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/TO-Win11-Auto-Upgrade/Win11-AutoUpgrade.ps1" }
+    'F' = @{ Title="Disable Windows Update"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Disable-WindowsUpdate.ps1" }
+    'G' = @{ Title="Enable Windows Update"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Enable-WindowsUpdate.ps1" }
+    'H' = @{ Title="Upgrade Windows 10 to 11"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/TO-Win11-Auto-Upgrade/Win11-AutoUpgrade.ps1" }
 
-    'H' = @{ Title="Intel System Interrupt Fix"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/SystemInterrupt-Fix/Intel-SystemInterrupt-Fix.ps1" }
-    'I' = @{ Title="WPT Interrupt Fix"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/SystemInterrupt-Fix/wpt_interrupt_fix_plus.ps1" }
+    'I' = @{ Title="Intel System Interrupt Fix"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/SystemInterrupt-Fix/Intel-SystemInterrupt-Fix.ps1" }
+    'J' = @{ Title="WPT Interrupt Fix"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/SystemInterrupt-Fix/wpt_interrupt_fix_plus.ps1" }
 }
 
 # -----------------------------
