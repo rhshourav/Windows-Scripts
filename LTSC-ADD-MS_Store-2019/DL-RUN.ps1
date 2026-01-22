@@ -1,6 +1,15 @@
 # =========================================================
 # Script: Install LTSC Microsoft Store
 # =========================================================
+# -----------------------------
+# UI: black background + bright colors
+# -----------------------------
+try {
+    $raw = $Host.UI.RawUI
+    $raw.BackgroundColor = 'Black'
+    $raw.ForegroundColor = 'White'
+    Clear-Host
+} catch {}
 
 # Display Author and Repo Info in CMD
 Write-Host "==============================================="
