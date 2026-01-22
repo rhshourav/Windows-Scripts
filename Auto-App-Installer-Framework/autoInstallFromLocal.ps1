@@ -1,7 +1,7 @@
 #requires -version 5.1
 <#
 .SYNOPSIS
-  Auto App Installer – CLI Only – v1.2.0 (by rhshourav)
+  Auto App Installer – CLI Only – v1.3.0 (by rhshourav)
 
 .DESCRIPTION
   - Auto-elevates to Admin
@@ -25,6 +25,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
 # -----------------------------
 # UI: black background + bright colors
 # -----------------------------
@@ -48,7 +49,6 @@ function Write-Info { param([string]$m) Write-Host ('[*] {0}' -f $m) -Foreground
 function Write-Good { param([string]$m) Write-Host ('[+] {0}' -f $m) -ForegroundColor Green }
 function Write-Warn { param([string]$m) Write-Host ('[!] {0}' -f $m) -ForegroundColor Yellow }
 function Write-Bad  { param([string]$m) Write-Host ('[-] {0}' -f $m) -ForegroundColor Red }
-
 
 # Proper Admin elevation
 function Escape-SingleQuote {
@@ -230,12 +230,15 @@ function Resolve-InstallBasePath {
     return $null
 }
 
-
 function Get-Installers {
     param([string]$BasePath)
-    Get-ChildItem -LiteralPath $BasePath -File -ErrorAction Stop |
-        Where-Object { $_.Extension -in '.exe', '.msi' } |
-        Sort-Object Name
+
+    # FORCE ARRAY OUTPUT ALWAYS (prevents ".Count" failures when only 1 installer exists)
+    @(
+        Get-ChildItem -LiteralPath $BasePath -File -ErrorAction Stop |
+            Where-Object { $_.Extension -in '.exe', '.msi' } |
+            Sort-Object Name
+    )
 }
 
 # ---------------------------
@@ -243,6 +246,8 @@ function Get-Installers {
 # ---------------------------
 function Show-AppsTable {
     param([System.IO.FileInfo[]]$Apps)
+
+    $Apps = @($Apps)
 
     Write-Host ''
     Write-Header 'Available Installers'
@@ -271,15 +276,18 @@ function Parse-Selection {
         [int]$Max
     )
 
-    $picked = New-Object System.Collections.Generic.HashSet[int]
+    $picked = New-Object System.Collections.Generic.SortedSet[int]
     $parts = $InputText -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
 
     foreach ($token in $parts) {
         if ($token -match '^\d+\-\d+$') {
-            $a,$b = $token -split '-'
-            $a=[int]$a; $b=[int]$b
-            if ($a -gt $b) { $t=$a; $a=$b; $b=$t }
-            for ($n=$a; $n -le $b; $n++) { if ($n -ge 1 -and $n -le $Max) { [void]$picked.Add($n) } }
+            $a, $b = $token -split '-'
+            $a = [int]$a; $b = [int]$b
+            if ($a -gt $b) { $t = $a; $a = $b; $b = $t }
+
+            for ($n = $a; $n -le $b; $n++) {
+                if ($n -ge 1 -and $n -le $Max) { [void]$picked.Add($n) }
+            }
         }
         elseif ($token -match '^\d+$') {
             $n = [int]$token
@@ -287,13 +295,19 @@ function Parse-Selection {
         }
     }
 
-    return $picked
+    # Force a real int[] and prevent PowerShell from enumerating it on output
+    $arr = [int[]]$picked
+    Write-Output -NoEnumerate $arr
 }
+
+
 
 function Select-AppsCli {
     param([System.IO.FileInfo[]]$Apps)
 
-    if (-not $Apps -or $Apps.Count -eq 0) { return @() }
+    # FORCE ARRAY
+    $Apps = @($Apps)
+    if ($Apps.Count -eq 0) { return @() }
 
     Show-AppsTable -Apps $Apps
     $selected = New-Object System.Collections.Generic.HashSet[int]
@@ -338,7 +352,7 @@ function Select-AppsCli {
         }
 
         # numbers/ranges
-        $picked = Parse-Selection -InputText $raw -Max $Apps.Count
+        $picked = [int[]](Parse-Selection -InputText $raw -Max $Apps.Count)
         if ($picked.Count -eq 0) {
             Write-Warn 'No valid selection parsed. Use e.g. 1,3,5 or 1-4.'
             continue
@@ -379,7 +393,10 @@ function Get-InstallSpec {
 function Install-Apps {
     param([System.IO.FileInfo[]]$Selection)
 
-    if (-not $Selection -or $Selection.Count -eq 0) {
+    # FORCE ARRAY
+    $Selection = @($Selection)
+
+    if ($Selection.Count -eq 0) {
         Write-Warn 'No installers selected. Exiting.'
         Log-Line WARN 'NoSelection'
         return
@@ -456,7 +473,7 @@ function Install-Apps {
 # Main
 # ---------------------------
 Ensure-Admin
-Write-Header 'Auto App Installer v1.2.0 (CLI only) (by rhshourav)'
+Write-Header 'Auto App Installer v1.3.0 (CLI only) (by rhshourav)'
 New-Log
 
 try {
@@ -467,8 +484,9 @@ try {
 
     Write-Good ('Using installation folder: {0}' -f $basePath)
 
-    $apps = Get-Installers -BasePath $basePath
-    if (-not $apps -or $apps.Count -eq 0) {
+    # FORCE ARRAY HERE TOO
+    $apps = @(Get-Installers -BasePath $basePath)
+    if ($apps.Count -eq 0) {
         Write-Warn ('No .exe or .msi files found in: {0}' -f $basePath)
         Log-Line WARN ('NoInstallersFound={0}' -f $basePath)
         exit
@@ -479,6 +497,10 @@ try {
 }
 catch {
     Write-Bad $_.Exception.Message
+    if ($_.InvocationInfo) {
+        Write-Bad ("At {0}:{1}" -f $_.InvocationInfo.ScriptName, $_.InvocationInfo.ScriptLineNumber)
+        Write-Bad $_.InvocationInfo.Line.Trim()
+    }
     Log-Line ERROR $_.Exception.Message
 }
 finally {
