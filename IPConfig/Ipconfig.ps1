@@ -394,6 +394,13 @@ function Set-IPv6Binding([string]$Alias, [ValidateSet("Enable","Disable")] [stri
     Write-OK "IPv6 enabled on adapter: $Alias"
   }
 }
+function Menu-AfterApply {
+  Write-Head "Next Action"
+  Write-Host "1) Configure same adapter again" -ForegroundColor Gray
+  Write-Host "2) Select a different adapter"    -ForegroundColor Gray
+  Write-Host "X) Exit"                           -ForegroundColor DarkGray
+  return (Read-MenuKey -Prompt "Select: " -ValidKeys @("1","2","X"))
+}
 
 # -----------------------------
 # Menus (single-key)
@@ -428,10 +435,10 @@ function Prompt-InputAction([string]$Title) {
 # -----------------------------
 # MAIN
 # -----------------------------
+# -----------------------------
+# MAIN
+# -----------------------------
 Write-Head "IPv4 Configurator + IPv6 Toggle | v1.3.2 | rhshourav"
-
-$alias = Select-Adapter
-Show-AdapterConfig -Alias $alias
 
 # USL profile config
 $USL_DefaultX = 18
@@ -439,187 +446,210 @@ $USL_Prefix   = MaskToPrefixLength "255.255.248.0" # /21
 $USL_GW       = "192.168.18.254"
 $USL_DNS      = @("192.168.18.248","192.168.18.210")
 
+# Outer loop: allows selecting a new adapter without restarting the script
+$alias = $null
+
 while ($true) {
-  $mode = Menu-Mode
-  if ($mode -eq "X") { Write-Warn "Exit."; exit 0 }
 
-  $ipv6Choice = Menu-IPv6Toggle
-  if ($ipv6Choice -eq "X") { Write-Warn "Exit."; exit 0 }
-  if ($ipv6Choice -eq "B") { continue }
-
-  $ipv6Action = $null
-  if ($ipv6Choice -eq "2") { $ipv6Action = "Disable" }
-  elseif ($ipv6Choice -eq "3") { $ipv6Action = "Enable" }
-
-  $plan = New-Object PSObject -Property @{
-    Adapter = $alias
-    Mode    = $(if ($mode -eq "1") { "USL" } elseif ($mode -eq "2") { "Custom" } else { "DHCP" })
-    IPv4_IP = $null
-    Prefix  = $null
-    Gateway = $null
-    DNS     = $null
-    IPv6    = $(if ($ipv6Action) { $ipv6Action } else { "No change" })
+  if (-not $alias) {
+    $alias = Select-Adapter
+    Show-AdapterConfig -Alias $alias
   }
 
-  if ($mode -eq "1") {
-    Write-Head "USL Profile"
-    Write-Info ("Subnet mask : 255.255.248.0 (/{0})" -f $USL_Prefix)
-    Write-Info ("Gateway     : {0}" -f $USL_GW)
-    Write-Info ("DNS         : {0}" -f ($USL_DNS -join ", "))
-    Write-Info ("USL examples: 192.168.19.44 | 19 44 | 1944 | 18100 | 1921681944 | 44 (uses X={0})" -f $USL_DefaultX)
+  # Inner loop: repeated configuration for the currently selected adapter
+  while ($true) {
 
-    while ($true) {
-      $act = Prompt-InputAction "USL IP Input"
-      if ($act -eq "X") { Write-Warn "Exit."; exit 0 }
-      if ($act -eq "B") { break }
+    $mode = Menu-Mode
+    if ($mode -eq "X") { Write-Warn "Exit."; exit 0 }
 
-      $ipIn = Read-Host "Enter IP (any style)"
-      try {
-        $resolved = Resolve-USLIPv4 -Text $ipIn -DefaultX $USL_DefaultX
-        Write-Info ("Resolved IP: {0}" -f $resolved)
-        if (-not (Confirm-YesNoKey "Use this IP?")) { continue }
+    $ipv6Choice = Menu-IPv6Toggle
+    if ($ipv6Choice -eq "X") { Write-Warn "Exit."; exit 0 }
+    if ($ipv6Choice -eq "B") { continue }
 
-        $plan.IPv4_IP = $resolved
-        $plan.Prefix  = $USL_Prefix
-        $plan.Gateway = $USL_GW
-        $plan.DNS     = ($USL_DNS -join ", ")
-        break
-      } catch {
-        Write-Warn $_.Exception.Message
+    $ipv6Action = $null
+    if ($ipv6Choice -eq "2") { $ipv6Action = "Disable" }
+    elseif ($ipv6Choice -eq "3") { $ipv6Action = "Enable" }
+
+    $plan = New-Object PSObject -Property @{
+      Adapter = $alias
+      Mode    = $(if ($mode -eq "1") { "USL" } elseif ($mode -eq "2") { "Custom" } else { "DHCP" })
+      IPv4_IP = $null
+      Prefix  = $null
+      Gateway = $null
+      DNS     = $null
+      IPv6    = $(if ($ipv6Action) { $ipv6Action } else { "No change" })
+    }
+
+    if ($mode -eq "1") {
+      Write-Head "USL Profile"
+      Write-Info ("Subnet mask : 255.255.248.0 (/{0})" -f $USL_Prefix)
+      Write-Info ("Gateway     : {0}" -f $USL_GW)
+      Write-Info ("DNS         : {0}" -f ($USL_DNS -join ", "))
+      Write-Info ("USL examples: 192.168.19.44 | 19 44 | 1944 | 18100 | 1921681944 | 44 (uses X={0})" -f $USL_DefaultX)
+
+      while ($true) {
+        $act = Prompt-InputAction "USL IP Input"
+        if ($act -eq "X") { Write-Warn "Exit."; exit 0 }
+        if ($act -eq "B") { break }
+
+        $ipIn = Read-Host "Enter IP (any style)"
+        try {
+          $resolved = Resolve-USLIPv4 -Text $ipIn -DefaultX $USL_DefaultX
+          Write-Info ("Resolved IP: {0}" -f $resolved)
+          if (-not (Confirm-YesNoKey "Use this IP?")) { continue }
+
+          $plan.IPv4_IP = $resolved
+          $plan.Prefix  = $USL_Prefix
+          $plan.Gateway = $USL_GW
+          $plan.DNS     = ($USL_DNS -join ", ")
+          break
+        } catch {
+          Write-Warn $_.Exception.Message
+        }
       }
+
+      if (-not $plan.IPv4_IP) { continue }
     }
+    elseif ($mode -eq "2") {
+      Write-Head "Custom Static IPv4"
 
-    if (-not $plan.IPv4_IP) { continue }
-  }
-  elseif ($mode -eq "2") {
-    Write-Head "Custom Static IPv4"
+      while ($true) {
+        $act = Prompt-InputAction "Custom IPv4 - IP Address"
+        if ($act -eq "X") { Write-Warn "Exit."; exit 0 }
+        if ($act -eq "B") { break }
 
-    while ($true) {
-      $act = Prompt-InputAction "Custom IPv4 - IP Address"
-      if ($act -eq "X") { Write-Warn "Exit."; exit 0 }
-      if ($act -eq "B") { break }
-
-      $ipIn = Read-Host "Enter full IPv4 (any separators)"
-      try {
-        $resolved = Resolve-CustomIPv4 -Text $ipIn
-        Write-Info ("Resolved IP: {0}" -f $resolved)
-        if (-not (Confirm-YesNoKey "Use this IP?")) { continue }
-        $plan.IPv4_IP = $resolved
-        break
-      } catch {
-        Write-Warn $_.Exception.Message
+        $ipIn = Read-Host "Enter full IPv4 (any separators)"
+        try {
+          $resolved = Resolve-CustomIPv4 -Text $ipIn
+          Write-Info ("Resolved IP: {0}" -f $resolved)
+          if (-not (Confirm-YesNoKey "Use this IP?")) { continue }
+          $plan.IPv4_IP = $resolved
+          break
+        } catch {
+          Write-Warn $_.Exception.Message
+        }
       }
-    }
-    if (-not $plan.IPv4_IP) { continue }
+      if (-not $plan.IPv4_IP) { continue }
 
-    while ($true) {
-      $act = Prompt-InputAction "Custom IPv4 - Subnet Mask / Prefix"
-      if ($act -eq "X") { Write-Warn "Exit."; exit 0 }
-      if ($act -eq "B") { $plan.IPv4_IP = $null; break }
+      while ($true) {
+        $act = Prompt-InputAction "Custom IPv4 - Subnet Mask / Prefix"
+        if ($act -eq "X") { Write-Warn "Exit."; exit 0 }
+        if ($act -eq "B") { $plan.IPv4_IP = $null; break }
 
-      $maskIn = Read-Host "Subnet mask (255.255.255.0) OR prefix length (24)"
-      try { $plan.Prefix = Parse-PrefixOrMask $maskIn; break } catch { Write-Warn $_.Exception.Message }
-    }
-    if (-not $plan.Prefix) { continue }
+        $maskIn = Read-Host "Subnet mask (255.255.255.0) OR prefix length (24)"
+        try { $plan.Prefix = Parse-PrefixOrMask $maskIn; break } catch { Write-Warn $_.Exception.Message }
+      }
+      if (-not $plan.Prefix) { continue }
 
-    while ($true) {
-      $act = Prompt-InputAction "Custom IPv4 - Gateway (Optional)"
-      if ($act -eq "X") { Write-Warn "Exit."; exit 0 }
-      if ($act -eq "B") { $plan.Prefix = $null; break }
+      while ($true) {
+        $act = Prompt-InputAction "Custom IPv4 - Gateway (Optional)"
+        if ($act -eq "X") { Write-Warn "Exit."; exit 0 }
+        if ($act -eq "B") { $plan.Prefix = $null; break }
 
-      $gwIn = Read-Host "Gateway (press Enter for none)"
-      if ([string]::IsNullOrWhiteSpace($gwIn)) { $plan.Gateway = ""; break }
+        $gwIn = Read-Host "Gateway (press Enter for none)"
+        if ([string]::IsNullOrWhiteSpace($gwIn)) { $plan.Gateway = ""; break }
 
-      $gwResolved = $null
-      if (Try-ParseIPv4DottedQuad -Text $gwIn -IpOut ([ref]$gwResolved)) { $plan.Gateway = $gwResolved; break }
-      Write-Warn "Invalid gateway IPv4."
-    }
+        $gwResolved = $null
+        if (Try-ParseIPv4DottedQuad -Text $gwIn -IpOut ([ref]$gwResolved)) { $plan.Gateway = $gwResolved; break }
+        Write-Warn "Invalid gateway IPv4."
+      }
 
-    $dnsList = @()
+      $dnsList = @()
 
-    while ($true) {
-      $act = Prompt-InputAction "Custom IPv4 - Primary DNS (Optional)"
-      if ($act -eq "X") { Write-Warn "Exit."; exit 0 }
-      if ($act -eq "B") { break }
+      while ($true) {
+        $act = Prompt-InputAction "Custom IPv4 - Primary DNS (Optional)"
+        if ($act -eq "X") { Write-Warn "Exit."; exit 0 }
+        if ($act -eq "B") { break }
 
-      $d1 = Read-Host "Primary DNS (press Enter for none)"
-      if ([string]::IsNullOrWhiteSpace($d1)) { break }
+        $d1 = Read-Host "Primary DNS (press Enter for none)"
+        if ([string]::IsNullOrWhiteSpace($d1)) { break }
 
-      $d1Resolved = $null
-      if (Try-ParseIPv4DottedQuad -Text $d1 -IpOut ([ref]$d1Resolved)) { $dnsList += $d1Resolved; break }
-      Write-Warn "Invalid DNS IPv4."
-    }
+        $d1Resolved = $null
+        if (Try-ParseIPv4DottedQuad -Text $d1 -IpOut ([ref]$d1Resolved)) { $dnsList += $d1Resolved; break }
+        Write-Warn "Invalid DNS IPv4."
+      }
 
-    while ($true) {
-      $act = Prompt-InputAction "Custom IPv4 - Secondary DNS (Optional)"
-      if ($act -eq "X") { Write-Warn "Exit."; exit 0 }
-      if ($act -eq "B") { break }
+      while ($true) {
+        $act = Prompt-InputAction "Custom IPv4 - Secondary DNS (Optional)"
+        if ($act -eq "X") { Write-Warn "Exit."; exit 0 }
+        if ($act -eq "B") { break }
 
-      $d2 = Read-Host "Secondary DNS (press Enter for none)"
-      if ([string]::IsNullOrWhiteSpace($d2)) { break }
+        $d2 = Read-Host "Secondary DNS (press Enter for none)"
+        if ([string]::IsNullOrWhiteSpace($d2)) { break }
 
-      $d2Resolved = $null
-      if (Try-ParseIPv4DottedQuad -Text $d2 -IpOut ([ref]$d2Resolved)) { $dnsList += $d2Resolved; break }
-      Write-Warn "Invalid DNS IPv4."
-    }
+        $d2Resolved = $null
+        if (Try-ParseIPv4DottedQuad -Text $d2 -IpOut ([ref]$d2Resolved)) { $dnsList += $d2Resolved; break }
+        Write-Warn "Invalid DNS IPv4."
+      }
 
-    if ($dnsList.Count -gt 0) { $plan.DNS = ($dnsList -join ", ") } else { $plan.DNS = "Reset/Auto" }
-  }
-  else {
-    $plan.DNS = "Reset/Auto"
-  }
-
-  Write-Head "Planned Changes"
-  Write-Host ("Adapter : {0}" -f $plan.Adapter) -ForegroundColor Gray
-  Write-Host ("Mode    : {0}" -f $plan.Mode) -ForegroundColor Gray
-
-  if ($plan.Mode -eq "USL" -or $plan.Mode -eq "Custom") {
-    Write-Host ("IPv4 IP  : {0}" -f $plan.IPv4_IP) -ForegroundColor Gray
-    Write-Host ("Prefix   : /{0}" -f $plan.Prefix) -ForegroundColor Gray
-    Write-Host ("Gateway  : {0}" -f $(if ([string]::IsNullOrWhiteSpace($plan.Gateway)) { "None" } else { $plan.Gateway })) -ForegroundColor Gray
-    Write-Host ("DNS      : {0}" -f $plan.DNS) -ForegroundColor Gray
-  } else {
-    Write-Host "IPv4     : DHCP Enabled + DNS Reset" -ForegroundColor Gray
-  }
-
-  Write-Host ("IPv6     : {0}" -f $plan.IPv6) -ForegroundColor Gray
-  Write-Line
-
-  if (-not (Confirm-YesNoKey "Apply these settings now?")) {
-    Write-Warn "Cancelled. Returning to menu."
-    continue
-  }
-
-  try {
-    if ($plan.Mode -eq "DHCP") {
-      Set-IPv4DHCP -Alias $alias
-    }
-    elseif ($plan.Mode -eq "USL") {
-      Set-IPv4Static -Alias $alias -Ip $plan.IPv4_IP -Prefix $plan.Prefix -Gateway $USL_GW -DnsServers $USL_DNS
+      if ($dnsList.Count -gt 0) { $plan.DNS = ($dnsList -join ", ") } else { $plan.DNS = "Reset/Auto" }
     }
     else {
-      $dnsServers = @()
-      if ($plan.DNS -and $plan.DNS -ne "Reset/Auto") {
-        $dnsServers = ($plan.DNS.Split(',') | ForEach-Object { $_.Trim() }) | Where-Object { $_ }
-      }
-      Set-IPv4Static -Alias $alias -Ip $plan.IPv4_IP -Prefix $plan.Prefix -Gateway $plan.Gateway -DnsServers $dnsServers
+      $plan.DNS = "Reset/Auto"
     }
 
-    if ($ipv6Action) {
-      if (Confirm-YesNoKey ("Confirm IPv6 change: {0} on '{1}'?" -f $ipv6Action, $alias)) {
-        Set-IPv6Binding -Alias $alias -Mode $ipv6Action
-      } else {
-        Write-Warn "IPv6 change skipped by user."
-      }
+    Write-Head "Planned Changes"
+    Write-Host ("Adapter : {0}" -f $plan.Adapter) -ForegroundColor Gray
+    Write-Host ("Mode    : {0}" -f $plan.Mode) -ForegroundColor Gray
+
+    if ($plan.Mode -eq "USL" -or $plan.Mode -eq "Custom") {
+      Write-Host ("IPv4 IP  : {0}" -f $plan.IPv4_IP) -ForegroundColor Gray
+      Write-Host ("Prefix   : /{0}" -f $plan.Prefix) -ForegroundColor Gray
+      Write-Host ("Gateway  : {0}" -f $(if ([string]::IsNullOrWhiteSpace($plan.Gateway)) { "None" } else { $plan.Gateway })) -ForegroundColor Gray
+      Write-Host ("DNS      : {0}" -f $plan.DNS) -ForegroundColor Gray
+    } else {
+      Write-Host "IPv4     : DHCP Enabled + DNS Reset" -ForegroundColor Gray
     }
 
-    Write-OK "All requested changes applied."
-    Show-AdapterConfig -Alias $alias
-    Write-OK "Done."
-    exit 0
-  } catch {
-    Write-Err ("Failed: {0}" -f $_.Exception.Message)
-    Show-AdapterConfig -Alias $alias
-    exit 1
+    Write-Host ("IPv6     : {0}" -f $plan.IPv6) -ForegroundColor Gray
+    Write-Line
+
+    if (-not (Confirm-YesNoKey "Apply these settings now?")) {
+      Write-Warn "Cancelled. Returning to menu."
+      continue
+    }
+
+    try {
+      if ($plan.Mode -eq "DHCP") {
+        Set-IPv4DHCP -Alias $alias
+      }
+      elseif ($plan.Mode -eq "USL") {
+        Set-IPv4Static -Alias $alias -Ip $plan.IPv4_IP -Prefix $plan.Prefix -Gateway $USL_GW -DnsServers $USL_DNS
+      }
+      else {
+        $dnsServers = @()
+        if ($plan.DNS -and $plan.DNS -ne "Reset/Auto") {
+          $dnsServers = ($plan.DNS.Split(',') | ForEach-Object { $_.Trim() }) | Where-Object { $_ }
+        }
+        Set-IPv4Static -Alias $alias -Ip $plan.IPv4_IP -Prefix $plan.Prefix -Gateway $plan.Gateway -DnsServers $dnsServers
+      }
+
+      if ($ipv6Action) {
+        if (Confirm-YesNoKey ("Confirm IPv6 change: {0} on '{1}'?" -f $ipv6Action, $alias)) {
+          Set-IPv6Binding -Alias $alias -Mode $ipv6Action
+        } else {
+          Write-Warn "IPv6 change skipped by user."
+        }
+      }
+
+      Write-OK "All requested changes applied."
+      Show-AdapterConfig -Alias $alias
+
+      # NEW: decide what to do next (loop)
+      $next = Menu-AfterApply
+      if ($next -eq "X") { Write-Warn "Exit."; exit 0 }
+      if ($next -eq "2") { $alias = $null; break }  # break inner loop -> pick adapter again
+      # else "1": continue inner loop for same adapter
+      continue
+
+    } catch {
+      Write-Err ("Failed: {0}" -f $_.Exception.Message)
+      Show-AdapterConfig -Alias $alias
+
+      $next = Menu-AfterApply
+      if ($next -eq "X") { Write-Warn "Exit."; exit 1 }
+      if ($next -eq "2") { $alias = $null; break }
+      continue
+    }
   }
 }
