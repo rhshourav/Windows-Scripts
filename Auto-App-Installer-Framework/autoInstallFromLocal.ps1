@@ -1,14 +1,14 @@
 #requires -version 5.1
 <#
 .SYNOPSIS
-  Auto App Installer – CLI Only – v1.3.2 (by rhshourav)
+  Auto App Installer – CLI Only – v1.3.3 (by rhshourav)
 
 .DESCRIPTION
   - Auto-elevates to Admin (PowerShell 5.1 safe, uses -EncodedCommand)
   - CLI "GUI-style" UX (colors, headers, progress bars)
   - Network locations (UNC)
   - Lists .exe & .msi (RECURSIVE scan for ALL sources)
-  - CLI selection (numbers/ranges/all/filter)
+  - CLI selection (numbers/ranges/all/filter/back)
   - Explicit user permission before install
   - Sequential execution (waits each installer) + exit code capture
   - Robust logging (Transcript + meta log)
@@ -303,6 +303,7 @@ function Show-AppsTable {
     Write-Host '  1-4,8,10-12    -> ranges supported' -ForegroundColor Yellow
     Write-Host '  filter <text>  -> show only matching names (does not auto-select)' -ForegroundColor Yellow
     Write-Host '  show           -> show full list again' -ForegroundColor Yellow
+    Write-Host '  back           -> go back to source selection' -ForegroundColor Yellow
     Write-Host '  done           -> finish selection' -ForegroundColor Yellow
     Write-Host ''
 }
@@ -340,7 +341,9 @@ function Select-AppsCli {
     param([System.IO.FileInfo[]]$Apps)
 
     $Apps = @($Apps)
-    if ($Apps.Count -eq 0) { return @() }
+    if ($Apps.Count -eq 0) {
+        return [pscustomobject]@{ Back=$false; Selection=@() }
+    }
 
     Show-AppsTable -Apps $Apps
     $selected = New-Object System.Collections.Generic.HashSet[int]
@@ -348,6 +351,11 @@ function Select-AppsCli {
     while ($true) {
         $raw = Read-Host 'Select (type a command)'
         if (-not $raw) { continue }
+
+        if ($raw -match '^(back|BACK)$') {
+            Write-Warn 'Going back to source selection...'
+            return [pscustomobject]@{ Back=$true; Selection=@() }
+        }
 
         if ($raw -match '^(done|DONE)$') { break }
 
@@ -393,8 +401,15 @@ function Select-AppsCli {
         Write-Good ('Selected count now: {0}' -f $selected.Count)
     }
 
-    $final = foreach ($n in ($selected | Sort-Object)) { $Apps[$n - 1] }
-    return ,$final
+   $final = @(
+    foreach ($n in ($selected | Sort-Object)) { $Apps[$n - 1] }
+)
+
+return [pscustomobject]@{
+    Back      = $false
+    Selection = $final   # <- NO unary comma, no nested array
+}
+
 }
 
 # ---------------------------
@@ -403,6 +418,7 @@ function Select-AppsCli {
 function Get-InstallSpec {
     param([System.IO.FileInfo]$App)
 
+    # Map exact filenames to known silent args for EXE if needed
     $knownExeArgs = @{
         # 'ChromeSetup.exe' = '/silent /install'
         # '7z.exe'          = '/S'
@@ -416,6 +432,7 @@ function Get-InstallSpec {
         return @{ File=$App.FullName; Args=$knownExeArgs[$App.Name] }
     }
 
+    # Default best-effort silent (not universal)
     return @{ File=$App.FullName; Args='/S' }
 }
 
@@ -467,6 +484,7 @@ function Install-Apps {
         Log-Line INFO ('Command={0} {1}' -f $spec.File, $spec.Args)
 
         try {
+            # PS 5.1: ArgumentList must not be null/empty
             if ([string]::IsNullOrWhiteSpace($spec.Args)) {
                 $p = Start-Process -FilePath $spec.File -Wait -PassThru
             } else {
@@ -506,27 +524,38 @@ function Install-Apps {
 # Main
 # ---------------------------
 Ensure-Admin
-Write-Header 'Auto App Installer v1.3.2 (CLI only) (by rhshourav)'
+Write-Header 'Auto App Installer v1.3.3 (CLI only) (by rhshourav)'
 New-Log
 
 try {
     Self-Check
 
-    $src = Resolve-InstallBasePath
-    if (-not $src) { throw 'No installation source available.' }
+    while ($true) {
+        $src = Resolve-InstallBasePath
+        if (-not $src) { throw 'No installation source available.' }
 
-    Write-Good ('Using installation folder: {0}' -f $src.Path)
-    Write-Info 'Recursive scan enabled (subfolders will be scanned).'
+        Write-Good ('Using installation folder: {0}' -f $src.Path)
+        Write-Info 'Recursive scan enabled (subfolders will be scanned).'
 
-    $apps = @(Get-Installers -BasePath $src.Path -Recurse:$src.Recurse)
-    if ($apps.Count -eq 0) {
-        Write-Warn ('No .exe or .msi files found in: {0}' -f $src.Path)
-        Log-Line WARN ('NoInstallersFound={0} Recurse={1}' -f $src.Path, $src.Recurse)
-        exit
+        $apps = @(Get-Installers -BasePath $src.Path -Recurse:$src.Recurse)
+        if ($apps.Count -eq 0) {
+            Write-Warn ('No .exe or .msi files found in: {0}' -f $src.Path)
+            Log-Line WARN ('NoInstallersFound={0} Recurse={1}' -f $src.Path, $src.Recurse)
+
+            $back = Read-Host 'Go back to source selection? (Y/N)'
+            if ($back -match '^[Yy]$') { continue }
+            break
+        }
+
+        $pick = Select-AppsCli -Apps $apps
+        if ($pick.Back) { continue }
+
+        Install-Apps -Selection $pick.Selection
+
+        $again = Read-Host 'Go back to source selection? (Y/N)'
+        if ($again -match '^[Yy]$') { continue }
+        break
     }
-
-    $selection = Select-AppsCli -Apps $apps
-    Install-Apps -Selection $selection
 }
 catch {
     Write-Bad $_.Exception.Message
