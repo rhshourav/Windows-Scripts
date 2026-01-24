@@ -1,19 +1,20 @@
 #requires -version 5.1
 <#
 .SYNOPSIS
-  Auto App Installer – CLI Only – v1.3.0 (by rhshourav)
+  Auto App Installer – CLI Only – v1.3.2 (by rhshourav)
 
 .DESCRIPTION
-  - Auto-elevates to Admin
+  - Auto-elevates to Admin (PowerShell 5.1 safe, uses -EncodedCommand)
   - CLI "GUI-style" UX (colors, headers, progress bars)
-  - Staff / Production PC network locations (UNC)
-  - Lists .exe & .msi
+  - Network locations (UNC)
+  - Lists .exe & .msi (RECURSIVE scan for ALL sources)
   - CLI selection (numbers/ranges/all/filter)
   - Explicit user permission before install
   - Sequential execution (waits each installer) + exit code capture
   - Robust logging (Transcript + meta log)
   - Graceful fallback after 30s with progress bar (NO IEX)
   - Windows 10 / 11 compatible, PowerShell 5.1+
+  - INSTALL LOGIC: same as original (MSI silent via msiexec /qn, EXE default /S)
 #>
 
 [CmdletBinding()]
@@ -50,11 +51,74 @@ function Write-Good { param([string]$m) Write-Host ('[+] {0}' -f $m) -Foreground
 function Write-Warn { param([string]$m) Write-Host ('[!] {0}' -f $m) -ForegroundColor Yellow }
 function Write-Bad  { param([string]$m) Write-Host ('[-] {0}' -f $m) -ForegroundColor Red }
 
-# Proper Admin elevation
+function Log-Line {
+    param(
+        [ValidateSet('INFO','WARN','ERROR','OK')] [string]$Level,
+        [string]$Message
+    )
+    $ts = (Get-Date).ToString('s')
+    Add-Content -Path $global:MetaLog -Value ('{0} [{1}] {2}' -f $ts, $Level, $Message) -Encoding UTF8
+}
+
+function New-Log {
+    $root = Join-Path $env:TEMP 'rhshourav\WindowsScripts\AutoAppInstaller'
+    New-Item -Path $root -ItemType Directory -Force | Out-Null
+
+    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $global:LogFile = Join-Path $root ("AppInstall_{0}.log" -f $stamp)
+    $global:MetaLog = Join-Path $root ("AppInstall_{0}.meta.log" -f $stamp)
+
+    try { Start-Transcript -Path $global:LogFile -Append | Out-Null } catch {
+        Write-Warn ("Transcript could not be started. Continuing. Details: {0}" -f $_.Exception.Message)
+    }
+
+    Write-Info ("Log : {0}" -f $global:LogFile)
+    Write-Info ("Meta: {0}" -f $global:MetaLog)
+
+    try {
+        Log-Line INFO ("Host={0} User={1}\{2}" -f $env:COMPUTERNAME, $env:USERDOMAIN, $env:USERNAME)
+        Log-Line INFO ("PSVersion={0}" -f $PSVersionTable.PSVersion)
+    } catch {}
+}
+
+function Stop-Log { try { Stop-Transcript | Out-Null } catch { } }
+
+# ---------------------------
+# Admin elevation (PS 5.1 safe)
+# ---------------------------
 function Escape-SingleQuote {
     param([string]$s)
     if ($null -eq $s) { return '' }
     return ($s -replace "'", "''")
+}
+
+function Quote-ForPsLiteral {
+    param([string]$s)
+    return "'" + (Escape-SingleQuote $s) + "'"
+}
+
+function Get-ForwardedArgs {
+    $out = New-Object System.Collections.Generic.List[string]
+
+    foreach ($k in $PSBoundParameters.Keys) {
+        $v = $PSBoundParameters[$k]
+
+        if ($v -is [switch]) {
+            if ($v.IsPresent) { $out.Add("-$k") }
+        }
+        elseif ($null -ne $v) {
+            $out.Add("-$k")
+            $out.Add((Quote-ForPsLiteral ([string]$v)))
+        }
+    }
+
+    if ($MyInvocation.UnboundArguments) {
+        foreach ($u in $MyInvocation.UnboundArguments) {
+            $out.Add((Quote-ForPsLiteral ([string]$u)))
+        }
+    }
+
+    return ($out -join ' ')
 }
 
 function Ensure-Admin {
@@ -66,69 +130,37 @@ function Ensure-Admin {
 
         $wd     = (Get-Location).Path
         $script = $PSCommandPath
-
-        # Preserve any args passed to this script (best-effort)
-        $argStr = ''
-        if ($MyInvocation.UnboundArguments -and $MyInvocation.UnboundArguments.Count -gt 0) {
-            $quoted = foreach ($a in $MyInvocation.UnboundArguments) {
-                '"' + ($a -replace '"','`"') + '"'
-            }
-            $argStr = ($quoted -join ' ')
-        }
+        $args   = Get-ForwardedArgs
 
         $wdEsc     = Escape-SingleQuote $wd
         $scriptEsc = Escape-SingleQuote $script
 
-        # Wrapper runs your script in a CHILD powershell process, so 'exit' inside your script
-        # does NOT kill the wrapper. Wrapper then pauses so the window stays open.
         $cmd = @"
 Set-Location -LiteralPath '$wdEsc'
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File '$scriptEsc' $argStr
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File '$scriptEsc' $args
 `$ec = `$LASTEXITCODE
 Write-Host ''
 Write-Host ('[i] Finished. ExitCode={0}' -f `$ec) -ForegroundColor Cyan
 Read-Host 'Press Enter to close'
 "@
 
+        $bytes = [System.Text.Encoding]::Unicode.GetBytes($cmd)
+        $enc   = [Convert]::ToBase64String($bytes)
+
         Start-Process powershell.exe -Verb RunAs -ArgumentList @(
             '-NoProfile',
-            '-ExecutionPolicy', 'Bypass',
+            '-ExecutionPolicy','Bypass',
             '-NoExit',
-            '-Command', $cmd
+            '-EncodedCommand', $enc
         ) | Out-Null
 
         exit
     }
 }
-#End
 
-function New-Log {
-    $root = Join-Path $env:TEMP 'rhshourav\WindowsScripts\AutoAppInstaller'
-    New-Item -Path $root -ItemType Directory -Force | Out-Null
-
-    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-    $global:LogFile = Join-Path $root ('AppInstall_{0}.log' -f $stamp)
-    $global:MetaLog = Join-Path $root ('AppInstall_{0}.meta.log' -f $stamp)
-
-    try { Start-Transcript -Path $global:LogFile -Append | Out-Null } catch {
-        Write-Warn ('Transcript could not be started. Continuing. Details: {0}' -f $_.Exception.Message)
-    }
-
-    Write-Info ('Log : {0}' -f $global:LogFile)
-    Write-Info ('Meta: {0}' -f $global:MetaLog)
-}
-
-function Stop-Log { try { Stop-Transcript | Out-Null } catch { } }
-
-function Log-Line {
-    param(
-        [ValidateSet('INFO','WARN','ERROR','OK')] [string]$Level,
-        [string]$Message
-    )
-    $ts = (Get-Date).ToString('s')
-    Add-Content -Path $global:MetaLog -Value ('{0} [{1}] {2}' -f $ts, $Level, $Message) -Encoding UTF8
-}
-
+# ---------------------------
+# Self-check
+# ---------------------------
 function Self-Check {
     $os = Get-CimInstance Win32_OperatingSystem
     $ver = [Version]$os.Version
@@ -138,26 +170,24 @@ function Self-Check {
     if ($PSVersionTable.PSVersion.Major -lt 5) {
         throw ('PowerShell 5.1+ required/recommended. Current: {0}' -f $PSVersionTable.PSVersion)
     }
-    Log-Line INFO ('Self-check OK: OS={0} PS={1}' -f $os.Caption, $PSVersionTable.PSVersion)
+    Log-Line INFO ("Self-check OK: OS={0} PS={1}" -f $os.Caption, $PSVersionTable.PSVersion)
 }
 
 # ---------------------------
-# Source resolution
+# Source resolution (ALL recurse)
 # ---------------------------
 function Resolve-InstallBasePath {
     $locations = @(
-        @{ Label='Staff PC (18.201)';      Path='\\192.168.18.201\it\PC Setup\Staff pc' },
-        @{ Label='Production PC (18.201)'; Path='\\192.168.18.201\it\PC Setup\Production pc' },
-        @{ Label='Production PC (19.44)';  Path='\\192.168.19.44\it\PC Setup\Production pc' },
-        @{ Label='Staff PC (19.44)';       Path='\\192.168.19.44\it\PC Setup\Staff pc' }
+        @{ Label='Antivirus (Sentinel)';       Path='\\192.168.18.201\it\Antivirus\Sentinel';          Recurse=$true },
+        @{ Label='Staff PC (18.201)';          Path='\\192.168.18.201\it\PC Setup\Staff pc';           Recurse=$true },
+        @{ Label='Production PC (18.201)';     Path='\\192.168.18.201\it\PC Setup\Production pc';      Recurse=$true },
+        @{ Label='Production PC (19.44)';      Path='\\192.168.19.44\it\PC Setup\Production pc';       Recurse=$true },
+        @{ Label='Staff PC (19.44)';           Path='\\192.168.19.44\it\PC Setup\Staff pc';            Recurse=$true }
     )
 
-    # Find all reachable sources (not just first)
     $available = @()
     foreach ($loc in $locations) {
-        if (Test-Path -LiteralPath $loc.Path) {
-            $available += $loc
-        }
+        if (Test-Path -LiteralPath $loc.Path) { $available += $loc }
     }
 
     if ($available.Count -gt 0) {
@@ -172,7 +202,6 @@ function Resolve-InstallBasePath {
         Write-Host ''
         Write-Host ('Press ENTER for default [1], or choose 1-{0}.' -f $available.Count) -ForegroundColor Yellow
         $choice = Read-Host 'Source'
-
         if ([string]::IsNullOrWhiteSpace($choice)) { $choice = '1' }
 
         if ($choice -match '^\d+$') {
@@ -180,19 +209,18 @@ function Resolve-InstallBasePath {
             if ($idx -ge 1 -and $idx -le $available.Count) {
                 $selected = $available[$idx - 1]
                 Write-Good ('Selected: {0} -> {1}' -f $selected.Label, $selected.Path)
-                Log-Line OK ('BasePath={0} ({1})' -f $selected.Path, $selected.Label)
-                return $selected.Path
+                Log-Line OK ('BasePath={0} ({1}) Recurse={2}' -f $selected.Path, $selected.Label, $selected.Recurse)
+                return [pscustomobject]@{ Path=$selected.Path; Label=$selected.Label; Recurse=[bool]$selected.Recurse }
             }
         }
 
         Write-Warn 'Invalid selection. Defaulting to [1].'
         $selected = $available[0]
         Write-Good ('Selected: {0} -> {1}' -f $selected.Label, $selected.Path)
-        Log-Line OK ('BasePath={0} ({1})' -f $selected.Path, $selected.Label)
-        return $selected.Path
+        Log-Line OK ('BasePath={0} ({1}) Recurse={2}' -f $selected.Path, $selected.Label, $selected.Recurse)
+        return [pscustomobject]@{ Path=$selected.Path; Label=$selected.Label; Recurse=[bool]$selected.Recurse }
     }
 
-    # None available: same fallback behavior as before
     Write-Bad 'No valid network location found.'
     Log-Line WARN 'NoNetworkLocation'
 
@@ -206,7 +234,7 @@ function Resolve-InstallBasePath {
     if (Test-Path -LiteralPath $LocalFallbackDir) {
         Write-Warn ('Falling back to local installers folder: {0}' -f $LocalFallbackDir)
         Log-Line WARN ('Fallback=LocalDir ({0})' -f $LocalFallbackDir)
-        return $LocalFallbackDir
+        return [pscustomobject]@{ Path=$LocalFallbackDir; Label='LocalFallback'; Recurse=$true }
     }
 
     Write-Warn ('Local fallback folder not found: {0}' -f $LocalFallbackDir)
@@ -231,11 +259,20 @@ function Resolve-InstallBasePath {
 }
 
 function Get-Installers {
-    param([string]$BasePath)
+    param(
+        [Parameter(Mandatory)] [string]$BasePath,
+        [switch]$Recurse
+    )
 
-    # FORCE ARRAY OUTPUT ALWAYS (prevents ".Count" failures when only 1 installer exists)
+    $gciParams = @{
+        LiteralPath = $BasePath
+        File        = $true
+        ErrorAction = 'Stop'
+        Recurse     = [bool]$Recurse
+    }
+
     @(
-        Get-ChildItem -LiteralPath $BasePath -File -ErrorAction Stop |
+        Get-ChildItem @gciParams |
             Where-Object { $_.Extension -in '.exe', '.msi' } |
             Sort-Object Name
     )
@@ -295,23 +332,18 @@ function Parse-Selection {
         }
     }
 
-    # Force a real int[] and prevent PowerShell from enumerating it on output
     $arr = [int[]]$picked
     Write-Output -NoEnumerate $arr
 }
 
-
-
 function Select-AppsCli {
     param([System.IO.FileInfo[]]$Apps)
 
-    # FORCE ARRAY
     $Apps = @($Apps)
     if ($Apps.Count -eq 0) { return @() }
 
     Show-AppsTable -Apps $Apps
     $selected = New-Object System.Collections.Generic.HashSet[int]
-    $filterText = $null
 
     while ($true) {
         $raw = Read-Host 'Select (type a command)'
@@ -351,7 +383,6 @@ function Select-AppsCli {
             continue
         }
 
-        # numbers/ranges
         $picked = [int[]](Parse-Selection -InputText $raw -Max $Apps.Count)
         if ($picked.Count -eq 0) {
             Write-Warn 'No valid selection parsed. Use e.g. 1,3,5 or 1-4.'
@@ -367,12 +398,11 @@ function Select-AppsCli {
 }
 
 # ---------------------------
-# Install execution
+# Install execution (ORIGINAL LOGIC)
 # ---------------------------
 function Get-InstallSpec {
     param([System.IO.FileInfo]$App)
 
-    # Expandable: map exact filenames to known silent args for EXE
     $knownExeArgs = @{
         # 'ChromeSetup.exe' = '/silent /install'
         # '7z.exe'          = '/S'
@@ -386,14 +416,12 @@ function Get-InstallSpec {
         return @{ File=$App.FullName; Args=$knownExeArgs[$App.Name] }
     }
 
-    # Default best-effort silent (not universal)
     return @{ File=$App.FullName; Args='/S' }
 }
 
 function Install-Apps {
     param([System.IO.FileInfo[]]$Selection)
 
-    # FORCE ARRAY
     $Selection = @($Selection)
 
     if ($Selection.Count -eq 0) {
@@ -439,7 +467,12 @@ function Install-Apps {
         Log-Line INFO ('Command={0} {1}' -f $spec.File, $spec.Args)
 
         try {
-            $p = Start-Process -FilePath $spec.File -ArgumentList $spec.Args -Wait -PassThru -WindowStyle Hidden
+            if ([string]::IsNullOrWhiteSpace($spec.Args)) {
+                $p = Start-Process -FilePath $spec.File -Wait -PassThru
+            } else {
+                $p = Start-Process -FilePath $spec.File -ArgumentList $spec.Args -Wait -PassThru -WindowStyle Hidden
+            }
+
             $code = $p.ExitCode
 
             if ($code -eq 0) {
@@ -473,22 +506,22 @@ function Install-Apps {
 # Main
 # ---------------------------
 Ensure-Admin
-Write-Header 'Auto App Installer v1.3.0 (CLI only) (by rhshourav)'
+Write-Header 'Auto App Installer v1.3.2 (CLI only) (by rhshourav)'
 New-Log
 
 try {
     Self-Check
 
-    $basePath = Resolve-InstallBasePath
-    if (-not $basePath) { throw 'No installation source available.' }
+    $src = Resolve-InstallBasePath
+    if (-not $src) { throw 'No installation source available.' }
 
-    Write-Good ('Using installation folder: {0}' -f $basePath)
+    Write-Good ('Using installation folder: {0}' -f $src.Path)
+    Write-Info 'Recursive scan enabled (subfolders will be scanned).'
 
-    # FORCE ARRAY HERE TOO
-    $apps = @(Get-Installers -BasePath $basePath)
+    $apps = @(Get-Installers -BasePath $src.Path -Recurse:$src.Recurse)
     if ($apps.Count -eq 0) {
-        Write-Warn ('No .exe or .msi files found in: {0}' -f $basePath)
-        Log-Line WARN ('NoInstallersFound={0}' -f $basePath)
+        Write-Warn ('No .exe or .msi files found in: {0}' -f $src.Path)
+        Log-Line WARN ('NoInstallersFound={0} Recurse={1}' -f $src.Path, $src.Recurse)
         exit
     }
 
@@ -501,7 +534,7 @@ catch {
         Write-Bad ("At {0}:{1}" -f $_.InvocationInfo.ScriptName, $_.InvocationInfo.ScriptLineNumber)
         Write-Bad $_.InvocationInfo.Line.Trim()
     }
-    Log-Line ERROR $_.Exception.Message
+    try { Log-Line ERROR $_.Exception.Message } catch {}
 }
 finally {
     Stop-Log
