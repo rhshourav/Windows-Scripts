@@ -61,30 +61,25 @@ function Read-MenuKey {
     [Parameter(Mandatory)][string]$Prompt,
     [Parameter(Mandatory)][string[]]$ValidKeys
   )
+
+  if (-not $ValidKeys -or $ValidKeys.Count -eq 0) {
+    throw "Read-MenuKey called with empty ValidKeys. Upstream menu builder produced no choices."
+  }
+
   while ($true) {
     Write-Host -NoNewline $Prompt
     $ch = Read-KeyChar
-
-    # Ignore Enter / CR / LF silently (prevents "Invalid choice" spam)
     if ($ch -eq "`r" -or $ch -eq "`n") { continue }
-
-    # Fallback if RawUI not available
     if ($null -eq $ch -or $ch -eq [char]0) {
       $fallback = (Read-Host "").Trim()
       if ($fallback.Length -ge 1) { $ch = $fallback[0] } else { $ch = '' }
     }
-
     $ch = ($ch.ToString()).ToUpperInvariant()
-
-    if ($ValidKeys -contains $ch) {
-      Write-Host $ch
-      return $ch
-    }
-
-    Write-Host ""
-    Write-Warn ("Invalid choice. Valid: {0}" -f ($ValidKeys -join ", "))
+    if ($ValidKeys -contains $ch) { Write-Host $ch; return $ch }
+    Write-Host ""; Write-Warn ("Invalid choice. Valid: {0}" -f ($ValidKeys -join ", "))
   }
 }
+
 
 function Confirm-YesNoKey([string]$Prompt) {
   $k = Read-MenuKey -Prompt ("{0} [Y/N]: " -f $Prompt) -ValidKeys @("Y","N")
@@ -310,18 +305,29 @@ function Show-AdapterConfig([string]$Alias) {
 }
 
 function Select-Adapter {
-  $adapters = Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Sort-Object -Property Status, Name
-  if (-not $adapters) { throw "No adapters found." }
+
+  # Prefer physical adapters, but fall back to all adapters if none are returned
+  $adapters = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue)
+
+  if ($adapters.Count -eq 0) {
+    $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue)
+  }
+
+  # Final hard stop if still nothing
+  if ($adapters.Count -eq 0) {
+    throw "No network adapters were returned by Get-NetAdapter. Run: Get-NetAdapter | Format-Table -Auto"
+  }
+
+  $adapters = $adapters | Sort-Object -Property Status, Name
 
   Write-Head "Select Network Adapter"
-  for ($i=0; $i -lt $adapters.Count; $i++) {
+  for ($i = 0; $i -lt $adapters.Count; $i++) {
     $a = $adapters[$i]
     Write-Host ("{0}) {1} | Status={2} | IfIndex={3} | MAC={4}" -f ($i+1), $a.Name, $a.Status, $a.ifIndex, $a.MacAddress) -ForegroundColor Gray
   }
 
   if ($adapters.Count -le 9) {
-    $valid = @()
-    for ($n=1; $n -le $adapters.Count; $n++) { $valid += $n.ToString() }
+    $valid = @(1..$adapters.Count | ForEach-Object { $_.ToString() })
     $k = Read-MenuKey -Prompt "Choose adapter number: " -ValidKeys $valid
     return $adapters[[int]$k - 1].Name
   }
@@ -335,6 +341,7 @@ function Select-Adapter {
     Write-Warn "Invalid selection."
   }
 }
+
 
 # -----------------------------
 # Apply config actions
