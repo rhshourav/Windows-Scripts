@@ -20,9 +20,20 @@
 # =========================================================
 # Check for administrative privileges (requires admin):contentReference[oaicite:7]{index=7}
 
-if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Host "Error: This script must be run as administrator." -ForegroundColor Red
-    exit 1
+# -----------------------------
+# Admin / Elevation
+# -----------------------------
+function Is-Admin {
+  $wp = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+  return $wp.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
+}
+
+if (-not (Is-Admin)) {
+  Write-Warn "Administrator rights are required. Elevating..."
+  Start-Process powershell -Verb RunAs -ArgumentList @(
+    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`""
+  )
+  exit
 }
 # -----------------------------
 # UI: black background + bright colors
