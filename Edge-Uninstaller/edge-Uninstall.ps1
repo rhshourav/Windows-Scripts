@@ -1,31 +1,36 @@
 <#
-Remove-Edge-Menu.ps1
-Windows 10 19H1 (1903) -> Windows 11 current
-PowerShell 5.1 compatible
+  Windows-Scripts | Remove Microsoft Edge (Best-Effort) - Interactive Remover
+  Supports: Windows 10 19H1 (1903) -> Windows 11 current | PowerShell 5.1+
+  Author : Shourav
+  GitHub : https://github.com/rhshourav
+  Version: 1.3.1
 
-Interactive menu, themed UI, best-effort Edge removal.
-WebView2 is NOT touched unless explicitly chosen.
-
-Run:
-  powershell -ExecutionPolicy Bypass -File .\Remove-Edge-Menu.ps1
+  NOTES:
+  - WebView2 is NOT touched unless explicitly selected from the menu.
+  - On some newer Windows builds, Edge may be retained/restored by servicing/updates.
+  - Script is best-effort and prioritizes stability by default.
 #>
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 
 # -----------------------------
+# Script Metadata (Windows-Scripts)
+# -----------------------------
+$ScriptName    = "Remove Edge - Interactive Remover"
+$ScriptVersion = "1.3.1"
+$ScriptAuthor  = "Shourav"
+$ScriptGitHub  = "github.com/rhshourav"
+$ScriptPack    = "Windows-Scripts"
+
+# Banner mode:
+#   "ASCII"   -> safe on all consoles (default, recommended)
+#   "UNICODE" -> only if your console/font can render block chars
+$BannerMode = "ASCII"
+
+# -----------------------------
 # Theme / UI
 # -----------------------------
-function Set-ConsoleTheme {
-    try {
-        $raw = $Host.UI.RawUI
-        $raw.BackgroundColor = "Black"
-        $raw.ForegroundColor = "Gray"
-        $raw.WindowTitle = "Remove Edge - Interactive Remover"
-        Clear-Host
-    } catch {}
-}
-
 $C_OK    = "Green"
 $C_WARN  = "Yellow"
 $C_ERR   = "Red"
@@ -33,16 +38,17 @@ $C_INFO  = "Cyan"
 $C_DIM   = "DarkGray"
 $C_MAIN  = "White"
 
-function Write-Banner {
-    Write-Host ""
-    Write-Host "██████╗ ███████╗███╗   ███╗ ██████╗ ██╗   ██╗███████╗" -ForegroundColor $C_INFO
-    Write-Host "██╔══██╗██╔════╝████╗ ████║██╔═══██╗██║   ██║██╔════╝" -ForegroundColor $C_INFO
-    Write-Host "██████╔╝█████╗  ██╔████╔██║██║   ██║██║   ██║█████╗  " -ForegroundColor $C_INFO
-    Write-Host "██╔══██╗██╔══╝  ██║╚██╔╝██║██║   ██║╚██╗ ██╔╝██╔══╝  " -ForegroundColor $C_INFO
-    Write-Host "██║  ██║███████╗██║ ╚═╝ ██║╚██████╔╝ ╚████╔╝ ███████╗" -ForegroundColor $C_INFO
-    Write-Host "╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝ ╚═════╝   ╚═══╝  ╚══════╝" -ForegroundColor $C_INFO
-    Write-Host "Microsoft Edge removal (best-effort) | WebView2 avoided by default" -ForegroundColor $C_DIM
-    Write-Host ""
+function Set-ConsoleTheme {
+    try {
+        $raw = $Host.UI.RawUI
+        $raw.BackgroundColor = "Black"
+        $raw.ForegroundColor = "Gray"
+        $raw.WindowTitle = $ScriptName
+        Clear-Host
+    } catch {}
+
+    # Best-effort for Unicode; harmless even if BannerMode is ASCII.
+    try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}
 }
 
 function Write-Section([string]$t) {
@@ -52,10 +58,34 @@ function Write-Section([string]$t) {
     Write-Host ("=" * 78) -ForegroundColor $C_DIM
 }
 
-function Pause-AnyKey {
+# No "press enter" pauses.
+function Pause-Brief([int]$Seconds = 2) {
+    Start-Sleep -Seconds $Seconds
+}
+
+function Write-Banner {
     Write-Host ""
-    Write-Host "Press ENTER to continue..." -ForegroundColor $C_DIM
-    [void](Read-Host)
+
+    if ($BannerMode -eq "UNICODE") {
+        # Only enable if you know your console can render it cleanly.
+        Write-Host "██████╗ ███████╗███╗   ███╗ ██████╗ ██╗   ██╗███████╗" -ForegroundColor $C_INFO
+        Write-Host "██╔══██╗██╔════╝████╗ ████║██╔═══██╗██║   ██║██╔════╝" -ForegroundColor $C_INFO
+        Write-Host "██████╔╝█████╗  ██╔████╔██║██║   ██║██║   ██║█████╗  " -ForegroundColor $C_INFO
+        Write-Host "██╔══██╗██╔══╝  ██║╚██╔╝██║██║   ██║╚██╗ ██╔╝██╔══╝  " -ForegroundColor $C_INFO
+        Write-Host "██║  ██║███████╗██║ ╚═╝ ██║╚██████╔╝ ╚████╔╝ ███████╗" -ForegroundColor $C_INFO
+        Write-Host "╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝ ╚═════╝   ╚═══╝  ╚══════╝" -ForegroundColor $C_INFO
+    } else {
+        # ASCII banner (safe everywhere)
+        Write-Host "==============================================================================" -ForegroundColor $C_INFO
+        Write-Host "  REMOVE MICROSOFT EDGE - INTERACTIVE REMOVER"                                  -ForegroundColor $C_INFO
+        Write-Host "==============================================================================" -ForegroundColor $C_INFO
+    }
+
+    Write-Host ("{0} | v{1}" -f $ScriptName, $ScriptVersion) -ForegroundColor $C_MAIN
+    Write-Host ("Author: {0} | GitHub: {1}" -f $ScriptAuthor, $ScriptGitHub) -ForegroundColor $C_DIM
+    Write-Host ("Package: {0}" -f $ScriptPack) -ForegroundColor $C_DIM
+    Write-Host "Microsoft Edge removal (best-effort) | WebView2 avoided by default" -ForegroundColor $C_DIM
+    Write-Host ""
 }
 
 # -----------------------------
@@ -118,7 +148,8 @@ function Get-HighestSetupExe([string[]]$AppRoots) {
         if (-not (Test-Path $root)) { continue }
         try {
             $verDirs = Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue |
-                       Where-Object { $_.Name -match '^\d+(\.\d+)+' }
+                Where-Object { $_.Name -match '^\d+(\.\d+)+' }
+
             foreach ($v in $verDirs) {
                 $setup = Join-Path $v.FullName "Installer\setup.exe"
                 if (Test-Path $setup) {
@@ -159,7 +190,7 @@ function Get-WinGetPath {
     return $cmd.Source
 }
 
-# IMPORTANT: always return an ARRAY (fixes your Count error)
+# Always returns an ARRAY (prevents .Count errors)
 function Verify-EdgePresence {
     $paths = @(
         "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -198,7 +229,6 @@ function Uninstall-Edge {
         if ($null -ne $winget) {
             Write-Host "-> winget detected. Attempting uninstall..." -ForegroundColor $C_MAIN
             try {
-                # Keep it simple for compatibility; winget args vary slightly across versions.
                 & $winget uninstall -e --id Microsoft.Edge --silent --force --disable-interactivity --accept-source-agreements | Out-Null
                 Write-Host "[+] winget uninstall attempted." -ForegroundColor $C_OK
             } catch {
@@ -223,7 +253,6 @@ function Uninstall-Edge {
     try { Run-Exe $edgeSetup "--uninstall --system-level --verbose-logging --force-uninstall" "Edge uninstall (system-level)" | Out-Null } catch {}
     try { Run-Exe $edgeSetup "--uninstall --user-level  --verbose-logging --force-uninstall" "Edge uninstall (user-level)"  | Out-Null } catch {}
 
-    # SAFE count check: always array
     $still = Verify-EdgePresence
     if (@($still).Count -eq 0) {
         Write-Host "[+] Edge executable not found in standard Program Files paths." -ForegroundColor $C_OK
@@ -322,7 +351,7 @@ try {
     while ($true) {
         Set-ConsoleTheme
         Write-Banner
-        Write-Host "Log: $log" -ForegroundColor $C_DIM
+        Write-Host ("Log: {0}" -f $log) -ForegroundColor $C_DIM
         Write-Host ""
 
         Write-Host "  [1] Recommended: Disable Edge Update + Remove Edge (NO WebView2)" -ForegroundColor $C_MAIN
@@ -337,38 +366,14 @@ try {
         $choice = Read-Host "Select an option (1-7)"
 
         switch ($choice) {
-            "1" {
-                Disable-EdgeUpdate
-                Uninstall-Edge -TryWingetFirst:$true
-                Pause-AnyKey
-            }
-            "2" {
-                Uninstall-Edge -TryWingetFirst:$true
-                Pause-AnyKey
-            }
-            "3" {
-                Disable-EdgeUpdate
-                Pause-AnyKey
-            }
-            "4" {
-                Aggressive-Cleanup -IncludeWebView2:$false
-                Pause-AnyKey
-            }
-            "5" {
-                Disable-EdgeUpdate
-                Uninstall-Edge -TryWingetFirst:$true
-                Aggressive-Cleanup -IncludeWebView2:$false
-                Pause-AnyKey
-            }
-            "6" {
-                Uninstall-WebView2
-                Pause-AnyKey
-            }
+            "1" { Disable-EdgeUpdate; Uninstall-Edge -TryWingetFirst:$true; Pause-Brief 2 }
+            "2" { Uninstall-Edge -TryWingetFirst:$true; Pause-Brief 2 }
+            "3" { Disable-EdgeUpdate; Pause-Brief 2 }
+            "4" { Aggressive-Cleanup -IncludeWebView2:$false; Pause-Brief 2 }
+            "5" { Disable-EdgeUpdate; Uninstall-Edge -TryWingetFirst:$true; Aggressive-Cleanup -IncludeWebView2:$false; Pause-Brief 2 }
+            "6" { Uninstall-WebView2; Pause-Brief 2 }
             "7" { break }
-            default {
-                Write-Host "[!] Invalid option." -ForegroundColor $C_WARN
-                Start-Sleep -Seconds 1
-            }
+            default { Write-Host "[!] Invalid option." -ForegroundColor $C_WARN; Start-Sleep -Seconds 1 }
         }
     }
 
@@ -383,7 +388,10 @@ try {
     }
 
     Write-Host ""
-    Write-Host "Log saved at: $log" -ForegroundColor $C_DIM
+    Write-Host ("Log saved at: {0}" -f $log) -ForegroundColor $C_DIM
+
+    # Auto-exit shortly after final status (no keypress required)
+    Start-Sleep -Seconds 3
 }
 finally {
     try { Stop-Transcript | Out-Null } catch {}
