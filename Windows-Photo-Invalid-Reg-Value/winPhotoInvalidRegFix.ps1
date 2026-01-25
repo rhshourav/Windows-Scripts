@@ -1,11 +1,16 @@
 <#
   Windows Photos "Invalid Value for Registry" Fix + Default App Associations Auto-Apply
+  Part of: Windows-Scripts
+  Author : rhshourav
+  GitHub : https://github.com/rhshourav/Windows-Scripts
+
   - Auto-detect OS + installed apps
   - Downloads matching XML (and optional REG) from:
     https://api.github.com/repos/rhshourav/Windows-Scripts/contents/Windows-Photo-Invalid-Reg-Value/File%20Associations?ref=main
   - Applies DefaultAssociationsConfiguration policy + DISM import
   - Clears per-user broken UserChoice keys for common image extensions
   - Resets/repairs Microsoft Photos (terminate, clear LocalState, re-register)
+  - Auto-elevates (safe for: iex (irm ...))
 #>
 
 [CmdletBinding()]
@@ -18,29 +23,110 @@ param(
 )
 
 # -----------------------------
-# Admin check
+# UI + helpers (theme like your other scripts)
+# -----------------------------
+# Enable ANSI colors (best-effort)
+for ($i=0; $i -lt 1; $i++) {
+  try { $script:ESC = [char]27 } catch {}
+}
+
+function Say($msg, $color="Gray") { Write-Host $msg -ForegroundColor $color }
+function Bar { Say ("=" * 78) "DarkGray" }
+
+function Banner {
+  try {
+    $raw = $Host.UI.RawUI
+    $raw.BackgroundColor = 'Black'
+    $raw.ForegroundColor = 'White'
+    Clear-Host
+  } catch {}
+
+  Bar
+  Say "  Windows Photos Fix + Default Associations Auto-Apply" "White"
+  Say "  Author: rhshourav  |  Repo: Windows-Scripts" "DarkGray"
+  Say "  GitHub : https://github.com/rhshourav/Windows-Scripts" "DarkGray"
+  Bar
+  Say ""
+}
+
+function Convert-BoundParamsToString {
+  param([hashtable]$Bound)
+
+  if (-not $Bound -or $Bound.Count -eq 0) { return "" }
+
+  $parts = New-Object System.Collections.Generic.List[string]
+  foreach ($k in $Bound.Keys) {
+    $v = $Bound[$k]
+    if ($v -is [System.Management.Automation.SwitchParameter]) {
+      if ($v.IsPresent) { $parts.Add("-$k") }
+    }
+    elseif ($null -eq $v) {
+      # skip
+    }
+    elseif ($v -is [string]) {
+      $escaped = $v.Replace('"','\"')
+      $parts.Add("-$k `"$escaped`"")
+    }
+    else {
+      $parts.Add("-$k $v")
+    }
+  }
+  return ($parts -join " ")
+}
+
+# -----------------------------
+# Auto-elevate (works for .ps1 and iex(irm ...))
 # -----------------------------
 $IsAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()
 ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
 if (-not $IsAdmin) {
-  Write-Host "[!] Run this script as Administrator." -ForegroundColor Red
-  exit 1
+  Banner
+  Say "[*] Elevation required. Relaunching as Administrator..." "Yellow"
+
+  $argString = Convert-BoundParamsToString -Bound $PSBoundParameters
+
+  $psExe = $null
+  try { $psExe = (Get-Process -Id $PID -ErrorAction Stop).Path } catch {}
+  if (-not $psExe) {
+    $psExe = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh.exe" } else { "powershell.exe" }
+  }
+
+  $scriptPath = $PSCommandPath
+
+  if ($scriptPath -and (Test-Path $scriptPath)) {
+    # Running from a file
+    $startArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" $argString"
+    Start-Process -FilePath $psExe -Verb RunAs -ArgumentList $startArgs | Out-Null
+    return
+  }
+
+  # Running from iex(irm ...) or in-memory: write the current script block to a temp .ps1
+  $tmp = Join-Path $env:TEMP ("Windows_Photos_Fix_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".ps1")
+  try {
+    $content = $MyInvocation.MyCommand.Definition
+    if (-not $content -or $content.Trim().Length -lt 50) {
+      throw "Could not capture script content for elevation."
+    }
+    [System.IO.File]::WriteAllText($tmp, $content, [System.Text.Encoding]::UTF8)
+  } catch {
+    Say "[!] Elevation failed: $($_.Exception.Message)" "Red"
+    Say "    Run PowerShell as Administrator and re-run the same command." "Yellow"
+    return
+  }
+
+  $startArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$tmp`" $argString"
+  Start-Process -FilePath $psExe -Verb RunAs -ArgumentList $startArgs | Out-Null
+  return
 }
 
 # -----------------------------
-# Console styling (best effort)
+# Main banner (now elevated)
 # -----------------------------
-try {
-  $raw = $Host.UI.RawUI
-  $raw.BackgroundColor = 'Black'
-  $raw.ForegroundColor = 'White'
-  Clear-Host
-} catch {}
+Banner
 
-function Say($msg, $color="Gray") {
-  Write-Host $msg -ForegroundColor $color
-}
+# Ensure TLS 1.2 for older builds
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
 function Invoke-RetryWeb {
   param(
@@ -67,9 +153,23 @@ function Download-File {
     [Parameter(Mandatory=$true)][string]$Url,
     [Parameter(Mandatory=$true)][string]$OutFile
   )
-  $wc = New-Object System.Net.WebClient
-  $wc.Headers["User-Agent"] = "Windows-Photo-Fix-Script"
-  $wc.DownloadFile($Url, $OutFile)
+
+  $headers = @{ "User-Agent" = "Windows-Photo-Fix-Script" }
+
+  try {
+    Invoke-WebRequest -Uri $Url -Headers $headers -OutFile $OutFile -UseBasicParsing -ErrorAction Stop | Out-Null
+    return
+  } catch {
+    # Fallback for older / locked-down environments
+    try {
+      $wc = New-Object System.Net.WebClient
+      $wc.Headers["User-Agent"] = "Windows-Photo-Fix-Script"
+      $wc.DownloadFile($Url, $OutFile)
+      return
+    } catch {
+      throw
+    }
+  }
 }
 
 function Test-Installed {
@@ -109,13 +209,11 @@ function Get-OSProfile {
     if ($caption -match "2022") { return "Win2022" }
     return "WinServer"
   }
-  # fallback
   if ($build -ge 22000) { return "Win11" }
   return "Win10"
 }
 
 function Get-AppTags {
-  # Heuristics for installed apps
   $isVLC = Test-Installed `
     -Paths @("$env:ProgramFiles\VideoLAN\VLC\vlc.exe", "$env:ProgramFiles(x86)\VideoLAN\VLC\vlc.exe") `
     -RegDisplayNameLike @("*VLC media player*")
@@ -125,9 +223,7 @@ function Get-AppTags {
     -RegDisplayNameLike @("*7-Zip*")
 
   $isNanaZip = $false
-  try {
-    $isNanaZip = [bool](Get-AppxPackage -Name "40174MouriNaruto.NanaZip" -ErrorAction SilentlyContinue)
-  } catch {}
+  try { $isNanaZip = [bool](Get-AppxPackage -Name "40174MouriNaruto.NanaZip" -ErrorAction SilentlyContinue) } catch {}
 
   $isImageGlass = Test-Installed `
     -Paths @("$env:ProgramFiles\ImageGlass\ImageGlass.exe", "$env:ProgramFiles(x86)\ImageGlass\ImageGlass.exe") `
@@ -149,7 +245,7 @@ function Get-AppTags {
   if ($isImageGlass) { $tags += "ImageGlass" }
   if ($isVLC)        { $tags += "VLC" }
   if ($isNanaZip)    { $tags += "NanaZip" }
-  elseif ($is7zip)   { $tags += "7zip" }   # match your naming style
+  elseif ($is7zip)   { $tags += "7zip" }
   if ($isAcrobat)    { $tags += "AdobeAcrobat" }
   elseif ($isFoxit)  { $tags += "Foxit" }
 
@@ -171,8 +267,6 @@ function Pick-BestConfig {
     throw "ForceConfig '$ForceConfig' was not found in the repo folder."
   }
 
-  # Build preferred name patterns from detected tags
-  # Example: Win11_ImageGlass+VLC+NanaZip+Acrobat.xml or Win10_PhotoViewer+Foxit.xml
   $preferred = @()
 
   if ($Tags.Count -gt 0) {
@@ -180,10 +274,8 @@ function Pick-BestConfig {
     $preferred += "$OsPrefix" + "_" + $tagCombo + ".xml"
   }
 
-  # Some repos include generic fallbacks like Win11_Multi_Default.xml
   $preferred += "$OsPrefix" + "_Multi_Default.xml"
 
-  # If PhotoViewer tag is implied (no ImageGlass), try PhotoViewer variants
   if (-not ($Tags -contains "ImageGlass")) {
     foreach ($t in @("AdobeAcrobat","Foxit")) {
       if ($Tags -contains $t) {
@@ -192,13 +284,11 @@ function Pick-BestConfig {
     }
   }
 
-  # Exact match first
   foreach ($p in $preferred) {
     $hit = $xmlItems | Where-Object { $_.name -eq $p }
     if ($hit) { return $hit[0] }
   }
 
-  # Fuzzy match: must start with OS prefix and contain most tags
   $best = $null
   $bestScore = -1
   foreach ($item in $xmlItems) {
@@ -224,14 +314,12 @@ function Apply-DefaultAppAssociations {
   $targetXml = "C:\ProgramData\DefaultAppAssociations.xml"
   Copy-Item -Path $XmlPath -Destination $targetXml -Force
 
-  # Policy: DefaultAssociationsConfiguration
   $polKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
   if (-not (Test-Path $polKey)) { New-Item -Path $polKey -Force | Out-Null }
   New-ItemProperty -Path $polKey -Name "DefaultAssociationsConfiguration" -Value $targetXml -PropertyType String -Force | Out-Null
 
   Say "[+] Policy set: DefaultAssociationsConfiguration -> $targetXml" "Green"
 
-  # DISM import (affects new profiles, and can help enforce baseline)
   $dism = "$env:WINDIR\System32\dism.exe"
   $args = "/Online /Import-DefaultAppAssociations:`"$targetXml`""
   Say "[*] Running DISM import..." "Cyan"
@@ -244,8 +332,6 @@ function Apply-DefaultAppAssociations {
 }
 
 function Clear-UserChoiceForExtensions {
-  # This forces Windows to rebuild associations cleanly.
-  # It does NOT “hack” the hash; it simply removes broken choices.
   $exts = @(".jpg",".jpeg",".png",".bmp",".gif",".tif",".tiff",".webp",".heic",".jfif")
   $base = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts"
 
@@ -268,12 +354,10 @@ function Clear-UserChoiceForExtensions {
 function Repair-PhotosApp {
   Say "[*] Repairing Microsoft Photos..." "Cyan"
 
-  # Kill running Photos processes
   foreach ($p in @("Microsoft.Photos","Photos","Microsoft.Photos.exe")) {
     try { Get-Process -Name $p -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}
   }
 
-  # Clear per-user app data (approximate “Reset” behavior)
   $pkgRoot = Join-Path $env:LOCALAPPDATA "Packages"
   $photosPkgs = Get-ChildItem $pkgRoot -Directory -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -like "Microsoft.Windows.Photos_*" }
@@ -292,7 +376,6 @@ function Repair-PhotosApp {
     }
   }
 
-  # Re-register Photos (commonly fixes broken app registrations) :contentReference[oaicite:0]{index=0}
   try {
     $photos = Get-AppxPackage -AllUsers Microsoft.Windows.Photos -ErrorAction SilentlyContinue
     if ($photos) {
@@ -311,7 +394,6 @@ function Repair-PhotosApp {
   }
 
   if (-not $SkipWsReset) {
-    # Store cache reset is a common supporting fix for Store-delivered apps :contentReference[oaicite:1]{index=1}
     try {
       Say "[*] Running wsreset.exe (Store cache reset)..." "Cyan"
       Start-Process -FilePath "wsreset.exe" -Wait -ErrorAction SilentlyContinue
@@ -321,7 +403,6 @@ function Repair-PhotosApp {
     }
   }
 
-  # Launch Photos once (optional “first-run” initialization effect noted in the field) :contentReference[oaicite:2]{index=2}
   try {
     Say "[*] Launching Photos once to reinitialize..." "Cyan"
     Start-Process "ms-photos:" | Out-Null
@@ -336,10 +417,7 @@ function Repair-PhotosApp {
 # -----------------------------
 # Main
 # -----------------------------
-Say "=== Windows Photos Fix + Default Associations Auto-Apply ===" "White"
-
-# Ensure TLS 1.2 for older builds
-try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+Say "[*] Starting..." "White"
 
 $work = Join-Path $env:TEMP ("PhotoFix_" + (Get-Date -Format "yyyyMMdd_HHmmss"))
 New-Item -ItemType Directory -Path $work -Force | Out-Null
@@ -350,12 +428,10 @@ $tags = Get-AppTags
 Say "[*] OS Profile : $osPrefix" "Cyan"
 Say ("[*] Detected  : " + ($(if ($tags.Count) { $tags -join ", " } else { "No optional apps detected" }))) "Cyan"
 
-# GitHub contents listing (no guessing filenames; we discover them)
 $api = "https://api.github.com/repos/rhshourav/Windows-Scripts/contents/Windows-Photo-Invalid-Reg-Value/File%20Associations?ref=main"
 Say "[*] Fetching repo file list..." "Cyan"
 $items = Invoke-RetryWeb -Uri $api -Retries 3
 
-# Pick best XML
 $configItem = Pick-BestConfig -OsPrefix $osPrefix -Tags $tags -RepoItems $items
 Say "[+] Selected XML: $($configItem.name)" "Green"
 
@@ -363,7 +439,6 @@ $xmlOut = Join-Path $work $configItem.name
 Download-File -Url $configItem.download_url -OutFile $xmlOut
 Say "[+] Downloaded: $xmlOut" "Green"
 
-# Optional: If PhotoViewer.reg exists in the same folder, download it (only used if your XML expects it)
 $regItem = $items | Where-Object { $_.name -ieq "PhotoViewer.reg" }
 $regOut = $null
 if ($regItem) {
@@ -373,7 +448,6 @@ if ($regItem) {
 }
 
 if (-not $SkipDefaultApps) {
-  # If PhotoViewer.reg exists, import it first (safe even if not strictly required)
   if ($regOut -and (Test-Path $regOut)) {
     Say "[*] Importing PhotoViewer.reg..." "Cyan"
     $rp = Start-Process -FilePath "reg.exe" -ArgumentList @("import", "`"$regOut`"") -Wait -PassThru
