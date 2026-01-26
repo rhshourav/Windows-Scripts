@@ -1,7 +1,7 @@
 #requires -version 5.1
 <#
 .SYNOPSIS
-  Auto App Installer – CLI Only – v2.1.0 (by rhshourav)
+  Auto App Installer – CLI Only – v2.1.1 (by rhshourav)
 
 .DESCRIPTION
   - Auto-elevates to Admin (PowerShell 5.1 safe, uses -EncodedCommand)
@@ -76,7 +76,7 @@ $global:InstallerRules = @(
         MatchType = 'Contains'
         Match     = 'green'
         Args      = @('/ALLUSER')
-        Preselect = $true
+        Preselect = $false
 
         # Example remote post (pin to commit SHA if you enable remote execution):
         # PostUrl = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/<COMMIT_SHA>/PostInstall/green.post.ps1'
@@ -242,9 +242,9 @@ function Self-Check {
 # ---------------------------
 function Resolve-InstallBasePath {
     $locations = @(
-        @{ Label='Antivirus (Sentinel)';       Path='\\192.168.18.201\it\PC Setup\Auto\DST';          Recurse=$true },
-        @{ Label='Staff PC (18.201)';          Path='\\192.168.18.201\it\PC Setup\Auto\Staff pc';           Recurse=$true },
-        @{ Label='Production PC (18.201)';     Path='\\192.168.18.201\it\PC Setup\Auto\Production pc';      Recurse=$true }
+        @{ Label='DST PC';       Path='\\192.168.18.201\it\PC Setup\Auto\DST';          Recurse=$true },
+        @{ Label='Staff PC';          Path='\\192.168.18.201\it\PC Setup\Auto\Staff pc';           Recurse=$true },
+        @{ Label='Production PC';     Path='\\192.168.18.201\it\PC Setup\Auto\Production pc';      Recurse=$true }
     )
 
     $available = @()
@@ -884,7 +884,7 @@ function Install-Apps {
 # Main
 # ---------------------------
 Ensure-Admin
-Write-Header 'Auto App Installer v2.1.0 (CLI only) (by rhshourav)'
+Write-Header 'Auto App Installer v2.1.1 (CLI only) (by rhshourav)'
 New-Log
 
 try {
