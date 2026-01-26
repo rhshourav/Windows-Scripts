@@ -242,9 +242,9 @@ function Self-Check {
 # ---------------------------
 function Resolve-InstallBasePath {
     $locations = @(
-        @{ Label='Antivirus (Sentinel)';       Path='\\192.168.18.201\it\Antivirus\Sentinel';          Recurse=$true },
-        @{ Label='Staff PC (18.201)';          Path='\\192.168.18.201\it\PC Setup\Staff pc';           Recurse=$true },
-        @{ Label='Production PC (18.201)';     Path='\\192.168.18.201\it\PC Setup\Production pc';      Recurse=$true }
+        @{ Label='Antivirus (Sentinel)';       Path='\\192.168.18.201\it\PC Setup\Auto\DST';          Recurse=$true },
+        @{ Label='Staff PC (18.201)';          Path='\\192.168.18.201\it\PC Setup\Auto\Staff pc';           Recurse=$true },
+        @{ Label='Production PC (18.201)';     Path='\\192.168.18.201\it\PC Setup\Auto\Production pc';      Recurse=$true }
     )
 
     $available = @()
