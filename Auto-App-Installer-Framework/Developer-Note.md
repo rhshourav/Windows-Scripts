@@ -1,315 +1,317 @@
-# Developer-Note.md — Rules (Custom Arguments) + Post-Install Hooks
+# Developer Note — Auto App Installer (CLI-only) Framework
+**Project:** Windows-Scripts / Auto App Installer  
+**Script:** Auto App Installer – CLI Only (v2.2.0+)  
+**Author:** rhshourav
 
-This installer supports two extensibility layers:
-
-1. **Rules** (filename-based matching)
-
-   * Preselect installers automatically
-   * Override EXE/MSI arguments (string or array)
-   * Optionally bind a remote post-install script URL per installer
-
-2. **Post-install hooks**
-
-   * **Local** post scripts shipped alongside installers
-   * **Remote** post scripts fetched from GitHub raw (optional; OFF by default)
-
-This note documents how to add, test, and maintain them safely.
+This note documents the **rule system**, **custom arguments**, and the **pre/post install hook mechanism** (local + optional remote). It is written for maintainers who will extend or troubleshoot the installer framework.
 
 ---
 
-## 1) Rules System Overview
+## 1) Core Behavior Summary
 
-Rules are defined in one place:
+### Installer discovery
+- Scans the selected source folder for **`.exe` and `.msi`**.
+- Uses **recursive scan** (subfolders included) for all sources.
+- Sorts by filename for display and planning.
 
-```powershell
-$global:InstallerRules = @( ... )
-```
+### Installation execution
+- Executes **sequentially** (wait for each installer to finish).
+- Captures exit codes.
+- Logs everything into:
+  - Transcript log
+  - Meta log (structured markers for troubleshooting)
 
-Rules are evaluated against **installer filename** (`$App.Name`), not full path.
+### Hooks (pre/post)
+Each installer can have:
+- **Pre-install hook** (runs before installer)
+- **Post-install hook** (runs after installer)
+
+Hooks can be:
+- **Local**: auto-discovered next to the installer
+- **Remote**: rule-based URL (OFF by default)
+
+---
+
+## 2) Rule System (First-Match Wins)
+
+Rules control:
+- **Which installers are preselected**
+- **Which arguments are used for EXE/MSI**
+- **Optional remote hook URLs** (pre/post)
 
 ### Rule fields
+| Field | Required | Values | Purpose |
+|---|---:|---|---|
+| `Name` | Yes | string | Label for display/logging |
+| `AppliesTo` | Yes | `Exe` / `Msi` / `Any` | Restricts rule to installer type |
+| `MatchType` | Yes | `Contains` / `Like` / `Regex` | How filename match is evaluated |
+| `Match` | Yes | string | Pattern/keyword/regex |
+| `Args` | No | string or string[] | Overrides default install args |
+| `Preselect` | No | bool | If true, auto-preselect in CLI |
+| `PreUrl` | No | https URL | Remote **pre-install** hook (requires remote enabled) |
+| `PostUrl` | No | https URL | Remote **post-install** hook (requires remote enabled) |
 
-| Field       | Required | Values                      | Notes                                                |
-| ----------- | -------- | --------------------------- | ---------------------------------------------------- |
-| `Name`      | Yes      | string                      | Used in logs; keep unique and descriptive            |
-| `AppliesTo` | Yes      | `Exe`, `Msi`, `Any`         | Limit rule scope                                     |
-| `MatchType` | Yes      | `Contains`, `Like`, `Regex` | Choose the simplest that works                       |
-| `Match`     | Yes      | string/pattern              | Pattern value                                        |
-| `Args`      | No       | string or string[]          | Overrides default args                               |
-| `Preselect` | No       | bool                        | Auto-select matching installers                      |
-| `PostUrl`   | No       | string                      | Remote post script URL (used only if remote enabled) |
-
-### Precedence: first-match wins
-
-Rules are evaluated **top to bottom**. The first match is applied.
-
-This is the number-one maintenance hazard. Keep **specific rules above general rules**.
-
----
-
-## 2) Default Execution Behavior (No Rule)
-
-If an installer does not match any rule:
-
-### MSI default
-
-```text
-msiexec.exe /i "<msi>" /qn /norestart
-```
-
-### EXE default
-
-```text
-/S
-```
-
-**Reality check:** `/S` is not universal. If you expect automation to be reliable, you must add rules for common EXE vendors.
+### Matching rules
+- Matching is done against **`$App.Name`** (filename with extension).
+- Rules are evaluated **top-to-bottom**.
+- **First match wins** — put specific rules above broad ones.
 
 ---
 
-## 3) Adding Custom Arguments (Args)
+## 3) Custom Arguments (EXE/MSI)
 
-### Recommended format: args as arrays
+### Defaults (when no rule overrides)
+- **EXE default args:** `@('/S')`
+- **MSI default command:** `msiexec.exe` with args `@('/i', <msi>, '/qn', '/norestart')`
 
-Use arrays to avoid quoting problems and make multi-argument switches explicit:
+### When `Args` is present in a rule
+- **EXE:** `Args` becomes the installer `ArgumentList`.
+- **MSI:** `Args` is treated as **full** `msiexec.exe` argument list.
+  - Example: `@('/i', $App.FullName, '/qn', 'REBOOT=ReallySuppress')`
+
+### Recommended formatting
+Use tokenized arrays (string[]) whenever possible:
+- Good: `Args = @('/silent','/install')`
+- Avoid: `Args = '/silent /install'`  
+  (String args can work, but arrays avoid quoting and spacing issues.)
+
+---
+
+## 4) Local Hook Scripts (Pre/Post)
+
+### Naming convention (strict)
+Hooks are discovered by exact filename match based on the installer **BaseName**.
+
+If installer is:
+- `AdobeIllustrator2024.exe`  
+Then hooks must be:
+- `AdobeIllustrator2024.pre.ps1` / `.pre.cmd` / `.pre.bat`
+- `AdobeIllustrator2024.post.ps1` / `.post.cmd` / `.post.bat`
+
+**Important:**  
+If your hook is called `illustrator.post.cmd` but installer BaseName is `AdobeIllustrator2024`, the hook will **not** run.
+
+### Supported hook types
+- PowerShell: `.ps1` (executed via `powershell.exe -ExecutionPolicy Bypass -File`)
+- Batch/CMD: `.cmd` / `.bat` (executed via `cmd.exe /c`)
+
+### Pre-install fail behavior
+- Default behavior is **safer**:
+  - If a pre-hook runs and fails (non-success exit code), the installer is **skipped**
+  - Override with `-ContinueOnPreFail`
+
+### Post-install eligibility
+- Post hooks run after install success by default.
+- “Success” is controlled by `PostSuccessExitCodes` (default: `0,3010,1641`)
+  - Many enterprise installers return **3010** (reboot required) but installation succeeded.
+
+---
+
+## 5) Remote Hook Scripts (Pre/Post) — Optional, OFF by Default
+
+Remote hooks are **disabled** unless explicitly enabled:
+- `-EnableRemotePreInstall`
+- `-EnableRemotePostInstall`
+
+### Trust model
+Remote URLs must satisfy:
+- HTTPS only
+- Domain allow-list via `TrustedHookDomains` (default: `raw.githubusercontent.com`)
+
+If URL domain is not trusted:
+- Remote hook is **blocked**
+- A warning is displayed
+- Meta log records `RemoteBlocked`
+
+### Strong recommendation: pin to commit SHA
+If you use GitHub raw URLs, do not use `main` branch for hooks. Pin to a commit SHA:
+
+Bad (mutable):
+- `https://raw.githubusercontent.com/<user>/<repo>/main/Hooks/app.post.ps1`
+
+Good (immutable):
+- `https://raw.githubusercontent.com/<user>/<repo>/<COMMIT_SHA>/Hooks/app.post.ps1`
+
+This prevents silent drift and supply-chain surprises.
+
+---
+
+## 6) “Planned Installation” Output
+
+The framework prints:
+- Installer execution command
+- Planned **Pre** and **Post** hooks per installer:
+  - Local path if found
+  - Remote URL if enabled and trusted
+  - “(none)” or “(disabled)” or “BLOCKED (untrusted)”
+
+This is the fastest way to verify hook naming and rule correctness before running.
+
+---
+
+## 7) Common Troubleshooting
+
+### Problem: local post hook did not run
+Most common causes:
+1) **Name mismatch**: hook file name does not match installer BaseName
+2) **Exit code gating**: install returned 3010/1641 and success list didn’t include it
+3) Hooks disabled: `-SkipPostInstall` or `-EnableLocalPostInstall:$false`
+
+### How to verify installer BaseName
+Run in the installer folder:
+```powershell
+Get-ChildItem -File | Where-Object Extension -in '.exe','.msi' | Select-Object Name, BaseName
+````
+
+### How to confirm hooks were considered
+
+Search meta log:
 
 ```powershell
-Args = @('/ALLUSER','/S','/norestart')
+Select-String -Path $env:TEMP\rhshourav\WindowsScripts\AutoAppInstaller\*.meta.log -Pattern 'PreInstall|PostInstall|NoLocalPreFound|NoLocalPostFound|RemoteBlocked'
 ```
 
-### Simple format: args as strings
+---
 
-Use strings only for simple cases:
+## 8) Recommended Repo Layout
 
-```powershell
-Args = '/ALLUSER /S'
+Example structure:
+
+```
+\\server\it\PC Setup\Auto\Staff pc\
+  Adobe\
+    AdobeIllustrator2024.exe
+    AdobeIllustrator2024.pre.cmd
+    AdobeIllustrator2024.post.cmd
+  Browsers\
+    ChromeSetup.exe
+    ChromeSetup.pre.ps1
+    ChromeSetup.post.ps1
+  Utilities\
+    7zip.msi
 ```
 
-If you must use paths with spaces, you must quote inside the string:
+---
 
-```powershell
-Args = '/S /D="C:\Program Files\Example App"'
-```
+## 9) Rule Examples
 
-### MSI args rules (important)
-
-If you set `Args` for an MSI rule, you are overriding the default MSI handling. In the current implementation:
-
-* MSI with rule args runs: `msiexec.exe <Args>`
-
-So you should provide **complete msiexec arguments**, e.g.:
+### Example 1: Preselect + EXE args override
 
 ```powershell
 [pscustomobject]@{
-  Name      = 'Example MSI with properties'
-  AppliesTo = 'Msi'
+  Name      = 'Chrome silent'
+  AppliesTo = 'Exe'
   MatchType = 'Like'
-  Match     = '*example*.msi'
-  Args      = @('/i', $App.FullName, '/qn', 'ALLUSERS=1', '/norestart')
+  Match     = '*chrome*'
+  Args      = @('/silent','/install')
   Preselect = $true
 }
 ```
 
-If you do not want to manage MSI full args, do not override MSI args; rely on default and introduce `AppendArgs` only if/when you add that feature.
-
----
-
-## 4) Rule Design Guidelines (Avoid “rule drift”)
-
-### Prefer stable matching
-
-* Use `Like` for vendor patterns: `*chrome*`, `*vlc*`
-* Use `Regex` only when needed (it’s easy to overshoot)
-* Avoid `Contains` for very short tokens (e.g., `pro`, `setup`) because it will produce false positives
-
-### Normalize naming in your installer repository
-
-Rules become brittle if filenames vary per version. Best practice is to adopt consistent naming:
-
-* `Chrome_x64_Enterprise.exe`
-* `VLC_3.0.20_x64.exe`
-* `GreenApp_1.2.3.msi`
-
-If you don’t control naming, your rule maintenance cost will stay high.
-
-### Rule order policy
-
-Keep a dedicated layout:
-
-1. **Company-critical** rules (most specific)
-2. Core baseline apps (Chrome, 7-Zip, VLC)
-3. Department-specific apps
-4. Catch-all / general rules (least specific)
-
----
-
-## 5) Post-Install Hooks Overview
-
-Post-install hooks run **after** an installer finishes. They are meant for:
-
-* Configuration steps (registry tweaks, file copy, policy import)
-* Cleanup (remove desktop icons, remove temp files)
-* Validation (check service exists, check version installed)
-
-### Execution criteria
-
-By default, post scripts run only when the installer exit code is `0`.
-
-You can change this behavior with:
-
-* `-RunPostOnFail` (run post scripts even on failure)
-* `-SkipPostInstall` (disable all post scripts)
-
----
-
-## 6) Local Post-Install Scripts
-
-### Naming convention
-
-For installer:
-
-* `GreenAppSetup.exe`
-
-Place post script in the **same folder**:
-
-* `GreenAppSetup.post.ps1` or
-* `GreenAppSetup.post.cmd` or
-* `GreenAppSetup.post.bat`
-
-### Enable/disable
-
-Local post scripts are controlled by:
-
-* `-EnableLocalPostInstall` (default: enabled in the latest code)
-* `-SkipPostInstall` (disables everything)
-
-### When to use local
-
-Use local post scripts when the post-step must travel with the installer content on the share (offline installs, consistent packaging).
-
----
-
-## 7) Remote Post-Install Scripts (GitHub raw)
-
-Remote post scripts are optional because they materially increase security risk.
-
-### How it works
-
-* You add `PostUrl` to a rule:
-
-  ```powershell
-  PostUrl = 'https://raw.githubusercontent.com/.../something.post.ps1'
-  ```
-* The installer downloads that script to:
-
-  * `%TEMP%\rhshourav\WindowsScripts\PostInstall\...`
-* Then executes it
-
-### Remote is OFF by default
-
-To use remote post scripts, the operator must explicitly enable it:
+### Example 2: MSI args override
 
 ```powershell
-.\autoInstallFromLocal.ps1 -EnableRemotePostInstall
+[pscustomobject]@{
+  Name      = '7-Zip MSI quiet'
+  AppliesTo = 'Msi'
+  MatchType = 'Like'
+  Match     = '*7zip*'
+  Args      = @('/i', 'C:\Path\7zip.msi', '/qn', '/norestart')
+  Preselect = $true
+}
 ```
 
-### Domain allowlist
-
-The script blocks remote URLs not in `TrustedPostDomains` (default contains `raw.githubusercontent.com`).
-
-### Non-negotiable maintenance rule: pin to commit SHA
-
-Do not reference mutable branches like `main` for `PostUrl`.
-
-Correct format:
+### Example 3: Remote hooks (only if explicitly enabled)
 
 ```powershell
-PostUrl = "https://raw.githubusercontent.com/rhshourav/Windows-Scripts/<COMMIT_SHA>/PostInstall/green.post.ps1"
+[pscustomobject]@{
+  Name      = 'Illustrator with remote hooks'
+  AppliesTo = 'Exe'
+  MatchType = 'Contains'
+  Match     = 'illustrator'
+  PreUrl    = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/<COMMIT_SHA>/Hooks/illustrator.pre.ps1'
+  PostUrl   = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/<COMMIT_SHA>/Hooks/illustrator.post.ps1'
+}
 ```
 
-If you do not pin, you are accepting supply-chain risk.
+---
+
+## 10) Maintenance Rules (Do This, Not That)
+
+### Do
+
+* Keep rules **minimal and specific**
+* Use `string[]` for args
+* Pin remote hooks to commit SHAs
+* Keep hook scripts idempotent (safe to re-run)
+* Write breadcrumbs in hooks when debugging, e.g.:
+
+  * `%TEMP%\app.pre.ran.log`
+  * `%TEMP%\app.post.ran.log`
+
+### Don’t
+
+* Don’t enable remote hooks by default
+* Don’t use branch-based raw URLs for remote hooks
+* Don’t assume success is only exit code 0 (3010/1641 exist)
 
 ---
 
-## 8) Maintenance Workflow (Recommended)
+## 11) Hook Exit Codes
 
-### Step 1 — Add/update installer package
+### Pre-install success
 
-* Place installer in correct share folder
-* Ensure filename is stable enough to match
+Controlled by:
 
-### Step 2 — Validate silent flags manually
+* `PreSuccessExitCodes` (default: `0`)
 
-Run once on a test VM:
+If pre hook returns code not in the list:
 
-* Verify the installer is truly silent
-* Confirm exit code behavior
+* Installer is skipped unless `-ContinueOnPreFail`
 
-### Step 3 — Add/update a rule
+### Post-install eligibility
 
-* Prefer `MatchType='Like'`
-* Use `Args` as array
-* Decide if `Preselect` should be `$true` (only for baseline apps)
+Controlled by:
 
-### Step 4 — Add post-install script if needed
-
-Choose one:
-
-* Local: create `InstallerBaseName.post.ps1`
-* Remote: commit `PostInstall/*.ps1` and pin `PostUrl` to commit SHA
-
-### Step 5 — Test end-to-end
-
-* Test with network share available
-* Test with network share unavailable (local fallback)
-* Confirm summary shows correct args and post results
-* Review meta logs for correctness
-
-### Step 6 — Promote
-
-* Only after repeatable success in test
-* Keep a changelog entry for new rules/post scripts
+* `PostSuccessExitCodes` (default: `0,3010,1641`)
+* Plus `-RunPostOnFail` to force post even if install failed.
 
 ---
 
-## 9) Operational Guardrails (What to enforce internally)
+## 12) Quick Reference (Parameters)
 
-If you run this in an enterprise setting:
+### Pre-install controls
 
-1. **Restrict write access** to installer shares
+* `-SkipPreInstall`
+* `-EnableLocalPreInstall:$true/$false`
+* `-EnableRemotePreInstall` (default OFF)
+* `-ContinueOnPreFail` (default OFF)
+* `-PreSuccessExitCodes @(0)`
 
-   * If any user can drop an EXE + `.post.ps1` into the share, you’ve created an easy lateral movement path.
+### Post-install controls
 
-2. Keep remote post disabled for normal operators
+* `-SkipPostInstall`
+* `-EnableLocalPostInstall:$true/$false`
+* `-EnableRemotePostInstall` (default OFF)
+* `-RunPostOnFail`
+* `-PostSuccessExitCodes @(0,3010,1641)`
 
-   * Only enable it in controlled use cases.
+### Trust controls
 
-3. Pin to commit SHA for all remote scripts
-
-   * No exceptions.
-
-4. Keep rules small and explicit
-
-   * Your goal is predictable deployment, not clever automation.
+* `-TrustedHookDomains @('raw.githubusercontent.com')`
 
 ---
 
-## 10) Troubleshooting
+## 13) Versioning Guidance
 
-* Post script not running:
+When you change behavior that affects execution flow:
 
-  * Confirm `-SkipPostInstall` is not set
-  * Confirm post script name matches `<BaseName>.post.ps1`
-  * Confirm `-EnableLocalPostInstall` or `-EnableRemotePostInstall` as applicable
+* Bump patch/minor version
+* Add a short changelog note near the top of the script header
+* Update this Developer Note if:
 
-* Remote post blocked:
+  * Rule schema changes
+  * Hook naming changes
+  * Trust model changes
+  * Default exit code logic changes
 
-  * URL host not in `TrustedPostDomains`
-  * URL not https
-  * Rule has no `PostUrl`
-
-* Wrong rule applies:
-
-  * Rule order issue (first-match wins)
-  * Use more specific `Like/Regex`
-  * Move the specific rule above the general rule
