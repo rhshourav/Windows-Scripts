@@ -15,6 +15,11 @@
   - Graceful fallback after 30s with progress bar (NO IEX)
   - Windows 10 / 11 compatible, PowerShell 5.1+
   - INSTALL LOGIC: same as original (MSI silent via msiexec /qn, EXE default /S)
+
+  v1.3.3-rules:
+  - Add name-based rules to:
+      * preselect installers automatically
+      * override args per installer without prompting
 #>
 
 [CmdletBinding()]
@@ -36,6 +41,45 @@ try {
     $raw.ForegroundColor = 'White'
     Clear-Host
 } catch {}
+
+# ==========================================================
+# Rule Configuration (EDIT THIS SECTION)
+# ==========================================================
+<#
+Rule fields:
+  Name      : label for display/logging
+  AppliesTo : 'Exe' | 'Msi' | 'Any'
+  MatchType : 'Contains' | 'Like' | 'Regex'
+  Match     : match text/pattern
+  Args      : if set, overrides default args
+  Preselect : if $true, installer is pre-selected in the UI
+
+Examples:
+  - Name contains "green" -> EXE args "/ALLUSER", auto-preselected
+  - Name like "*7zip*" -> EXE args "/S", auto-preselected
+  - Regex match -> more control
+#>
+
+$global:InstallerRules = @(
+    [pscustomobject]@{
+        Name      = 'Green apps: all users'
+        AppliesTo = 'Exe'
+        MatchType = 'Contains'
+        Match     = 'green'
+        Args      = '/ALLUSER'
+        Preselect = $true
+    }
+
+    # Add more rules below:
+    #,[pscustomobject]@{
+    #    Name      = '7-Zip silent'
+    #    AppliesTo = 'Exe'
+    #    MatchType = 'Like'
+    #    Match     = '*7zip*'
+    #    Args      = '/S'
+    #    Preselect = $true
+    #}
+)
 
 # ---------------------------
 # UI + logging helpers
@@ -279,10 +323,57 @@ function Get-Installers {
 }
 
 # ---------------------------
+# Rules engine
+# ---------------------------
+function Get-AppTypeTag {
+    param([System.IO.FileInfo]$App)
+    if ($App.Extension -eq '.msi') { return 'Msi' }
+    if ($App.Extension -eq '.exe') { return 'Exe' }
+    return 'Other'
+}
+
+function Test-RuleMatch {
+    param(
+        [Parameter(Mandatory)] [System.IO.FileInfo]$App,
+        [Parameter(Mandatory)] $Rule
+    )
+
+    $type = Get-AppTypeTag -App $App
+    $applies = [string]$Rule.AppliesTo
+
+    if ($applies -and $applies -ne 'Any') {
+        if ($type -ne $applies) { return $false }
+    }
+
+    $name = $App.Name
+    $mt = [string]$Rule.MatchType
+    $m  = [string]$Rule.Match
+
+    switch ($mt) {
+        'Contains' { return ($name.ToLowerInvariant().Contains($m.ToLowerInvariant())) }
+        'Like'     { return ($name -like $m) }
+        'Regex'    { return ($name -match $m) }
+        default    { return $false }
+    }
+}
+
+function Get-MatchingRule {
+    param([System.IO.FileInfo]$App)
+
+    foreach ($r in $global:InstallerRules) {
+        if (Test-RuleMatch -App $App -Rule $r) { return $r }
+    }
+    return $null
+}
+
+# ---------------------------
 # CLI selection
 # ---------------------------
 function Show-AppsTable {
-    param([System.IO.FileInfo[]]$Apps)
+    param(
+        [System.IO.FileInfo[]]$Apps,
+        $SelectedSet
+    )
 
     $Apps = @($Apps)
 
@@ -293,14 +384,24 @@ function Show-AppsTable {
         $name = $Apps[$i].Name
         $type = $Apps[$i].Extension
         $size = [math]::Round($Apps[$i].Length / 1MB, 2)
-        Write-Host ('[{0}] {1}  ({2}, {3} MB)' -f $n, $name, $type, $size) -ForegroundColor Cyan
+
+        $mark = if ($SelectedSet.Contains($n)) { '[x]' } else { '[ ]' }
+
+        $rule = Get-MatchingRule -App $Apps[$i]
+        $ruleInfo = ''
+        if ($rule -and -not [string]::IsNullOrWhiteSpace([string]$rule.Args)) {
+            $ruleInfo = ('  -> Args: {0}' -f $rule.Args)
+        }
+
+        Write-Host ('{0} [{1}] {2}  ({3}, {4} MB){5}' -f $mark, $n, $name, $type, $size, $ruleInfo) -ForegroundColor Cyan
     }
+
     Write-Host ''
     Write-Host 'Commands:' -ForegroundColor Yellow
     Write-Host '  all            -> select all' -ForegroundColor Yellow
     Write-Host '  none           -> select none' -ForegroundColor Yellow
-    Write-Host '  1,3,5          -> select by numbers' -ForegroundColor Yellow
-    Write-Host '  1-4,8,10-12    -> ranges supported' -ForegroundColor Yellow
+    Write-Host '  1,3,5          -> select by numbers (adds to selection)' -ForegroundColor Yellow
+    Write-Host '  1-4,8,10-12    -> ranges supported (adds to selection)' -ForegroundColor Yellow
     Write-Host '  filter <text>  -> show only matching names (does not auto-select)' -ForegroundColor Yellow
     Write-Host '  show           -> show full list again' -ForegroundColor Yellow
     Write-Host '  back           -> go back to source selection' -ForegroundColor Yellow
@@ -333,8 +434,7 @@ function Parse-Selection {
         }
     }
 
-    $arr = [int[]]$picked
-    Write-Output -NoEnumerate $arr
+    return [int[]]@($picked)
 }
 
 function Select-AppsCli {
@@ -345,8 +445,22 @@ function Select-AppsCli {
         return [pscustomobject]@{ Back=$false; Selection=@() }
     }
 
-    Show-AppsTable -Apps $Apps
     $selected = New-Object System.Collections.Generic.HashSet[int]
+
+    # Preselect based on rules
+    for ($i=0; $i -lt $Apps.Count; $i++) {
+        $rule = Get-MatchingRule -App $Apps[$i]
+        if ($rule -and $rule.Preselect -eq $true) {
+            [void]$selected.Add($i + 1)
+        }
+    }
+
+    Show-AppsTable -Apps $Apps -SelectedSet $selected
+
+    if ($selected.Count -gt 0) {
+        Write-Good ("Preselected by rules: {0}" -f $selected.Count)
+        Log-Line INFO ("PreselectedCount={0}" -f $selected.Count)
+    }
 
     while ($true) {
         $raw = Read-Host 'Select (type a command)'
@@ -360,7 +474,7 @@ function Select-AppsCli {
         if ($raw -match '^(done|DONE)$') { break }
 
         if ($raw -match '^(show|SHOW)$') {
-            Show-AppsTable -Apps $Apps
+            Show-AppsTable -Apps $Apps -SelectedSet $selected
             continue
         }
 
@@ -384,7 +498,8 @@ function Select-AppsCli {
             for ($i=0; $i -lt $Apps.Count; $i++) {
                 if ($Apps[$i].Name -like ('*{0}*' -f $filterText)) {
                     $n = $i + 1
-                    Write-Host ('[{0}] {1}' -f $n, $Apps[$i].Name) -ForegroundColor Cyan
+                    $mark = if ($selected.Contains($n)) { '[x]' } else { '[ ]' }
+                    Write-Host ('{0} [{1}] {2}' -f $mark, $n, $Apps[$i].Name) -ForegroundColor Cyan
                 }
             }
             Write-Host ''
@@ -401,38 +516,41 @@ function Select-AppsCli {
         Write-Good ('Selected count now: {0}' -f $selected.Count)
     }
 
-   $final = @(
-    foreach ($n in ($selected | Sort-Object)) { $Apps[$n - 1] }
-)
+    $final = @(
+        foreach ($n in ($selected | Sort-Object)) { $Apps[$n - 1] }
+    )
 
-return [pscustomobject]@{
-    Back      = $false
-    Selection = $final   # <- NO unary comma, no nested array
-}
-
+    return [pscustomobject]@{
+        Back      = $false
+        Selection = $final
+    }
 }
 
 # ---------------------------
-# Install execution (ORIGINAL LOGIC)
+# Install execution (ORIGINAL LOGIC + rule overrides)
 # ---------------------------
 function Get-InstallSpec {
     param([System.IO.FileInfo]$App)
 
-    # Map exact filenames to known silent args for EXE if needed
-    $knownExeArgs = @{
-        # 'ChromeSetup.exe' = '/silent /install'
-        # '7z.exe'          = '/S'
+    $rule = Get-MatchingRule -App $App
+    if ($rule) {
+        Log-Line INFO ("RuleMatch={0} App={1}" -f $rule.Name, $App.Name)
     }
 
+    # MSI: keep original logic unless rule specifies Args (rare but supported)
     if ($App.Extension -eq '.msi') {
+        if ($rule -and -not [string]::IsNullOrWhiteSpace([string]$rule.Args)) {
+            # If you want to override MSI args via rule, put full msiexec args here.
+            return @{ File='msiexec.exe'; Args=([string]$rule.Args) }
+        }
         return @{ File='msiexec.exe'; Args=('/i "{0}" /qn /norestart' -f $App.FullName) }
     }
 
-    if ($knownExeArgs.ContainsKey($App.Name)) {
-        return @{ File=$App.FullName; Args=$knownExeArgs[$App.Name] }
+    # EXE: if rule provides Args, use it; else default /S
+    if ($rule -and -not [string]::IsNullOrWhiteSpace([string]$rule.Args)) {
+        return @{ File=$App.FullName; Args=([string]$rule.Args) }
     }
 
-    # Default best-effort silent (not universal)
     return @{ File=$App.FullName; Args='/S' }
 }
 
@@ -449,7 +567,14 @@ function Install-Apps {
 
     Write-Host ''
     Write-Header 'Planned Installation'
-    $Selection | Sort-Object Name | ForEach-Object { Write-Host (' - {0}' -f $_.Name) -ForegroundColor Green }
+    foreach ($a in ($Selection | Sort-Object Name)) {
+        $rule = Get-MatchingRule -App $a
+        if ($rule -and -not [string]::IsNullOrWhiteSpace([string]$rule.Args)) {
+            Write-Host (' - {0}  -> Args: {1}' -f $a.Name, $rule.Args) -ForegroundColor Green
+        } else {
+            Write-Host (' - {0}' -f $a.Name) -ForegroundColor Green
+        }
+    }
 
     $go = Read-Host 'Proceed with installation? (Y/N)'
     if ($go -notmatch '^[Yy]$') {
@@ -484,7 +609,6 @@ function Install-Apps {
         Log-Line INFO ('Command={0} {1}' -f $spec.File, $spec.Args)
 
         try {
-            # PS 5.1: ArgumentList must not be null/empty
             if ([string]::IsNullOrWhiteSpace($spec.Args)) {
                 $p = Start-Process -FilePath $spec.File -Wait -PassThru
             } else {
