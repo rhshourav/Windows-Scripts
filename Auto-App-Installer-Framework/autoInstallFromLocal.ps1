@@ -1,7 +1,7 @@
 #requires -version 5.1
 <#
 .SYNOPSIS
-  Auto App Installer – CLI Only – v2.1.2 (by rhshourav)
+  Auto App Installer – CLI Only – v2.2.0 (by rhshourav)
 
 .DESCRIPTION
   - Auto-elevates to Admin (PowerShell 5.1 safe, uses -EncodedCommand)
@@ -13,6 +13,9 @@
       * preselect installers by filename match
       * override EXE/MSI args (string or string[])
       * first-match wins
+  - Pre-install hooks:
+      * Local: <InstallerBaseName>.pre.ps1/.cmd/.bat (same folder)
+      * Remote: rule-based PreUrl (download to %TEMP%, optional; OFF by default)
   - Post-install hooks:
       * Local: <InstallerBaseName>.post.ps1/.cmd/.bat (same folder)
       * Remote: rule-based PostUrl (download to %TEMP%, optional; OFF by default)
@@ -22,10 +25,9 @@
   - Graceful fallback after 30s with progress bar (NO IEX)
   - Windows 10 / 11 compatible, PowerShell 5.1+
 
-  v2.1.2 changes:
-    - Planned Installation section now shows which post script will run (Local/Remote/None/Blocked)
-    - Post-install eligibility treats 0/3010/1641 as "success" by default (configurable)
-    - Clear meta-log lines when no local post script is found (prevents silent confusion)
+NOTES
+  - Remote hook execution is OFF by default.
+  - Trust is domain-based AND HTTPS-only. Prefer pinning raw GitHub URLs to commit SHA.
 #>
 
 [CmdletBinding()]
@@ -34,14 +36,21 @@ param(
     [string]$LocalFallbackDir = "$PSScriptRoot\Installers",
     [string]$FrameworkUrl = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Auto-App-Installer-Framework/autoInstallFromLocal.ps1',
 
+    # Pre-install controls
+    [switch]$SkipPreInstall          = $false,
+    [switch]$ContinueOnPreFail       = $false,   # safer default: if pre fails, skip installer
+    [switch]$EnableLocalPreInstall   = $true,
+    [switch]$EnableRemotePreInstall  = $false,   # safer default: OFF
+
     # Post-install controls
     [switch]$SkipPostInstall         = $false,
     [switch]$RunPostOnFail           = $false,
     [switch]$EnableLocalPostInstall  = $true,
-    [switch]$EnableRemotePostInstall = $false,  # safer default: OFF
-    [string[]]$TrustedPostDomains    = @('raw.githubusercontent.com'),
+    [switch]$EnableRemotePostInstall = $false,   # safer default: OFF
 
-    # Post-install success exit codes (many installers return reboot-required codes)
+    # Hook trust + success codes
+    [string[]]$TrustedHookDomains    = @('raw.githubusercontent.com'),
+    [int[]]$PreSuccessExitCodes      = @(0),
     [int[]]$PostSuccessExitCodes     = @(0,3010,1641)
 )
 
@@ -69,7 +78,8 @@ Rule fields:
   Match     : match text/pattern
   Args      : OPTIONAL. Overrides default args. Can be string or string[]
   Preselect : OPTIONAL. If $true, app is pre-selected automatically
-  PostUrl   : OPTIONAL. Remote post-install script URL (ps1/cmd/bat). Requires -EnableRemotePostInstall
+  PreUrl    : OPTIONAL. Remote pre-install hook URL (ps1/cmd/bat). Requires -EnableRemotePreInstall
+  PostUrl   : OPTIONAL. Remote post-install hook URL (ps1/cmd/bat). Requires -EnableRemotePostInstall
 
 Notes:
   - First-match wins. Put specific rules above general ones.
@@ -86,8 +96,9 @@ $global:InstallerRules = @(
         Args      = @('/ALLUSER')
         Preselect = $false
 
-        # Example remote post (pin to commit SHA if you enable remote execution):
-        # PostUrl = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/<COMMIT_SHA>/PostInstall/green.post.ps1'
+        # Example remote hooks (pin to commit SHA if you enable remote execution):
+        # PreUrl  = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/<COMMIT_SHA>/Hooks/green.pre.ps1'
+        # PostUrl = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/<COMMIT_SHA>/Hooks/green.post.ps1'
     }
 
     # Add more rules below:
@@ -98,6 +109,7 @@ $global:InstallerRules = @(
     #    Match     = '*chrome*'
     #    Args      = @('/silent','/install')
     #    Preselect = $true
+    #    PreUrl    = 'https://raw.githubusercontent.com/.../chrome.pre.ps1'
     #    PostUrl   = 'https://raw.githubusercontent.com/.../chrome.post.ps1'
     #}
 )
@@ -174,7 +186,6 @@ function Get-ForwardedArgs {
 
     foreach ($k in $PSBoundParameters.Keys) {
         $v = $PSBoundParameters[$k]
-
         if ($v -is [switch]) {
             if ($v.IsPresent) { $out.Add("-$k") }
         }
@@ -393,9 +404,9 @@ function Get-MatchingRule {
 }
 
 # ---------------------------
-# Post-install: local + remote
+# Hook utilities (trust + download + local/remote resolve)
 # ---------------------------
-function Test-TrustedPostUrl {
+function Test-TrustedHookUrl {
     param(
         [Parameter(Mandatory)][string]$Url,
         [string[]]$TrustedDomains
@@ -411,47 +422,60 @@ function Test-TrustedPostUrl {
     return $false
 }
 
-function Get-RemotePostUrl {
-    param([Parameter(Mandatory)][System.IO.FileInfo]$App)
+function Get-RemoteHookUrl {
+    param(
+        [Parameter(Mandatory)][System.IO.FileInfo]$App,
+        [Parameter(Mandatory)][ValidateSet('Pre','Post')] [string]$Stage
+    )
 
     $rule = Get-MatchingRule -App $App
-    if ($rule -and ($rule.PSObject.Properties.Name -contains 'PostUrl')) {
-        $u = [string]$rule.PostUrl
+    if (-not $rule) { return $null }
+
+    $prop = if ($Stage -eq 'Pre') { 'PreUrl' } else { 'PostUrl' }
+    if ($rule.PSObject.Properties.Name -contains $prop) {
+        $u = [string]$rule.$prop
         if (-not [string]::IsNullOrWhiteSpace($u)) { return $u }
     }
     return $null
 }
 
-function Download-PostScript {
-    param([Parameter(Mandatory)][string]$Url)
+function Download-HookScript {
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][ValidateSet('Pre','Post')] [string]$Stage
+    )
 
     try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
 
     $nameFromUrl = ([Uri]$Url).AbsolutePath.Split('/')[-1]
-    if ([string]::IsNullOrWhiteSpace($nameFromUrl)) { $nameFromUrl = 'postinstall.ps1' }
+    if ([string]::IsNullOrWhiteSpace($nameFromUrl)) { $nameFromUrl = "hook.$Stage.ps1" }
 
     $ext = [System.IO.Path]::GetExtension($nameFromUrl)
     if ([string]::IsNullOrWhiteSpace($ext)) { $nameFromUrl += '.ps1' }
 
-    $root = Join-Path $env:TEMP 'rhshourav\WindowsScripts\PostInstall'
+    $root = Join-Path $env:TEMP 'rhshourav\WindowsScripts\Hooks'
     New-Item -Path $root -ItemType Directory -Force | Out-Null
 
-    $dst = Join-Path $root ("{0}_{1}" -f (Get-Date -Format 'yyyyMMdd_HHmmss'), $nameFromUrl)
+    $dst = Join-Path $root ("{0}_{1}_{2}" -f (Get-Date -Format 'yyyyMMdd_HHmmss'), $Stage.ToLowerInvariant(), $nameFromUrl)
 
     Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $dst -ErrorAction Stop
     return (Get-Item -LiteralPath $dst -ErrorAction Stop)
 }
 
-function Get-LocalPostInstallScript {
-    param([Parameter(Mandatory)][System.IO.FileInfo]$App)
+function Get-LocalHookScript {
+    param(
+        [Parameter(Mandatory)][System.IO.FileInfo]$App,
+        [Parameter(Mandatory)][ValidateSet('Pre','Post')] [string]$Stage
+    )
 
     $dir  = $App.DirectoryName
     $base = $App.BaseName
+    $suffix = if ($Stage -eq 'Pre') { '.pre' } else { '.post' }
 
     $candidates = @(
-        (Join-Path $dir ($base + '.post.ps1')),
-        (Join-Path $dir ($base + '.post.cmd')),
-        (Join-Path $dir ($base + '.post.bat'))
+        (Join-Path $dir ($base + $suffix + '.ps1')),
+        (Join-Path $dir ($base + $suffix + '.cmd')),
+        (Join-Path $dir ($base + $suffix + '.bat'))
     )
 
     foreach ($c in $candidates) {
@@ -462,16 +486,17 @@ function Get-LocalPostInstallScript {
     return $null
 }
 
-function Invoke-PostInstallScript {
+function Invoke-HookScript {
     param(
         [Parameter(Mandatory)][System.IO.FileInfo]$Installer,
         [Parameter(Mandatory)][System.IO.FileInfo]$ScriptFile,
-        [string]$Origin = 'Local',
+        [Parameter(Mandatory)][ValidateSet('Pre','Post')] [string]$Stage,
+        [Parameter(Mandatory)][ValidateSet('Local','Remote')] [string]$Origin,
         [string]$Source = ''
     )
 
-    Write-Info ("Post-install ({0}): {1}" -f $Origin, $ScriptFile.Name)
-    Log-Line INFO ("PostInstallStart Origin={0} Installer={1} Script={2} Source={3}" -f $Origin, $Installer.Name, $ScriptFile.FullName, $Source)
+    Write-Info ("{0}-install ({1}): {2}" -f $Stage, $Origin, $ScriptFile.Name)
+    Log-Line INFO ("{0}InstallStart Origin={1} Installer={2} Script={3} Source={4}" -f $Stage, $Origin, $Installer.Name, $ScriptFile.FullName, $Source)
 
     try {
         $ext = $ScriptFile.Extension.ToLowerInvariant()
@@ -485,37 +510,107 @@ function Invoke-PostInstallScript {
             ) -Wait -PassThru -WindowStyle Hidden
         }
         elseif ($ext -in '.cmd','.bat') {
-            $p = Start-Process -FilePath 'cmd.exe' -ArgumentList @(
-                '/c', $ScriptFile.FullName
-            ) -Wait -PassThru -WindowStyle Hidden
+            $p = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c', $ScriptFile.FullName) -Wait -PassThru -WindowStyle Hidden
         }
         else {
-            throw ("Unsupported post-install script type: {0}" -f $ScriptFile.Name)
+            throw ("Unsupported {0}-install script type: {1}" -f $Stage, $ScriptFile.Name)
         }
 
         $ec = $p.ExitCode
         if ($ec -eq 0) {
-            Write-Good ("Post-install OK: {0}" -f $ScriptFile.Name)
-            Log-Line OK ("PostInstallOK Origin={0} Installer={1} Script={2} ExitCode=0" -f $Origin, $Installer.Name, $ScriptFile.Name)
-            return [pscustomobject]@{ PostStatus='OK'; PostExitCode=0; PostScript=$ScriptFile.Name; PostOrigin=$Origin; PostSource=$Source }
+            Write-Good ("{0}-install OK: {1}" -f $Stage, $ScriptFile.Name)
+            Log-Line OK ("{0}InstallOK Origin={1} Installer={2} Script={3} ExitCode=0" -f $Stage, $Origin, $Installer.Name, $ScriptFile.Name)
+            return [pscustomobject]@{ HookStatus='OK'; HookExitCode=0; HookScript=$ScriptFile.Name; HookOrigin=$Origin; HookSource=$Source }
         } else {
-            Write-Warn ("Post-install finished with ExitCode={0}: {1}" -f $ec, $ScriptFile.Name)
-            Log-Line WARN ("PostInstallExit Origin={0} Installer={1} Script={2} ExitCode={3}" -f $Origin, $Installer.Name, $ScriptFile.Name, $ec)
-            return [pscustomobject]@{ PostStatus='NonZero'; PostExitCode=$ec; PostScript=$ScriptFile.Name; PostOrigin=$Origin; PostSource=$Source }
+            Write-Warn ("{0}-install finished with ExitCode={1}: {2}" -f $Stage, $ec, $ScriptFile.Name)
+            Log-Line WARN ("{0}InstallExit Origin={1} Installer={2} Script={3} ExitCode={4}" -f $Stage, $Origin, $Installer.Name, $ScriptFile.Name, $ec)
+            return [pscustomobject]@{ HookStatus='NonZero'; HookExitCode=$ec; HookScript=$ScriptFile.Name; HookOrigin=$Origin; HookSource=$Source }
         }
     }
     catch {
-        Write-Bad ("Post-install error: {0}" -f $_.Exception.Message)
-        Log-Line ERROR ("PostInstallError Origin={0} Installer={1} Script={2} Error={3}" -f $Origin, $Installer.Name, $ScriptFile.Name, $_.Exception.Message)
-        return [pscustomobject]@{ PostStatus='Error'; PostExitCode=$null; PostScript=$ScriptFile.Name; PostOrigin=$Origin; PostSource=$Source }
+        Write-Bad ("{0}-install error: {1}" -f $Stage, $_.Exception.Message)
+        Log-Line ERROR ("{0}InstallError Origin={1} Installer={2} Script={3} Error={4}" -f $Stage, $Origin, $Installer.Name, $ScriptFile.Name, $_.Exception.Message)
+        return [pscustomobject]@{ HookStatus='Error'; HookExitCode=$null; HookScript=$ScriptFile.Name; HookOrigin=$Origin; HookSource=$Source }
     }
 }
 
-function Run-PostInstallIfAvailable {
+function Run-PreInstallIfAvailable {
+    param(
+        [Parameter(Mandatory)][System.IO.FileInfo]$App,
+        [Parameter(Mandatory)]$RowRef
+    )
+
+    if ($SkipPreInstall) {
+        Log-Line INFO ("PreInstallSkippedGlobally Installer={0}" -f $App.Name)
+        $RowRef.Value.PreStatus = 'Skipped'
+        return $true
+    }
+
+    $ranAny = $false
+    $last = $null
+
+    if ($EnableLocalPreInstall) {
+        $local = Get-LocalHookScript -App $App -Stage 'Pre'
+        if ($local) {
+            $ranAny = $true
+            $last = Invoke-HookScript -Installer $App -ScriptFile $local -Stage 'Pre' -Origin 'Local' -Source $local.FullName
+        } else {
+            Log-Line INFO ("NoLocalPreFound Installer={0} ExpectedBase={1} Dir={2}" -f $App.Name, $App.BaseName, $App.DirectoryName)
+        }
+    } else {
+        Log-Line INFO ("LocalPreDisabled Installer={0}" -f $App.Name)
+    }
+
+    if ($EnableRemotePreInstall) {
+        $url = Get-RemoteHookUrl -App $App -Stage 'Pre'
+        if ($url) {
+            if (-not (Test-TrustedHookUrl -Url $url -TrustedDomains $TrustedHookDomains)) {
+                Write-Warn ("Remote pre URL not trusted (blocked): {0}" -f $url)
+                Log-Line WARN ("PreInstallRemoteBlocked Installer={0} Url={1}" -f $App.Name, $url)
+            } else {
+                try {
+                    $dl = Download-HookScript -Url $url -Stage 'Pre'
+                    $ranAny = $true
+                    $last = Invoke-HookScript -Installer $App -ScriptFile $dl -Stage 'Pre' -Origin 'Remote' -Source $url
+                } catch {
+                    Write-Bad ("Remote pre download/run failed: {0}" -f $_.Exception.Message)
+                    Log-Line ERROR ("PreInstallRemoteFail Installer={0} Url={1} Error={2}" -f $App.Name, $url, $_.Exception.Message)
+                }
+            }
+        } else {
+            Log-Line INFO ("NoRemotePreUrl Installer={0}" -f $App.Name)
+        }
+    }
+
+    if (-not $ranAny) {
+        $RowRef.Value.PreStatus = ''
+        return $true
+    }
+
+    # Persist last run outcome into row
+    if ($last) {
+        $RowRef.Value.PreStatus   = $last.HookStatus
+        $RowRef.Value.PreExitCode = $last.HookExitCode
+        $RowRef.Value.PreOrigin   = $last.HookOrigin
+        $RowRef.Value.PreScript   = $last.HookScript
+        $RowRef.Value.PreSource   = $last.HookSource
+    }
+
+    # Decide success/fail
+    if ($null -ne $RowRef.Value.PreExitCode) {
+        $ok = $PreSuccessExitCodes -contains [int]$RowRef.Value.PreExitCode
+        return $ok
+    }
+
+    # If error with null exit code -> treat as fail
+    return $false
+}
+
+function Run-PostInstallIfEligible {
     param(
         [Parameter(Mandatory)][System.IO.FileInfo]$App,
         [Parameter(Mandatory)][int]$InstallerExitCode,
-        [Parameter(Mandatory)]$ResultsArrayRef
+        [Parameter(Mandatory)]$RowRef
     )
 
     if ($SkipPostInstall) {
@@ -531,12 +626,14 @@ function Run-PostInstallIfAvailable {
         return
     }
 
-    $postRuns = New-Object System.Collections.Generic.List[object]
+    $ranAny = $false
+    $last = $null
 
     if ($EnableLocalPostInstall) {
-        $local = Get-LocalPostInstallScript -App $App
+        $local = Get-LocalHookScript -App $App -Stage 'Post'
         if ($local) {
-            $postRuns.Add((Invoke-PostInstallScript -Installer $App -ScriptFile $local -Origin 'Local' -Source $local.FullName))
+            $ranAny = $true
+            $last = Invoke-HookScript -Installer $App -ScriptFile $local -Stage 'Post' -Origin 'Local' -Source $local.FullName
         } else {
             Log-Line INFO ("NoLocalPostFound Installer={0} ExpectedBase={1} Dir={2}" -f $App.Name, $App.BaseName, $App.DirectoryName)
         }
@@ -545,16 +642,16 @@ function Run-PostInstallIfAvailable {
     }
 
     if ($EnableRemotePostInstall) {
-        $url = Get-RemotePostUrl -App $App
+        $url = Get-RemoteHookUrl -App $App -Stage 'Post'
         if ($url) {
-            if (-not (Test-TrustedPostUrl -Url $url -TrustedDomains $TrustedPostDomains)) {
+            if (-not (Test-TrustedHookUrl -Url $url -TrustedDomains $TrustedHookDomains)) {
                 Write-Warn ("Remote post URL not trusted (blocked): {0}" -f $url)
                 Log-Line WARN ("PostInstallRemoteBlocked Installer={0} Url={1}" -f $App.Name, $url)
-            }
-            else {
+            } else {
                 try {
-                    $dl = Download-PostScript -Url $url
-                    $postRuns.Add((Invoke-PostInstallScript -Installer $App -ScriptFile $dl -Origin 'Remote' -Source $url))
+                    $dl = Download-HookScript -Url $url -Stage 'Post'
+                    $ranAny = $true
+                    $last = Invoke-HookScript -Installer $App -ScriptFile $dl -Stage 'Post' -Origin 'Remote' -Source $url
                 } catch {
                     Write-Bad ("Remote post download/run failed: {0}" -f $_.Exception.Message)
                     Log-Line ERROR ("PostInstallRemoteFail Installer={0} Url={1} Error={2}" -f $App.Name, $url, $_.Exception.Message)
@@ -565,48 +662,54 @@ function Run-PostInstallIfAvailable {
         }
     }
 
-    if ($postRuns.Count -gt 0) {
-        $last = $postRuns[$postRuns.Count - 1]
-        $ResultsArrayRef.Value[-1] | Add-Member -NotePropertyName PostStatus   -NotePropertyValue $last.PostStatus   -Force
-        $ResultsArrayRef.Value[-1] | Add-Member -NotePropertyName PostExitCode -NotePropertyValue $last.PostExitCode -Force
-        $ResultsArrayRef.Value[-1] | Add-Member -NotePropertyName PostOrigin   -NotePropertyValue $last.PostOrigin   -Force
-        $ResultsArrayRef.Value[-1] | Add-Member -NotePropertyName PostScript   -NotePropertyValue $last.PostScript   -Force
-        $ResultsArrayRef.Value[-1] | Add-Member -NotePropertyName PostSource   -NotePropertyValue $last.PostSource   -Force
+    if ($ranAny -and $last) {
+        $RowRef.Value.PostStatus   = $last.HookStatus
+        $RowRef.Value.PostExitCode = $last.HookExitCode
+        $RowRef.Value.PostOrigin   = $last.HookOrigin
+        $RowRef.Value.PostScript   = $last.HookScript
+        $RowRef.Value.PostSource   = $last.HookSource
     }
 }
 
-# Planned post info (for "Planned Installation" section)
-function Get-PlannedPostInfo {
-    param([Parameter(Mandatory)][System.IO.FileInfo]$App)
+# Planned hook info (for "Planned Installation" section)
+function Get-PlannedHookInfo {
+    param(
+        [Parameter(Mandatory)][System.IO.FileInfo]$App,
+        [Parameter(Mandatory)][ValidateSet('Pre','Post')] [string]$Stage
+    )
 
-    if ($SkipPostInstall) {
-        return [pscustomobject]@{ Text='Post: (skipped)'; Local=$null; Remote=$null }
+    $skip = if ($Stage -eq 'Pre') { $SkipPreInstall } else { $SkipPostInstall }
+    if ($skip) {
+        return [pscustomobject]@{ Text=("{0}: (skipped)" -f $Stage); Local=$null; Remote=$null }
     }
 
+    $localEnabled  = if ($Stage -eq 'Pre') { $EnableLocalPreInstall } else { $EnableLocalPostInstall }
+    $remoteEnabled = if ($Stage -eq 'Pre') { $EnableRemotePreInstall } else { $EnableRemotePostInstall }
+
     $localPath = $null
-    if ($EnableLocalPostInstall) {
-        $local = Get-LocalPostInstallScript -App $App
+    if ($localEnabled) {
+        $local = Get-LocalHookScript -App $App -Stage $Stage
         if ($local) { $localPath = $local.FullName }
     }
 
     $remoteUrl = $null
-    if ($EnableRemotePostInstall) {
-        $remoteUrl = Get-RemotePostUrl -App $App
-        if ($remoteUrl -and -not (Test-TrustedPostUrl -Url $remoteUrl -TrustedDomains $TrustedPostDomains)) {
+    if ($remoteEnabled) {
+        $remoteUrl = Get-RemoteHookUrl -App $App -Stage $Stage
+        if ($remoteUrl -and -not (Test-TrustedHookUrl -Url $remoteUrl -TrustedDomains $TrustedHookDomains)) {
             $remoteUrl = ("BLOCKED (untrusted): {0}" -f $remoteUrl)
         }
     }
 
     $parts = New-Object System.Collections.Generic.List[string]
 
-    if ($EnableLocalPostInstall) {
+    if ($localEnabled) {
         if ($localPath) { $parts.Add(("Local={0}" -f $localPath)) }
         else { $parts.Add("Local=(none)") }
     } else {
         $parts.Add("Local=(disabled)")
     }
 
-    if ($EnableRemotePostInstall) {
+    if ($remoteEnabled) {
         if ($remoteUrl) { $parts.Add(("Remote={0}" -f $remoteUrl)) }
         else { $parts.Add("Remote=(none)") }
     } else {
@@ -614,7 +717,7 @@ function Get-PlannedPostInfo {
     }
 
     return [pscustomobject]@{
-        Text   = ('Post: ' + ($parts -join ' | '))
+        Text   = ('{0}: ' -f $Stage) + ($parts -join ' | ')
         Local  = $localPath
         Remote = $remoteUrl
     }
@@ -796,8 +899,6 @@ function Get-InstallSpec {
         if ($rule -and ($rule.PSObject.Properties.Name -contains 'Args') -and $null -ne $rule.Args) {
             return @{ File='msiexec.exe'; Args=$rule.Args }
         }
-
-        # Default MSI: tokenized args (safe for spaces)
         return @{ File='msiexec.exe'; Args=@('/i', $App.FullName, '/qn', '/norestart') }
     }
 
@@ -857,14 +958,15 @@ function Install-Apps {
             Write-Host (' - {0}  -> {1}' -f $a.Name, $spec.File) -ForegroundColor Green
         }
 
-        $post = Get-PlannedPostInfo -App $a
+        $pre  = Get-PlannedHookInfo -App $a -Stage 'Pre'
+        $post = Get-PlannedHookInfo -App $a -Stage 'Post'
+        Write-Host ('   {0}' -f $pre.Text)  -ForegroundColor DarkGray
         Write-Host ('   {0}' -f $post.Text) -ForegroundColor DarkGray
     }
 
-    if (-not $SkipPostInstall) {
-        Write-Host ''
-        Write-Info ("Post-install: Local={0} Remote={1} (Remote default OFF)" -f $EnableLocalPostInstall, $EnableRemotePostInstall)
-    }
+    Write-Host ''
+    Write-Info ("Pre-install : Local={0} Remote={1} (Remote default OFF)" -f $EnableLocalPreInstall, $EnableRemotePreInstall)
+    Write-Info ("Post-install: Local={0} Remote={1} (Remote default OFF)" -f $EnableLocalPostInstall, $EnableRemotePostInstall)
 
     $go = Read-Host 'Proceed with installation? (Y/N)'
     if ($go -notmatch '^[Yy]$') {
@@ -883,19 +985,49 @@ function Install-Apps {
         $status = ('{0}/{1}: {2}' -f $idx, $total, $app.Name)
         Write-Progress -Activity 'Installing applications' -Status $status -PercentComplete $pct
 
+        # Create row early so Pre can populate even if we skip install
+        $row = [pscustomobject]@{
+            Name=$app.Name; Status='Pending'; ExitCode=$null
+
+            PreStatus='';  PreExitCode=$null;  PreOrigin='';  PreScript='';  PreSource=''
+            PostStatus=''; PostExitCode=$null; PostOrigin=''; PostScript=''; PostSource=''
+        }
+
         if ($ConfirmEach) {
             $c = Read-Host ('Install {0}? (Y/N)' -f $app.Name)
             if ($c -notmatch '^[Yy]$') {
                 Write-Warn ('Skipping {0}' -f $app.Name)
                 Log-Line WARN ('Skipped={0}' -f $app.Name)
-                $results += [pscustomobject]@{
-                    Name=$app.Name; Status='Skipped'; ExitCode=$null
-                    PostStatus=''; PostExitCode=$null; PostOrigin=''; PostScript=''; PostSource=''
-                }
+                $row.Status = 'Skipped'
+                $results += $row
                 continue
             }
         }
 
+        # -------------------
+        # Pre-install hook
+        # -------------------
+        $preOk = $true
+        try {
+            $preOk = Run-PreInstallIfAvailable -App $app -RowRef ([ref]$row)
+        } catch {
+            $preOk = $false
+            Write-Bad ('Pre-install stage error for {0}: {1}' -f $app.Name, $_.Exception.Message)
+            Log-Line ERROR ('PreInstallException={0} {1}' -f $app.Name, $_.Exception.Message)
+            $row.PreStatus = 'Error'
+        }
+
+        if (-not $preOk -and -not $ContinueOnPreFail) {
+            Write-Bad ('Pre-install failed for {0}. Skipping installer (use -ContinueOnPreFail to override).' -f $app.Name)
+            Log-Line WARN ('PreFailedSkipInstall={0}' -f $app.Name)
+            $row.Status = 'PreFailed'
+            $results += $row
+            continue
+        }
+
+        # -------------------
+        # Install
+        # -------------------
         $spec = Get-InstallSpec -App $app
         $cmdArgs = Format-ArgsForLog $spec.Args
 
@@ -906,45 +1038,43 @@ function Install-Apps {
         try {
             $p = Start-ProcessWait -FilePath $spec.File -Args $spec.Args
             $code = $p.ExitCode
+            $row.ExitCode = $code
 
             if ($code -eq 0) {
                 Write-Good ('Success: {0} (ExitCode=0)' -f $app.Name)
                 Log-Line OK ('InstallOK={0} ExitCode=0' -f $app.Name)
-                $results += [pscustomobject]@{
-                    Name=$app.Name; Status='OK'; ExitCode=0
-                    PostStatus=''; PostExitCode=$null; PostOrigin=''; PostScript=''; PostSource=''
-                }
+                $row.Status = 'OK'
             } else {
                 Write-Bad ('Failed: {0} (ExitCode={1})' -f $app.Name, $code)
                 Log-Line ERROR ('InstallFail={0} ExitCode={1}' -f $app.Name, $code)
-                $results += [pscustomobject]@{
-                    Name=$app.Name; Status='Failed'; ExitCode=$code
-                    PostStatus=''; PostExitCode=$null; PostOrigin=''; PostScript=''; PostSource=''
-                }
+                $row.Status = 'Failed'
             }
 
-            # Post-install hook (after creating results row)
-            Run-PostInstallIfAvailable -App $app -InstallerExitCode $code -ResultsArrayRef ([ref]$results)
+            # -------------------
+            # Post-install hook (eligibility-based)
+            # -------------------
+            Run-PostInstallIfEligible -App $app -InstallerExitCode $code -RowRef ([ref]$row)
         }
         catch {
             Write-Bad ('Error installing {0}: {1}' -f $app.Name, $_.Exception.Message)
             Log-Line ERROR ('InstallException={0} {1}' -f $app.Name, $_.Exception.Message)
-            $results += [pscustomobject]@{
-                Name=$app.Name; Status='Error'; ExitCode=$null
-                PostStatus=''; PostExitCode=$null; PostOrigin=''; PostScript=''; PostSource=''
-            }
+            $row.Status = 'Error'
 
             if ($RunPostOnFail) {
-                Run-PostInstallIfAvailable -App $app -InstallerExitCode 9999 -ResultsArrayRef ([ref]$results)
+                try {
+                    Run-PostInstallIfEligible -App $app -InstallerExitCode 9999 -RowRef ([ref]$row)
+                } catch {}
             }
         }
+
+        $results += $row
     }
 
     Write-Progress -Activity 'Installing applications' -Completed
 
     Write-Host ''
     Write-Header 'Summary'
-    $results | Format-Table Name, Status, ExitCode, PostStatus, PostExitCode, PostOrigin, PostScript -AutoSize
+    $results | Format-Table Name, Status, ExitCode, PreStatus, PreExitCode, PreOrigin, PreScript, PostStatus, PostExitCode, PostOrigin, PostScript -AutoSize
 
     Write-Host ''
     Write-Host ('All done. Transcript: {0}' -f $global:LogFile) -ForegroundColor Cyan
@@ -955,7 +1085,7 @@ function Install-Apps {
 # Main
 # ---------------------------
 Ensure-Admin
-Write-Header 'Auto App Installer v2.1.2 (CLI only) (by rhshourav)'
+Write-Header 'Auto App Installer v2.2.0 (CLI only) (by rhshourav)'
 New-Log
 
 try {
