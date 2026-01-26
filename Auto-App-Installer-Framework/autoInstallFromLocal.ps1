@@ -27,7 +27,7 @@
 param(
     [switch]$ConfirmEach = $false,
     [string]$LocalFallbackDir = "$PSScriptRoot\Installers",
-    [string]$FrameworkUrl = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Auto-App-Installer-Framework/auto.ps1',
+    [string]$FrameworkUrl = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Auto-App-Installer-Framework/autoInstallFromLocal.ps1',
 
     # Post-install controls
     [switch]$SkipPostInstall         = $false,
@@ -244,9 +244,7 @@ function Resolve-InstallBasePath {
     $locations = @(
         @{ Label='Antivirus (Sentinel)';       Path='\\192.168.18.201\it\Antivirus\Sentinel';          Recurse=$true },
         @{ Label='Staff PC (18.201)';          Path='\\192.168.18.201\it\PC Setup\Staff pc';           Recurse=$true },
-        @{ Label='Production PC (18.201)';     Path='\\192.168.18.201\it\PC Setup\Production pc';      Recurse=$true },
-        @{ Label='Production PC (19.44)';      Path='\\192.168.19.44\it\PC Setup\Production pc';       Recurse=$true },
-        @{ Label='Staff PC (19.44)';           Path='\\192.168.19.44\it\PC Setup\Staff pc';            Recurse=$true }
+        @{ Label='Production PC (18.201)';     Path='\\192.168.18.201\it\PC Setup\Production pc';      Recurse=$true }
     )
 
     $available = @()
