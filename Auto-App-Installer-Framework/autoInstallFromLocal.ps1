@@ -1,7 +1,7 @@
 #requires -version 5.1
 <#
 .SYNOPSIS
-  Auto App Installer – CLI Only – v2.1.1 (by rhshourav)
+  Auto App Installer – CLI Only – v2.1.2 (by rhshourav)
 
 .DESCRIPTION
   - Auto-elevates to Admin (PowerShell 5.1 safe, uses -EncodedCommand)
@@ -21,6 +21,11 @@
   - Robust logging (Transcript + meta log)
   - Graceful fallback after 30s with progress bar (NO IEX)
   - Windows 10 / 11 compatible, PowerShell 5.1+
+
+  v2.1.2 changes:
+    - Planned Installation section now shows which post script will run (Local/Remote/None/Blocked)
+    - Post-install eligibility treats 0/3010/1641 as "success" by default (configurable)
+    - Clear meta-log lines when no local post script is found (prevents silent confusion)
 #>
 
 [CmdletBinding()]
@@ -34,7 +39,10 @@ param(
     [switch]$RunPostOnFail           = $false,
     [switch]$EnableLocalPostInstall  = $true,
     [switch]$EnableRemotePostInstall = $false,  # safer default: OFF
-    [string[]]$TrustedPostDomains    = @('raw.githubusercontent.com')
+    [string[]]$TrustedPostDomains    = @('raw.githubusercontent.com'),
+
+    # Post-install success exit codes (many installers return reboot-required codes)
+    [int[]]$PostSuccessExitCodes     = @(0,3010,1641)
 )
 
 Set-StrictMode -Version Latest
@@ -242,9 +250,9 @@ function Self-Check {
 # ---------------------------
 function Resolve-InstallBasePath {
     $locations = @(
-        @{ Label='DST PC';       Path='\\192.168.18.201\it\PC Setup\Auto\DST';          Recurse=$true },
-        @{ Label='Staff PC';          Path='\\192.168.18.201\it\PC Setup\Auto\Staff pc';           Recurse=$true },
-        @{ Label='Production PC';     Path='\\192.168.18.201\it\PC Setup\Auto\Production pc';      Recurse=$true }
+        @{ Label='DST PC';            Path='\\192.168.18.201\it\PC Setup\Auto\DST';            Recurse=$true },
+        @{ Label='Staff PC';          Path='\\192.168.18.201\it\PC Setup\Auto\Staff pc';       Recurse=$true },
+        @{ Label='Production PC';     Path='\\192.168.18.201\it\PC Setup\Auto\Production pc';  Recurse=$true }
     )
 
     $available = @()
@@ -510,10 +518,18 @@ function Run-PostInstallIfAvailable {
         [Parameter(Mandatory)]$ResultsArrayRef
     )
 
-    if ($SkipPostInstall) { return }
+    if ($SkipPostInstall) {
+        Log-Line INFO ("PostInstallSkippedGlobally Installer={0}" -f $App.Name)
+        return
+    }
 
-    $shouldRun = ($InstallerExitCode -eq 0) -or $RunPostOnFail
-    if (-not $shouldRun) { return }
+    $isSuccess = $PostSuccessExitCodes -contains $InstallerExitCode
+    $shouldRun = $isSuccess -or $RunPostOnFail
+    if (-not $shouldRun) {
+        Log-Line INFO ("PostInstallNotEligible Installer={0} ExitCode={1} SuccessCodes={2} RunPostOnFail={3}" -f `
+            $App.Name, $InstallerExitCode, ($PostSuccessExitCodes -join ','), $RunPostOnFail)
+        return
+    }
 
     $postRuns = New-Object System.Collections.Generic.List[object]
 
@@ -521,7 +537,11 @@ function Run-PostInstallIfAvailable {
         $local = Get-LocalPostInstallScript -App $App
         if ($local) {
             $postRuns.Add((Invoke-PostInstallScript -Installer $App -ScriptFile $local -Origin 'Local' -Source $local.FullName))
+        } else {
+            Log-Line INFO ("NoLocalPostFound Installer={0} ExpectedBase={1} Dir={2}" -f $App.Name, $App.BaseName, $App.DirectoryName)
         }
+    } else {
+        Log-Line INFO ("LocalPostDisabled Installer={0}" -f $App.Name)
     }
 
     if ($EnableRemotePostInstall) {
@@ -540,6 +560,8 @@ function Run-PostInstallIfAvailable {
                     Log-Line ERROR ("PostInstallRemoteFail Installer={0} Url={1} Error={2}" -f $App.Name, $url, $_.Exception.Message)
                 }
             }
+        } else {
+            Log-Line INFO ("NoRemotePostUrl Installer={0}" -f $App.Name)
         }
     }
 
@@ -550,6 +572,51 @@ function Run-PostInstallIfAvailable {
         $ResultsArrayRef.Value[-1] | Add-Member -NotePropertyName PostOrigin   -NotePropertyValue $last.PostOrigin   -Force
         $ResultsArrayRef.Value[-1] | Add-Member -NotePropertyName PostScript   -NotePropertyValue $last.PostScript   -Force
         $ResultsArrayRef.Value[-1] | Add-Member -NotePropertyName PostSource   -NotePropertyValue $last.PostSource   -Force
+    }
+}
+
+# Planned post info (for "Planned Installation" section)
+function Get-PlannedPostInfo {
+    param([Parameter(Mandatory)][System.IO.FileInfo]$App)
+
+    if ($SkipPostInstall) {
+        return [pscustomobject]@{ Text='Post: (skipped)'; Local=$null; Remote=$null }
+    }
+
+    $localPath = $null
+    if ($EnableLocalPostInstall) {
+        $local = Get-LocalPostInstallScript -App $App
+        if ($local) { $localPath = $local.FullName }
+    }
+
+    $remoteUrl = $null
+    if ($EnableRemotePostInstall) {
+        $remoteUrl = Get-RemotePostUrl -App $App
+        if ($remoteUrl -and -not (Test-TrustedPostUrl -Url $remoteUrl -TrustedDomains $TrustedPostDomains)) {
+            $remoteUrl = ("BLOCKED (untrusted): {0}" -f $remoteUrl)
+        }
+    }
+
+    $parts = New-Object System.Collections.Generic.List[string]
+
+    if ($EnableLocalPostInstall) {
+        if ($localPath) { $parts.Add(("Local={0}" -f $localPath)) }
+        else { $parts.Add("Local=(none)") }
+    } else {
+        $parts.Add("Local=(disabled)")
+    }
+
+    if ($EnableRemotePostInstall) {
+        if ($remoteUrl) { $parts.Add(("Remote={0}" -f $remoteUrl)) }
+        else { $parts.Add("Remote=(none)") }
+    } else {
+        $parts.Add("Remote=(disabled)")
+    }
+
+    return [pscustomobject]@{
+        Text   = ('Post: ' + ($parts -join ' | '))
+        Local  = $localPath
+        Remote = $remoteUrl
     }
 }
 
@@ -783,11 +850,15 @@ function Install-Apps {
     foreach ($a in ($Selection | Sort-Object Name)) {
         $spec = Get-InstallSpec -App $a
         $argsText = Format-ArgsForLog $spec.Args
+
         if (-not [string]::IsNullOrWhiteSpace($argsText)) {
             Write-Host (' - {0}  -> {1} {2}' -f $a.Name, $spec.File, $argsText) -ForegroundColor Green
         } else {
             Write-Host (' - {0}  -> {1}' -f $a.Name, $spec.File) -ForegroundColor Green
         }
+
+        $post = Get-PlannedPostInfo -App $a
+        Write-Host ('   {0}' -f $post.Text) -ForegroundColor DarkGray
     }
 
     if (-not $SkipPostInstall) {
@@ -884,7 +955,7 @@ function Install-Apps {
 # Main
 # ---------------------------
 Ensure-Admin
-Write-Header 'Auto App Installer v2.1.1 (CLI only) (by rhshourav)'
+Write-Header 'Auto App Installer v2.1.2 (CLI only) (by rhshourav)'
 New-Log
 
 try {
