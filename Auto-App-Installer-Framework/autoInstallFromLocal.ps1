@@ -1,7 +1,7 @@
 #requires -version 5.1
 <#
 .SYNOPSIS
-  Auto App Installer – CLI Only – v2.2.0 (by rhshourav)
+  Auto App Installer – CLI Only – v2.2.2 (by rhshourav)
 
 .DESCRIPTION
   - Auto-elevates to Admin (PowerShell 5.1 safe, uses -EncodedCommand)
@@ -28,6 +28,14 @@
 NOTES
   - Remote hook execution is OFF by default.
   - Trust is domain-based AND HTTPS-only. Prefer pinning raw GitHub URLs to commit SHA.
+
+v2.2.2 changes:
+  - MSI modes:
+      * DefaultMsiMode parameter: Silent|Basic|UI
+      * Per-rule override: MsiMode
+      * Sentinel example uses UI mode to avoid silent 1603
+  - Hooks visible:
+      * Pre/Post scripts run in their own visible window (no hidden WindowStyle)
 #>
 
 [CmdletBinding()]
@@ -35,6 +43,10 @@ param(
     [switch]$ConfirmEach = $false,
     [string]$LocalFallbackDir = "$PSScriptRoot\Installers",
     [string]$FrameworkUrl = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Auto-App-Installer-Framework/autoInstallFromLocal.ps1',
+
+    # MSI default mode (global)
+    [ValidateSet('Silent','Basic','UI')]
+    [string]$DefaultMsiMode = 'Silent',
 
     # Pre-install controls
     [switch]$SkipPreInstall          = $false,
@@ -76,7 +88,11 @@ Rule fields:
   AppliesTo : 'Exe' | 'Msi' | 'Any'
   MatchType : 'Contains' | 'Like' | 'Regex'
   Match     : match text/pattern
-  Args      : OPTIONAL. Overrides default args. Can be string or string[]
+  Args      : OPTIONAL. Overrides/extends default args. Can be string or string[]
+             - For MSI rules:
+                 * If Args contains /i or /package or a .msi token, it is treated as FULL msiexec args.
+                 * Otherwise it is appended to the base args for the chosen MSI mode.
+  MsiMode   : OPTIONAL (MSI only). 'Silent' | 'Basic' | 'UI'
   Preselect : OPTIONAL. If $true, app is pre-selected automatically
   PreUrl    : OPTIONAL. Remote pre-install hook URL (ps1/cmd/bat). Requires -EnableRemotePreInstall
   PostUrl   : OPTIONAL. Remote post-install hook URL (ps1/cmd/bat). Requires -EnableRemotePostInstall
@@ -84,10 +100,25 @@ Rule fields:
 Notes:
   - First-match wins. Put specific rules above general ones.
   - EXE defaults to '/S' when no rule args exist.
-  - MSI defaults to msiexec /i <msi> /qn /norestart when no rule args exist.
+  - MSI defaults depend on mode:
+      Silent: /i "<msi>" /qn /norestart
+      Basic : /i "<msi>" /qb /norestart
+      UI    : /i "<msi>" /norestart
+    (MSI always adds /L*V "<log>" unless your rule already specifies /l*)
 #>
 
 $global:InstallerRules = @(
+    # --- FIX for Sentinel: run MSI with UI (no /qn) ---
+    [pscustomobject]@{
+        Name      = 'Sentinel MSI - UI mode (avoid silent 1603)'
+        AppliesTo = 'Msi'
+        MatchType = 'Contains'
+        Match     = 'SentinelInstaller'
+        MsiMode   = 'UI'
+        Args      = $null
+        Preselect = $false
+    },
+
     [pscustomobject]@{
         Name      = 'Green apps: all users'
         AppliesTo = 'Exe'
@@ -95,23 +126,9 @@ $global:InstallerRules = @(
         Match     = 'green'
         Args      = @('/ALLUSER')
         Preselect = $false
-
-        # Example remote hooks (pin to commit SHA if you enable remote execution):
-        # PreUrl  = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/<COMMIT_SHA>/Hooks/green.pre.ps1'
-        # PostUrl = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/<COMMIT_SHA>/Hooks/green.post.ps1'
     }
 
-    # Add more rules below:
-    #,[pscustomobject]@{
-    #    Name      = 'Chrome silent'
-    #    AppliesTo = 'Exe'
-    #    MatchType = 'Like'
-    #    Match     = '*chrome*'
-    #    Args      = @('/silent','/install')
-    #    Preselect = $true
-    #    PreUrl    = 'https://raw.githubusercontent.com/.../chrome.pre.ps1'
-    #    PostUrl   = 'https://raw.githubusercontent.com/.../chrome.post.ps1'
-    #}
+    # Add more rules below...
 )
 
 # ---------------------------
@@ -175,12 +192,10 @@ function Escape-SingleQuote {
     if ($null -eq $s) { return '' }
     return ($s -replace "'", "''")
 }
-
 function Quote-ForPsLiteral {
     param([string]$s)
     return "'" + (Escape-SingleQuote $s) + "'"
 }
-
 function Get-ForwardedArgs {
     $out = New-Object System.Collections.Generic.List[string]
 
@@ -203,7 +218,6 @@ function Get-ForwardedArgs {
 
     return ($out -join ' ')
 }
-
 function Ensure-Admin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
     $p  = New-Object Security.Principal.WindowsPrincipal($id)
@@ -403,6 +417,19 @@ function Get-MatchingRule {
     return $null
 }
 
+function Get-MsiModeForApp {
+    param([Parameter(Mandatory)][System.IO.FileInfo]$App)
+
+    if ($App.Extension -ne '.msi') { return $null }
+
+    $rule = Get-MatchingRule -App $App
+    if ($rule -and ($rule.PSObject.Properties.Name -contains 'MsiMode')) {
+        $m = [string]$rule.MsiMode
+        if ($m -in @('Silent','Basic','UI')) { return $m }
+    }
+    return $DefaultMsiMode
+}
+
 # ---------------------------
 # Hook utilities (trust + download + local/remote resolve)
 # ---------------------------
@@ -502,15 +529,17 @@ function Invoke-HookScript {
         $ext = $ScriptFile.Extension.ToLowerInvariant()
         $p = $null
 
+        # Visible, independent window (no Hidden). If you want it to stay open,
+        # add Read-Host/pause inside your hook script itself.
         if ($ext -eq '.ps1') {
             $p = Start-Process -FilePath 'powershell.exe' -ArgumentList @(
                 '-NoProfile',
                 '-ExecutionPolicy','Bypass',
                 '-File', $ScriptFile.FullName
-            ) -Wait -PassThru -WindowStyle Hidden
+            ) -Wait -PassThru -WindowStyle Normal
         }
         elseif ($ext -in '.cmd','.bat') {
-            $p = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c', $ScriptFile.FullName) -Wait -PassThru -WindowStyle Hidden
+            $p = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c', $ScriptFile.FullName) -Wait -PassThru -WindowStyle Normal
         }
         else {
             throw ("Unsupported {0}-install script type: {1}" -f $Stage, $ScriptFile.Name)
@@ -587,7 +616,6 @@ function Run-PreInstallIfAvailable {
         return $true
     }
 
-    # Persist last run outcome into row
     if ($last) {
         $RowRef.Value.PreStatus   = $last.HookStatus
         $RowRef.Value.PreExitCode = $last.HookExitCode
@@ -596,13 +624,11 @@ function Run-PreInstallIfAvailable {
         $RowRef.Value.PreSource   = $last.HookSource
     }
 
-    # Decide success/fail
     if ($null -ne $RowRef.Value.PreExitCode) {
         $ok = $PreSuccessExitCodes -contains [int]$RowRef.Value.PreExitCode
         return $ok
     }
 
-    # If error with null exit code -> treat as fail
     return $false
 }
 
@@ -671,7 +697,6 @@ function Run-PostInstallIfEligible {
     }
 }
 
-# Planned hook info (for "Planned Installation" section)
 function Get-PlannedHookInfo {
     param(
         [Parameter(Mandatory)][System.IO.FileInfo]$App,
@@ -680,7 +705,11 @@ function Get-PlannedHookInfo {
 
     $skip = if ($Stage -eq 'Pre') { $SkipPreInstall } else { $SkipPostInstall }
     if ($skip) {
-        return [pscustomobject]@{ Text=("{0}: (skipped)" -f $Stage); Local=$null; Remote=$null }
+        return [pscustomobject]@{
+            Text   = ("{0}: (skipped)" -f $Stage)
+            Local  = $null
+            Remote = $null
+        }
     }
 
     $localEnabled  = if ($Stage -eq 'Pre') { $EnableLocalPreInstall } else { $EnableLocalPostInstall }
@@ -703,17 +732,17 @@ function Get-PlannedHookInfo {
     $parts = New-Object System.Collections.Generic.List[string]
 
     if ($localEnabled) {
-        if ($localPath) { $parts.Add(("Local={0}" -f $localPath)) }
-        else { $parts.Add("Local=(none)") }
+        if ($localPath) { [void]$parts.Add(("Local={0}" -f $localPath)) }
+        else            { [void]$parts.Add("Local=(none)") }
     } else {
-        $parts.Add("Local=(disabled)")
+        [void]$parts.Add("Local=(disabled)")
     }
 
     if ($remoteEnabled) {
-        if ($remoteUrl) { $parts.Add(("Remote={0}" -f $remoteUrl)) }
-        else { $parts.Add("Remote=(none)") }
+        if ($remoteUrl) { [void]$parts.Add(("Remote={0}" -f $remoteUrl)) }
+        else            { [void]$parts.Add("Remote=(none)") }
     } else {
-        $parts.Add("Remote=(disabled)")
+        [void]$parts.Add("Remote=(disabled)")
     }
 
     return [pscustomobject]@{
@@ -722,6 +751,7 @@ function Get-PlannedHookInfo {
         Remote = $remoteUrl
     }
 }
+
 
 # ---------------------------
 # CLI selection
@@ -746,8 +776,13 @@ function Show-AppsTable {
 
         $rule = Get-MatchingRule -App $Apps[$i]
         $ruleInfo = ''
-        if ($rule -and ($rule.PSObject.Properties.Name -contains 'Args') -and $null -ne $rule.Args) {
-            $ruleInfo = ('  -> Args: {0}' -f (Format-ArgsForLog $rule.Args))
+        if ($rule) {
+            if (($rule.PSObject.Properties.Name -contains 'Args') -and $null -ne $rule.Args) {
+                $ruleInfo += ('  -> Args: {0}' -f (Format-ArgsForLog $rule.Args))
+            }
+            if ($Apps[$i].Extension -eq '.msi' -and ($rule.PSObject.Properties.Name -contains 'MsiMode') -and $rule.MsiMode) {
+                $ruleInfo += ('  -> MsiMode: {0}' -f $rule.MsiMode)
+            }
         }
 
         Write-Host ('{0} [{1}] {2}  ({3}, {4} MB){5}' -f $mark, $n, $name, $type, $size, $ruleInfo) -ForegroundColor Cyan
@@ -780,7 +815,6 @@ function Parse-Selection {
             $a, $b = $token -split '-'
             $a = [int]$a; $b = [int]$b
             if ($a -gt $b) { $t = $a; $a = $b; $b = $t }
-
             for ($n = $a; $n -le $b; $n++) {
                 if ($n -ge 1 -and $n -le $Max) { [void]$picked.Add($n) }
             }
@@ -804,7 +838,6 @@ function Select-AppsCli {
 
     $selected = New-Object System.Collections.Generic.HashSet[int]
 
-    # Preselect based on rules
     for ($i=0; $i -lt $Apps.Count; $i++) {
         $rule = Get-MatchingRule -App $Apps[$i]
         if ($rule -and ($rule.PSObject.Properties.Name -contains 'Preselect') -and $rule.Preselect -eq $true) {
@@ -877,39 +910,12 @@ function Select-AppsCli {
         foreach ($n in ($selected | Sort-Object)) { $Apps[$n - 1] }
     )
 
-    return [pscustomobject]@{
-        Back      = $false
-        Selection = $final
-    }
+    return [pscustomobject]@{ Back=$false; Selection=$final }
 }
 
 # ---------------------------
-# Install execution (default logic + rule overrides)
+# Install execution
 # ---------------------------
-function Get-InstallSpec {
-    param([System.IO.FileInfo]$App)
-
-    $rule = Get-MatchingRule -App $App
-    if ($rule) {
-        Log-Line INFO ("RuleMatch={0} App={1}" -f $rule.Name, $App.Name)
-    }
-
-    if ($App.Extension -eq '.msi') {
-        # If a rule provides MSI args, treat it as full msiexec args (string or string[])
-        if ($rule -and ($rule.PSObject.Properties.Name -contains 'Args') -and $null -ne $rule.Args) {
-            return @{ File='msiexec.exe'; Args=$rule.Args }
-        }
-        return @{ File='msiexec.exe'; Args=@('/i', $App.FullName, '/qn', '/norestart') }
-    }
-
-    # EXE: if rule provides args use it, else default /S
-    if ($rule -and ($rule.PSObject.Properties.Name -contains 'Args') -and $null -ne $rule.Args) {
-        return @{ File=$App.FullName; Args=$rule.Args }
-    }
-
-    return @{ File=$App.FullName; Args=@('/S') }
-}
-
 function Start-ProcessWait {
     param(
         [Parameter(Mandatory)][string]$FilePath,
@@ -917,22 +923,184 @@ function Start-ProcessWait {
     )
 
     if ($null -eq $Args) {
-        return (Start-Process -FilePath $FilePath -Wait -PassThru -WindowStyle Hidden)
+        return (Start-Process -FilePath $FilePath -Wait -PassThru)
     }
 
     if ($Args -is [System.Array]) {
         if ($Args.Count -eq 0) {
-            return (Start-Process -FilePath $FilePath -Wait -PassThru -WindowStyle Hidden)
+            return (Start-Process -FilePath $FilePath -Wait -PassThru)
         }
-        return (Start-Process -FilePath $FilePath -ArgumentList $Args -Wait -PassThru -WindowStyle Hidden)
+        return (Start-Process -FilePath $FilePath -ArgumentList $Args -Wait -PassThru)
     }
 
     $s = [string]$Args
     if ([string]::IsNullOrWhiteSpace($s)) {
-        return (Start-Process -FilePath $FilePath -Wait -PassThru -WindowStyle Hidden)
+        return (Start-Process -FilePath $FilePath -Wait -PassThru)
     }
 
-    return (Start-Process -FilePath $FilePath -ArgumentList $s -Wait -PassThru -WindowStyle Hidden)
+    return (Start-Process -FilePath $FilePath -ArgumentList $s -Wait -PassThru)
+}
+
+function Get-InstallSpec {
+    param([System.IO.FileInfo]$App)
+
+    $rule = Get-MatchingRule -App $App
+    if ($rule) { Log-Line INFO ("RuleMatch={0} App={1}" -f $rule.Name, $App.Name) }
+
+    if ($App.Extension -eq '.msi') {
+        $mode = Get-MsiModeForApp -App $App
+        $base =
+            if ($mode -eq 'UI')    { @('/i', $App.FullName, '/norestart') }
+            elseif ($mode -eq 'Basic') { @('/i', $App.FullName, '/qb', '/norestart') }
+            else                  { @('/i', $App.FullName, '/qn', '/norestart') }
+
+        if ($rule -and ($rule.PSObject.Properties.Name -contains 'Args') -and $null -ne $rule.Args) {
+            return @{ File='msiexec.exe'; Args=$rule.Args }
+        }
+
+        return @{ File='msiexec.exe'; Args=$base }
+    }
+
+    if ($rule -and ($rule.PSObject.Properties.Name -contains 'Args') -and $null -ne $rule.Args) {
+        return @{ File=$App.FullName; Args=$rule.Args }
+    }
+
+    return @{ File=$App.FullName; Args=@('/S') }
+}
+
+# ---------------------------
+# MSI reliability helpers
+# ---------------------------
+function Get-MsiexecPath {
+    if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
+        $p = Join-Path $env:WINDIR 'sysnative\msiexec.exe'
+        if (Test-Path -LiteralPath $p) { return $p }
+    }
+    $p2 = Join-Path $env:WINDIR 'System32\msiexec.exe'
+    if (Test-Path -LiteralPath $p2) { return $p2 }
+    return 'msiexec.exe'
+}
+function Test-IsUncPath {
+    param([Parameter(Mandatory)][string]$Path)
+    return ($Path.StartsWith('\\'))
+}
+function Stage-FileToTemp {
+    param(
+        [Parameter(Mandatory)][System.IO.FileInfo]$File,
+        [Parameter(Mandatory)][string]$StageTag
+    )
+
+    $root = Join-Path $env:TEMP "rhshourav\WindowsScripts\Staging\$StageTag"
+    New-Item -Path $root -ItemType Directory -Force | Out-Null
+
+    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $dst   = Join-Path $root ("{0}_{1}" -f $stamp, $File.Name)
+
+    for ($i=1; $i -le 3; $i++) {
+        try {
+            Copy-Item -LiteralPath $File.FullName -Destination $dst -Force -ErrorAction Stop
+            return (Get-Item -LiteralPath $dst -ErrorAction Stop)
+        } catch {
+            if ($i -eq 3) { throw }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+}
+function New-MsiLogPath {
+    param([Parameter(Mandatory)][System.IO.FileInfo]$App)
+    $root = Join-Path $env:TEMP 'rhshourav\WindowsScripts\MsiLogs'
+    New-Item -Path $root -ItemType Directory -Force | Out-Null
+
+    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $safe  = ($App.BaseName -replace '[^\w\.\-]+','_')
+    return (Join-Path $root ("{0}_{1}.msi.log" -f $stamp, $safe))
+}
+
+function Build-MsiexecArgs {
+    param(
+        [Parameter(Mandatory)][string]$MsiPath,
+        $RuleArgs,
+        [Parameter(Mandatory)][string]$LogPath,
+        [Parameter(Mandatory)][ValidateSet('Silent','Basic','UI')] [string]$Mode
+    )
+
+    $base =
+        if ($Mode -eq 'UI')    { "/i `"$MsiPath`" /norestart" }
+        elseif ($Mode -eq 'Basic') { "/i `"$MsiPath`" /qb /norestart" }
+        else                  { "/i `"$MsiPath`" /qn /norestart" }
+
+    $ruleText = ''
+    if ($null -ne $RuleArgs) {
+        if ($RuleArgs -is [System.Array]) { $ruleText = ($RuleArgs -join ' ') }
+        else { $ruleText = [string]$RuleArgs }
+        $ruleText = $ruleText.Trim()
+    }
+
+    $looksFull =
+        ($ruleText -match '(?i)(^|\s)/i(\s|$)') -or
+        ($ruleText -match '(?i)(^|\s)/package(\s|$)') -or
+        ($ruleText -match '(?i)\.msi(\s|$)')
+
+    if ([string]::IsNullOrWhiteSpace($ruleText)) {
+        $args = $base
+    } elseif ($looksFull) {
+        $args = $ruleText
+    } else {
+        $args = ($base + ' ' + $ruleText).Trim()
+    }
+
+    $hasLog = ($args -match '(?i)(^|\s)/l') -or ($args -match '(?i)(^|\s)/log(\s|$)')
+    if (-not $hasLog) {
+        $args += " /L*V `"$LogPath`""
+    }
+
+    return $args
+}
+
+function Get-InstallRunSpec {
+    param([Parameter(Mandatory)][System.IO.FileInfo]$App)
+
+    if ($App.Extension -ne '.msi') {
+        $spec = Get-InstallSpec -App $App
+        return [pscustomobject]@{
+            File        = [string]$spec.File
+            Args        = $spec.Args
+            PayloadPath = $App.FullName
+            LogPath     = ''
+            MsiMode     = ''
+        }
+    }
+
+    $rule = Get-MatchingRule -App $App
+    if ($rule) { Log-Line INFO ("RuleMatch={0} App={1}" -f $rule.Name, $App.Name) }
+
+    $mode = Get-MsiModeForApp -App $App
+
+    $payload = $App
+    if (Test-IsUncPath -Path $App.FullName) {
+        Write-Info ("Staging MSI locally (UNC detected): {0}" -f $App.FullName)
+        Log-Line INFO ("MsiStageStart={0}" -f $App.FullName)
+        $payload = Stage-FileToTemp -File $App -StageTag 'MSI'
+        Log-Line OK ("MsiStagedTo={0}" -f $payload.FullName)
+    }
+
+    $msiLog = New-MsiLogPath -App $App
+    $msiExe = Get-MsiexecPath
+
+    $ruleArgs = $null
+    if ($rule -and ($rule.PSObject.Properties.Name -contains 'Args') -and $null -ne $rule.Args) {
+        $ruleArgs = $rule.Args
+    }
+
+    $args = Build-MsiexecArgs -MsiPath $payload.FullName -RuleArgs $ruleArgs -LogPath $msiLog -Mode $mode
+
+    return [pscustomobject]@{
+        File        = $msiExe
+        Args        = $args
+        PayloadPath = $payload.FullName
+        LogPath     = $msiLog
+        MsiMode     = $mode
+    }
 }
 
 function Install-Apps {
@@ -965,6 +1133,7 @@ function Install-Apps {
     }
 
     Write-Host ''
+    Write-Info ("Default MSI mode: {0} (override per rule with MsiMode)" -f $DefaultMsiMode)
     Write-Info ("Pre-install : Local={0} Remote={1} (Remote default OFF)" -f $EnableLocalPreInstall, $EnableRemotePreInstall)
     Write-Info ("Post-install: Local={0} Remote={1} (Remote default OFF)" -f $EnableLocalPostInstall, $EnableRemotePostInstall)
 
@@ -985,9 +1154,10 @@ function Install-Apps {
         $status = ('{0}/{1}: {2}' -f $idx, $total, $app.Name)
         Write-Progress -Activity 'Installing applications' -Status $status -PercentComplete $pct
 
-        # Create row early so Pre can populate even if we skip install
         $row = [pscustomobject]@{
             Name=$app.Name; Status='Pending'; ExitCode=$null
+
+            PayloadPath=''; InstallerLog=''; MsiMode=''
 
             PreStatus='';  PreExitCode=$null;  PreOrigin='';  PreScript='';  PreSource=''
             PostStatus=''; PostExitCode=$null; PostOrigin=''; PostScript=''; PostSource=''
@@ -1004,9 +1174,7 @@ function Install-Apps {
             }
         }
 
-        # -------------------
         # Pre-install hook
-        # -------------------
         $preOk = $true
         try {
             $preOk = Run-PreInstallIfAvailable -App $app -RowRef ([ref]$row)
@@ -1025,34 +1193,43 @@ function Install-Apps {
             continue
         }
 
-        # -------------------
-        # Install
-        # -------------------
-        $spec = Get-InstallSpec -App $app
-        $cmdArgs = Format-ArgsForLog $spec.Args
+        # Install (MSI hardened + MSI mode)
+        $run = Get-InstallRunSpec -App $app
+        $row.PayloadPath  = $run.PayloadPath
+        $row.InstallerLog = $run.LogPath
+        $row.MsiMode      = $run.MsiMode
+
+        $cmdArgs = Format-ArgsForLog $run.Args
 
         Write-Info ('Installing: {0}' -f $app.Name)
+        if ($app.Extension -eq '.msi') {
+            Write-Info ("MSI mode: {0}" -f $run.MsiMode)
+        }
         Log-Line INFO ('InstallStart={0}' -f $app.FullName)
-        Log-Line INFO ('Command={0} {1}' -f $spec.File, $cmdArgs)
+        Log-Line INFO ('Command={0} {1}' -f $run.File, $cmdArgs)
+        if ($row.InstallerLog) { Log-Line INFO ("MsiLog={0}" -f $row.InstallerLog) }
 
         try {
-            $p = Start-ProcessWait -FilePath $spec.File -Args $spec.Args
+            $p = Start-ProcessWait -FilePath $run.File -Args $run.Args
             $code = $p.ExitCode
             $row.ExitCode = $code
 
-            if ($code -eq 0) {
-                Write-Good ('Success: {0} (ExitCode=0)' -f $app.Name)
-                Log-Line OK ('InstallOK={0} ExitCode=0' -f $app.Name)
+            $successCodes = @(0,3010,1641)
+            $isOk = $successCodes -contains [int]$code
+
+            if ($isOk) {
+                Write-Good ('Success: {0} (ExitCode={1})' -f $app.Name, $code)
+                Log-Line OK ('InstallOK={0} ExitCode={1}' -f $app.Name, $code)
                 $row.Status = 'OK'
             } else {
                 Write-Bad ('Failed: {0} (ExitCode={1})' -f $app.Name, $code)
                 Log-Line ERROR ('InstallFail={0} ExitCode={1}' -f $app.Name, $code)
+                if ($row.InstallerLog) {
+                    Write-Warn ("MSI log (if applicable): {0}" -f $row.InstallerLog)
+                }
                 $row.Status = 'Failed'
             }
 
-            # -------------------
-            # Post-install hook (eligibility-based)
-            # -------------------
             Run-PostInstallIfEligible -App $app -InstallerExitCode $code -RowRef ([ref]$row)
         }
         catch {
@@ -1061,9 +1238,7 @@ function Install-Apps {
             $row.Status = 'Error'
 
             if ($RunPostOnFail) {
-                try {
-                    Run-PostInstallIfEligible -App $app -InstallerExitCode 9999 -RowRef ([ref]$row)
-                } catch {}
+                try { Run-PostInstallIfEligible -App $app -InstallerExitCode 9999 -RowRef ([ref]$row) } catch {}
             }
         }
 
@@ -1074,18 +1249,19 @@ function Install-Apps {
 
     Write-Host ''
     Write-Header 'Summary'
-    $results | Format-Table Name, Status, ExitCode, PreStatus, PreExitCode, PreOrigin, PreScript, PostStatus, PostExitCode, PostOrigin, PostScript -AutoSize
+    $results | Format-Table Name, Status, ExitCode, MsiMode, PreStatus, PreExitCode, PreOrigin, PreScript, PostStatus, PostExitCode, PostOrigin, PostScript -AutoSize
 
     Write-Host ''
     Write-Host ('All done. Transcript: {0}' -f $global:LogFile) -ForegroundColor Cyan
     Write-Host ('Meta log   : {0}' -f $global:MetaLog) -ForegroundColor Cyan
+    Write-Host ('MSI logs   : {0}' -f (Join-Path $env:TEMP 'rhshourav\WindowsScripts\MsiLogs')) -ForegroundColor Cyan
 }
 
 # ---------------------------
 # Main
 # ---------------------------
 Ensure-Admin
-Write-Header 'Auto App Installer v2.2.0 (CLI only) (by rhshourav)'
+Write-Header 'Auto App Installer v2.2.2 (CLI only) (by rhshourav)'
 New-Log
 
 try {
