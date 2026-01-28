@@ -1,7 +1,7 @@
 #requires -version 5.1
 <#
 .SYNOPSIS
-  Auto App Installer – CLI Only – v2.2.2 (by rhshourav)
+  Auto App Installer – CLI Only – v.2.2.3 (by rhshourav)
 
 .DESCRIPTION
   - Auto-elevates to Admin (PowerShell 5.1 safe, uses -EncodedCommand)
@@ -29,7 +29,7 @@ NOTES
   - Remote hook execution is OFF by default.
   - Trust is domain-based AND HTTPS-only. Prefer pinning raw GitHub URLs to commit SHA.
 
-v2.2.2 changes:
+v.2.2.3 changes:
   - MSI modes:
       * DefaultMsiMode parameter: Silent|Basic|UI
       * Per-rule override: MsiMode
@@ -125,6 +125,14 @@ $global:InstallerRules = @(
         MatchType = 'Contains'
         Match     = 'green'
         Args      = @('/ALLUSER')
+        Preselect = $false
+    },
+    [pscustomobject]@{
+        Name      = 'Sophos Silent'
+        AppliesTo = 'Exe'
+        MatchType = 'Contains'
+        Match     = 'Sophos'
+        Args      = @('/quiet')
         Preselect = $false
     }
 
@@ -1261,7 +1269,7 @@ function Install-Apps {
 # Main
 # ---------------------------
 Ensure-Admin
-Write-Header 'Auto App Installer v2.2.2 (CLI only) (by rhshourav)'
+Write-Header 'Auto App Installer v.2.2.3 (CLI only) (by rhshourav)'
 New-Log
 
 try {
