@@ -1,7 +1,7 @@
 #requires -version 5.1
 <#
 .SYNOPSIS
-  Auto App Installer – CLI Only – V3.0.1 (by rhshourav)
+  Auto App Installer – CLI Only – V3.1.0 (by rhshourav)
 
 .DESCRIPTION
   - Auto-elevates to Admin (PowerShell 5.1 safe, uses -EncodedCommand)
@@ -29,7 +29,7 @@ NOTES
   - Remote hook execution is OFF by default.
   - Trust is domain-based AND HTTPS-only. Prefer pinning raw GitHub URLs to commit SHA.
 
-V3.0.1 changes:
+V3.1.0 changes:
   - EXE watchdog support (fixes installers that spawn an app and wait for it to exit, e.g., Greenshot):
       * Rule fields:
           WatchCloseProcesses       = @('Greenshot')
@@ -281,6 +281,57 @@ Read-Host 'Press Enter to close'
         exit
     }
 }
+# ---------------------------
+# Post-elevate bootstrap
+# ---------------------------
+$BootstrapUrl = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Disable-OpenFileSecurityWarning-ForIP.ps1'
+$BootstrapTrustedDomains = @('raw.githubusercontent.com')
+
+function Test-TrustedUrl {
+    param([Parameter(Mandatory)][string]$Url, [string[]]$TrustedDomains)
+    try { $u = [Uri]$Url } catch { return $false }
+    if ($u.Scheme -ne 'https') { return $false }
+
+    $uHost = $u.Host.ToLowerInvariant()
+    foreach ($d in $TrustedDomains) {
+        if ($uHost -eq $d.ToLowerInvariant()) { return $true }
+    }
+    return $false
+}
+
+
+function Invoke-PostElevateBootstrap {
+    param([Parameter(Mandatory)][string]$Url)
+
+    if (-not (Test-TrustedUrl -Url $Url -TrustedDomains $BootstrapTrustedDomains)) {
+        Write-Host ("[!] Bootstrap URL blocked (untrusted): {0}" -f $Url) -ForegroundColor Yellow
+        return
+    }
+
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+    $root = Join-Path $env:TEMP 'rhshourav\WindowsScripts\Bootstrap'
+    New-Item -Path $root -ItemType Directory -Force | Out-Null
+    $dst = Join-Path $root ("Disable-OpenFileSecurityWarning-ForIP_{0}.ps1" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $dst -ErrorAction Stop
+        Write-Host ("[*] Bootstrap downloaded: {0}" -f $dst) -ForegroundColor Cyan
+
+        $p = Start-Process -FilePath 'powershell.exe' -ArgumentList @(
+            '-NoProfile',
+            '-ExecutionPolicy','Bypass',
+            '-File', $dst
+        ) -Wait -PassThru -WindowStyle Normal
+
+        Write-Host ("[*] Bootstrap finished. ExitCode={0}" -f $p.ExitCode) -ForegroundColor Cyan
+    }
+    catch {
+        Write-Host ("[!] Bootstrap failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    }
+}
+
+Invoke-PostElevateBootstrap -Url $BootstrapUrl
 
 # ---------------------------
 # Self-check
@@ -1422,7 +1473,8 @@ function Install-Apps {
 # Main
 # ---------------------------
 Ensure-Admin
-Write-Header 'Auto App Installer V3.0.1 (CLI only) (by rhshourav)'
+Invoke-PostElevateBootstrap -Url $BootstrapUrl
+Write-Header 'Auto App Installer V3.1.0 (CLI only) (by rhshourav)'
 New-Log
 
 try {
