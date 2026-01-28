@@ -1,7 +1,7 @@
 #requires -version 5.1
 <#
 .SYNOPSIS
-  Auto App Installer – CLI Only – V4.0.0 (by rhshourav)
+  Auto App Installer – CLI Only – V4.1. (by rhshourav)
 
 .DESCRIPTION
   - Auto-elevates to Admin (PowerShell 5.1 safe, uses -EncodedCommand)
@@ -29,7 +29,7 @@ NOTES
   - Remote hook execution is OFF by default.
   - Trust is domain-based AND HTTPS-only. Prefer pinning raw GitHub URLs to commit SHA.
 
-V4.0.0 changes:
+V4.1.0 changes:
   - EXE watchdog support (fixes installers that spawn an app and wait for it to exit, e.g., Greenshot):
       * Rule fields:
           WatchCloseProcesses       = @('Greenshot')
@@ -316,7 +316,8 @@ function Resolve-InstallBasePath {
     $locations = @(
         @{ Label='DST PC';            Path='\\192.168.18.201\it\PC Setup\Auto\DST';            Recurse=$true },
         @{ Label='Staff PC';          Path='\\192.168.18.201\it\PC Setup\Auto\Staff pc';       Recurse=$true },
-        @{ Label='Production PC';     Path='\\192.168.18.201\it\PC Setup\Auto\Production pc';  Recurse=$true }
+        @{ Label='Production PC';     Path='\\192.168.18.201\it\PC Setup\Auto\Production pc';  Recurse=$true },
+        @{ Label='Softwares';          Path='\\192.168.18.201\it\PC Setup\Auto\Softwares';       Recurse=$true }
     )
 
     $available = @()
@@ -1482,7 +1483,7 @@ function Install-Apps {
 # Main
 # ---------------------------
 Ensure-Admin
-Write-Header 'Auto App Installer V4.0.0 (CLI only) (by rhshourav)'
+Write-Header 'Auto App Installer V4.1.0 (CLI only) (by rhshourav)'
 New-Log
 
 try {
