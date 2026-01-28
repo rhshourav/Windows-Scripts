@@ -1,7 +1,7 @@
 #requires -version 5.1
 <#
 .SYNOPSIS
-  Auto App Installer – CLI Only – V3.0.1 (by rhshourav)
+  Auto App Installer – CLI Only – V3.0.3 (by rhshourav)
 
 .DESCRIPTION
   - Auto-elevates to Admin (PowerShell 5.1 safe, uses -EncodedCommand)
@@ -29,7 +29,7 @@ NOTES
   - Remote hook execution is OFF by default.
   - Trust is domain-based AND HTTPS-only. Prefer pinning raw GitHub URLs to commit SHA.
 
-V3.0.1 changes:
+V3.0.3 changes:
   - EXE watchdog support (fixes installers that spawn an app and wait for it to exit, e.g., Greenshot):
       * Rule fields:
           WatchCloseProcesses       = @('Greenshot')
@@ -152,6 +152,14 @@ $global:InstallerRules = @(
         MatchType = 'Contains'
         Match     = 'Sophos'
         Args      = @('--quiet')
+        Preselect = $false
+    },
+    [pscustomobject]@{
+        Name      = 'Revo Silent '
+        AppliesTo = 'Exe'
+        MatchType = 'Contains'
+        Match     = 'Revo'
+        Args      = @('/VERYSILENT /SUPPRESSMSGBOXES /NORESTART')
         Preselect = $false
     }
 
@@ -1422,7 +1430,7 @@ function Install-Apps {
 # Main
 # ---------------------------
 Ensure-Admin
-Write-Header 'Auto App Installer V3.0.1 (CLI only) (by rhshourav)'
+Write-Header 'Auto App Installer V3.0.3 (CLI only) (by rhshourav)'
 New-Log
 
 try {
