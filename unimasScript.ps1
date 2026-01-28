@@ -3,11 +3,22 @@
   Author : rhshourav
   GitHub : https://github.com/rhshourav/Windows-Scripts
   Notes  : Auto-elevates once, menu uses single key press (no Enter),
-           launches selected remote scripts in NEW elevated PowerShell windows.
+           launches selected remote scripts in NEW PowerShell windows.
+
+           Integrated: TEMP "Open File - Security Warning" mitigation for UNC EXEs
+           from \\192.168.18.201\it\... by temporarily adding the IP to
+           Local Intranet zone for the lifetime of each launched window.
 #>
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# -----------------------------
+# Configure: LAN host(s) to treat as Local Intranet (TEMP per launched window)
+# -----------------------------
+$TrustedIntranetIPs = @(
+  '192.168.18.201'
+)
 
 # -----------------------------
 # Auto-elevate (once)
@@ -52,10 +63,9 @@ function Show-Logo {
 "@ -ForegroundColor Cyan
 }
 
-
 function Write-Header {
     Clear-Host
-try {
+    try {
         $Host.UI.RawUI.BackgroundColor = 'Black'
         $Host.UI.RawUI.ForegroundColor = 'White'
     } catch {}
@@ -64,7 +74,7 @@ try {
     Show-Logo
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host "                    Windows Scripts (Menu)" -ForegroundColor Cyan
-    Write-Host "Author: rhshourav | GitHub: Windows-Scripts | Version: 1.4.0" -ForegroundColor DarkCyan
+    Write-Host "Author: rhshourav | GitHub: Windows-Scripts | Version: 1.4.1" -ForegroundColor DarkCyan
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Press a key (no Enter).  Q = Quit" -ForegroundColor Green
@@ -119,7 +129,7 @@ function Show-Menu {
 }
 
 # -----------------------------
-# Remote launcher (new elevated window)
+# Remote launcher (new window) + TEMP intranet trust for LAN share
 # -----------------------------
 function Start-RemoteScriptInNewAdminWindow {
     param(
@@ -131,8 +141,33 @@ function Start-RemoteScriptInNewAdminWindow {
         # Use TLS 1.2 on older Win10 builds
         try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
+        # Build a literal array for the child window (e.g. '192.168.18.201','x.x.x.x')
+        $ipsLiteral = ($TrustedIntranetIPs | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ','
+
         $cmd = @"
 `$ErrorActionPreference='Stop';
+
+# ===== TEMP: Add LAN IP(s) to Local Intranet Zone (HKCU) for this window lifetime =====
+`$__TempZoneKeys = New-Object System.Collections.Generic.List[string]
+
+function Add-IntranetIp([string]`$ip) {
+  `$base = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Ranges'
+  `$k = Join-Path `$base ('Range_' + [guid]::NewGuid().ToString('N'))
+  New-Item -Path `$k -Force | Out-Null
+  New-ItemProperty -Path `$k -Name ':Range' -Value `$ip -PropertyType String -Force | Out-Null
+  New-ItemProperty -Path `$k -Name '*'      -Value 1   -PropertyType DWord  -Force | Out-Null  # 1 = Local intranet
+  [void]`$__TempZoneKeys.Add(`$k)
+}
+
+foreach(`$ip in @($ipsLiteral)) { Add-IntranetIp `$ip }
+
+Register-EngineEvent PowerShell.Exiting -MessageData @(`$__TempZoneKeys) -Action {
+  foreach(`$k in `$Event.MessageData) {
+    Remove-Item -Path `$k -Recurse -Force -ErrorAction SilentlyContinue
+  }
+} | Out-Null
+# =====================================================================================
+
 try { [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12 } catch {}
 Write-Host '=== $Title ===' -ForegroundColor Cyan;
 iex (irm '$Url' -UseBasicParsing);
@@ -145,7 +180,9 @@ iex (irm '$Url' -UseBasicParsing);
             "-Command", $cmd
         )
 
-        Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList $argList | Out-Null
+        # You already elevated the menu once. Don’t trigger UAC again per selection.
+        Start-Process -FilePath "powershell.exe" -ArgumentList $argList | Out-Null
+
         Write-Host "`n[+] Launched: $Title" -ForegroundColor Green
     }
     catch {
@@ -163,29 +200,29 @@ $Actions = @{
     '3' = @{ Title="Office LTSC 2021 Install"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/office-Install/oLTSC-2021.ps1" }
     '4' = @{ Title="Microsoft Store For LTSC"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/LTSC-ADD-MS_Store-2019/DL-RUN.ps1" }
     '5' = @{ Title="New Outlook Uninstaller"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/New%20Outlook%20Uninstaller/uninstall-NOU.ps1" }
-    '6' = @{ Title="MS Edge Uninstaller"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/MicroSoft-Edge/edge-Uninstall.ps1"}
-    '7' = @{ Title="MS Edge Installer"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/MicroSoft-Edge/installEdge.ps1"}
+    '6' = @{ Title="MS Edge Uninstaller"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/MicroSoft-Edge/edge-Uninstall.ps1" }
+    '7' = @{ Title="MS Edge Installer"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/MicroSoft-Edge/installEdge.ps1" }
 
     '8' = @{ Title="ERP Setup"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/run_Auto-ERP.ps1" }
     '9' = @{ Title="ERP Font Setup"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/font_install.ps1" }
 
     'A' = @{ Title="Time Sync & Format For All Users"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/timeZoneFormat/timeZoneFormat.ps1" }
-    'B' = @{ Title="IP Config"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/IPConfig/Ipconfig.ps1"}
+    'B' = @{ Title="IP Config"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/IPConfig/Ipconfig.ps1" }
 
     'C' = @{ Title="RICHO B&W"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addRICHO.ps1" }
     'D' = @{ Title="RICHO Color"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addColorRICHO.ps1" }
 
     'E' = @{ Title="Active & Change Edition"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/run" }
-    'F' = @{Title="Extract Drivers"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dExtractor.ps1"}
-    'G' = @{Title="Install Extracted Drivers"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dInstaller.ps1"}
-    'H' = @{Title="Fix Windows Photo Invalid Registry Value"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Photo-Invalid-Reg-Value/winPhotoInvalidRegFix.ps1"}
+    'F' = @{ Title="Extract Drivers"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dExtractor.ps1" }
+    'G' = @{ Title="Install Extracted Drivers"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dInstaller.ps1" }
+    'H' = @{ Title="Fix Windows Photo Invalid Registry Value"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Photo-Invalid-Reg-Value/winPhotoInvalidRegFix.ps1" }
 
     'I' = @{ Title="Windows Tuner"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/wp-Tuner.ps1" }
     'J' = @{ Title="Windows Optimizer"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/Windows-Optimizer.ps1" }
 
     'K' = @{ Title="Disable Windows Update"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Disable-WindowsUpdate.ps1" }
     'L' = @{ Title="Enable Windows Update"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Enable-WindowsUpdate.ps1" }
-    'M' = @{ Title="Upgrade Windows 10 to 11"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/TO-Win11-Auto-Upgrade/Win11-AutoUpgrade.ps1" }
+    'M' = @{ Title="Upgrade Windows 10 to 11"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/TO-Win11-Auto-Upgrade/Win11-AutoUpgrade.ps1" }
 
     'N' = @{ Title="Intel System Interrupt Fix"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/SystemInterrupt-Fix/Intel-SystemInterrupt-Fix.ps1" }
     'O' = @{ Title="WPT Interrupt Fix"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/SystemInterrupt-Fix/wpt_interrupt_fix_plus.ps1" }
