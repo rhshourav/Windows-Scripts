@@ -124,7 +124,7 @@ $global:InstallerRules = @(
         AppliesTo = 'Exe'
         MatchType = 'Contains'
         Match     = 'green'
-        Args      = @('/ALLUSER')
+        Args      = @('/VERYSILENT /ALLUSERS')
         Preselect = $false
     },
     [pscustomobject]@{
