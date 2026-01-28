@@ -58,7 +58,7 @@ Rules control:
 
 ---
 
-## 3) Custom Arguments (EXE/MSI)
+## 3A) Custom Arguments (EXE/MSI)
 
 ### Defaults (when no rule overrides)
 - **EXE default args:** `@('/S')`
@@ -74,6 +74,103 @@ Use tokenized arrays (string[]) whenever possible:
 - Good: `Args = @('/silent','/install')`
 - Avoid: `Args = '/silent /install'`  
   (String args can work, but arrays avoid quoting and spacing issues.)
+Copy/paste the following into your **Developer Note / README**.
+
+---
+
+
+## 3B) EXE Watchdog (Anti-“Installer Waits for App to Exit”)
+
+Some EXE installers **spawn the application at the end** (e.g., `Greenshot.exe`) and then **wait for that spawned process to exit** before the installer itself terminates. Because this framework installs sequentially and waits on processes, the main script appears “stuck” until the launched app is closed.
+
+To handle this, the framework supports an **EXE watchdog**: after the installer starts, it can **close/kill specific processes** if they appear, allowing the installer to exit and the framework to continue.
+
+### Watchdog rule fields (EXE only)
+
+Add these optional fields to a matching EXE rule:
+
+| Field                       | Required | Type       | Purpose |
+| --------------------------- | -------: | ---------- | ------- |
+| `WatchCloseProcesses`       |       No | `string[]` | Process names to close/kill (e.g., `@('Greenshot')`). `.exe` suffix is optional. |
+| `WatchCloseAfterSeconds`    |       No | `int`      | Delay (seconds) after installer start before watchdog triggers (e.g., `8`). |
+| `WatchCloseIncludeExisting` |       No | `bool`     | If `true`, closes even pre-existing processes with that name (prevents deadlocks). If `false`, only targets processes that were not running before install started. |
+
+### How it behaves
+
+- The installer is started normally (no detaching).
+- The framework waits in small intervals.
+- After `WatchCloseAfterSeconds`, the framework:
+  1. attempts a graceful close (`CloseMainWindow()`)
+  2. then force-kills (`Stop-Process -Force`) if still running
+- Once the installer exits, the framework proceeds to the next item.
+
+### When to use
+
+Use watchdog only for installers that:
+- Launch the main app after install **and**
+- Block the installer process from exiting until the app is closed.
+
+### Example: Greenshot
+
+```powershell
+[pscustomobject]@{
+  Name      = 'Greenshot - silent + watchdog'
+  AppliesTo = 'Exe'
+  MatchType = 'Contains'
+  Match     = 'Greenshot'
+  Args      = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/ALLUSERS')
+
+  WatchCloseProcesses       = @('Greenshot')
+  WatchCloseAfterSeconds    = 8
+  WatchCloseIncludeExisting = $true
+}
+````
+
+### Notes / cautions
+
+* **Be specific** with matching (`Match='Greenshot'`) so watchdog doesn’t close unrelated apps.
+* `WatchCloseIncludeExisting=$true` is the “no surprises” option for stubborn installers, but it will also close a user’s already-running instance.
+* If you need to preserve user sessions, set `WatchCloseIncludeExisting=$false` so only newly-started processes are targeted.
+
+````
+
+---
+
+## Update Section 2 “Rule Fields” table (append these rows)
+
+Add these rows to your existing rule fields table:
+
+```md
+| `WatchCloseProcesses`       |       No | string[] | EXE watchdog: process names to close/kill if installer blocks |
+| `WatchCloseAfterSeconds`    |       No | int      | EXE watchdog: seconds before close/kill triggers              |
+| `WatchCloseIncludeExisting` |       No | bool     | EXE watchdog: if true, may close pre-existing processes       |
+````
+
+---
+
+## Update Section 7 “Troubleshooting” (add this subsection)
+
+```md
+### Problem: installer “hangs” until an app is manually closed
+
+**Symptom:**
+- Installer finishes UI/steps, but framework shows “still installing” until you close a launched app.
+
+**Cause:**
+- Installer launched the app and is waiting for it to exit.
+
+**Fix:**
+1. Add a **specific rule** for the installer (e.g., `Match='Greenshot'`).
+2. Set watchdog fields:
+   - `WatchCloseProcesses=@('Greenshot')`
+   - `WatchCloseAfterSeconds=8`
+   - `WatchCloseIncludeExisting=$true` (or `$false` if you want to avoid closing a user’s existing instance)
+
+**Verification:**
+- In “Planned Installation” output, you should see:
+  - `WatchClose: Greenshot` (or equivalent)
+- Meta log should include watchdog markers if you log them (optional enhancement).
+```
 
 ---
 
