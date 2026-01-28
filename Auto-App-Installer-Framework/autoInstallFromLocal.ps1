@@ -1,7 +1,7 @@
 #requires -version 5.1
 <#
 .SYNOPSIS
-  Auto App Installer – CLI Only – v.2.2.3 (by rhshourav)
+  Auto App Installer – CLI Only – V3.0.1 (by rhshourav)
 
 .DESCRIPTION
   - Auto-elevates to Admin (PowerShell 5.1 safe, uses -EncodedCommand)
@@ -29,13 +29,13 @@ NOTES
   - Remote hook execution is OFF by default.
   - Trust is domain-based AND HTTPS-only. Prefer pinning raw GitHub URLs to commit SHA.
 
-v.2.2.3 changes:
-  - MSI modes:
-      * DefaultMsiMode parameter: Silent|Basic|UI
-      * Per-rule override: MsiMode
-      * Sentinel example uses UI mode to avoid silent 1603
-  - Hooks visible:
-      * Pre/Post scripts run in their own visible window (no hidden WindowStyle)
+V3.0.1 changes:
+  - EXE watchdog support (fixes installers that spawn an app and wait for it to exit, e.g., Greenshot):
+      * Rule fields:
+          WatchCloseProcesses       = @('Greenshot')
+          WatchCloseAfterSeconds    = 8
+          WatchCloseIncludeExisting = $true
+      * Installer will be watched; after N seconds the spawned app(s) are closed/killed so installer can exit.
 #>
 
 [CmdletBinding()]
@@ -97,6 +97,11 @@ Rule fields:
   PreUrl    : OPTIONAL. Remote pre-install hook URL (ps1/cmd/bat). Requires -EnableRemotePreInstall
   PostUrl   : OPTIONAL. Remote post-install hook URL (ps1/cmd/bat). Requires -EnableRemotePostInstall
 
+  EXE Watchdog fields (OPTIONAL):
+    WatchCloseProcesses       : string[] process names to close/kill if installer blocks (no .exe required)
+    WatchCloseAfterSeconds    : int seconds after installer start to perform close/kill
+    WatchCloseIncludeExisting : bool; if $true, closes even pre-existing processes with same name
+
 Notes:
   - First-match wins. Put specific rules above general ones.
   - EXE defaults to '/S' when no rule args exist.
@@ -104,10 +109,24 @@ Notes:
       Silent: /i "<msi>" /qn /norestart
       Basic : /i "<msi>" /qb /norestart
       UI    : /i "<msi>" /norestart
-    (MSI always adds /L*V "<log>" unless your rule already specifies /l*)
+    (MSI always adds /L*V "<log>" unless your rule already specifies /l* in FULL mode)
 #>
 
 $global:InstallerRules = @(
+    # --- Greenshot: installer may launch Greenshot and WAIT for it to exit ---
+    [pscustomobject]@{
+        Name      = 'Greenshot - silent + watchdog (avoid installer waiting on app)'
+        AppliesTo = 'Exe'
+        MatchType = 'Contains'
+        Match     = 'Greenshot'
+        Args      = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/ALLUSERS')
+        Preselect = $false
+
+        WatchCloseProcesses       = @('Greenshot')
+        WatchCloseAfterSeconds    = 8
+        WatchCloseIncludeExisting = $true
+    },
+
     # --- FIX for Sentinel: run MSI with UI (no /qn) ---
     [pscustomobject]@{
         Name      = 'Sentinel MSI - UI mode (avoid silent 1603)'
@@ -760,7 +779,6 @@ function Get-PlannedHookInfo {
     }
 }
 
-
 # ---------------------------
 # CLI selection
 # ---------------------------
@@ -790,6 +808,9 @@ function Show-AppsTable {
             }
             if ($Apps[$i].Extension -eq '.msi' -and ($rule.PSObject.Properties.Name -contains 'MsiMode') -and $rule.MsiMode) {
                 $ruleInfo += ('  -> MsiMode: {0}' -f $rule.MsiMode)
+            }
+            if ($Apps[$i].Extension -eq '.exe' -and ($rule.PSObject.Properties.Name -contains 'WatchCloseProcesses') -and $rule.WatchCloseProcesses) {
+                $ruleInfo += ('  -> WatchClose: {0}' -f ((@($rule.WatchCloseProcesses)) -join ','))
             }
         }
 
@@ -949,6 +970,94 @@ function Start-ProcessWait {
     return (Start-Process -FilePath $FilePath -ArgumentList $s -Wait -PassThru)
 }
 
+function Start-ProcessWaitWithWatchdog {
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        $Args,
+
+        [string[]]$WatchCloseProcesses = @(),
+        [int]$WatchCloseAfterSeconds = 0,
+        [bool]$WatchCloseIncludeExisting = $false
+    )
+
+    function _NormalizeProcName([string]$n) {
+        if ([string]::IsNullOrWhiteSpace($n)) { return $null }
+        $n = $n.Trim()
+        if ($n.ToLowerInvariant().EndsWith('.exe')) { $n = $n.Substring(0, $n.Length - 4) }
+        return $n
+    }
+
+    if ($null -eq $WatchCloseProcesses) { $WatchCloseProcesses = @() }
+    $watchNames = @()
+    foreach ($n in @($WatchCloseProcesses)) {
+        $nn = _NormalizeProcName $n
+        if ($nn) { $watchNames += $nn }
+    }
+    $watchNames = @($watchNames | Select-Object -Unique)
+
+    # Snapshot existing PIDs (so we can avoid killing user processes unless explicitly allowed)
+    $existing = @{}
+    foreach ($n in $watchNames) {
+        $pids = @()
+        try { $pids = @(Get-Process -Name $n -ErrorAction SilentlyContinue | ForEach-Object { $_.Id }) } catch {}
+        $existing[$n] = $pids
+    }
+
+    # Start installer (NO -Wait; we wait in slices)
+    if ($null -eq $Args) {
+        $p = Start-Process -FilePath $FilePath -PassThru
+    }
+    elseif ($Args -is [System.Array]) {
+        if ($Args.Count -eq 0) { $p = Start-Process -FilePath $FilePath -PassThru }
+        else { $p = Start-Process -FilePath $FilePath -ArgumentList $Args -PassThru }
+    }
+    else {
+        $s = [string]$Args
+        if ([string]::IsNullOrWhiteSpace($s)) { $p = Start-Process -FilePath $FilePath -PassThru }
+        else { $p = Start-Process -FilePath $FilePath -ArgumentList $s -PassThru }
+    }
+
+    $start = Get-Date
+    $kicked = $false
+
+    while ($true) {
+        try {
+            if ($p.WaitForExit(500)) { break }
+        } catch {
+            break
+        }
+
+        if (-not $kicked -and $watchNames.Count -gt 0 -and $WatchCloseAfterSeconds -gt 0) {
+            $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalSeconds
+            if ($elapsed -ge $WatchCloseAfterSeconds) {
+                foreach ($n in $watchNames) {
+                    $targets = @()
+                    try { $targets = @(Get-Process -Name $n -ErrorAction SilentlyContinue) } catch {}
+
+                    foreach ($tp in $targets) {
+                        $shouldClose = $true
+                        if (-not $WatchCloseIncludeExisting) {
+                            if ($existing.ContainsKey($n) -and ($existing[$n] -contains $tp.Id)) {
+                                $shouldClose = $false
+                            }
+                        }
+
+                        if ($shouldClose) {
+                            try { [void]$tp.CloseMainWindow() } catch {}
+                            Start-Sleep -Milliseconds 600
+                            try { Stop-Process -Id $tp.Id -Force -ErrorAction SilentlyContinue } catch {}
+                        }
+                    }
+                }
+                $kicked = $true
+            }
+        }
+    }
+
+    try { $p.WaitForExit() } catch {}
+    return $p
+}
+
 function Get-InstallSpec {
     param([System.IO.FileInfo]$App)
 
@@ -1068,6 +1177,24 @@ function Build-MsiexecArgs {
 function Get-InstallRunSpec {
     param([Parameter(Mandatory)][System.IO.FileInfo]$App)
 
+    # Defaults for ALL app types (prevents StrictMode issues)
+    $watchNames = @()
+    $watchAfter = 0
+    $watchExisting = $false
+
+    $rule = Get-MatchingRule -App $App
+    if ($rule) {
+        if ($rule.PSObject.Properties.Name -contains 'WatchCloseProcesses') {
+            $watchNames = @($rule.WatchCloseProcesses)
+        }
+        if ($rule.PSObject.Properties.Name -contains 'WatchCloseAfterSeconds') {
+            $watchAfter = [int]$rule.WatchCloseAfterSeconds
+        }
+        if ($rule.PSObject.Properties.Name -contains 'WatchCloseIncludeExisting') {
+            $watchExisting = [bool]$rule.WatchCloseIncludeExisting
+        }
+    }
+
     if ($App.Extension -ne '.msi') {
         $spec = Get-InstallSpec -App $App
         return [pscustomobject]@{
@@ -1076,10 +1203,13 @@ function Get-InstallRunSpec {
             PayloadPath = $App.FullName
             LogPath     = ''
             MsiMode     = ''
+
+            WatchCloseProcesses       = $watchNames
+            WatchCloseAfterSeconds    = $watchAfter
+            WatchCloseIncludeExisting = $watchExisting
         }
     }
 
-    $rule = Get-MatchingRule -App $App
     if ($rule) { Log-Line INFO ("RuleMatch={0} App={1}" -f $rule.Name, $App.Name) }
 
     $mode = Get-MsiModeForApp -App $App
@@ -1108,6 +1238,10 @@ function Get-InstallRunSpec {
         PayloadPath = $payload.FullName
         LogPath     = $msiLog
         MsiMode     = $mode
+
+        WatchCloseProcesses       = @()   # not used for MSI (kept for shape consistency)
+        WatchCloseAfterSeconds    = 0
+        WatchCloseIncludeExisting = $false
     }
 }
 
@@ -1132,6 +1266,13 @@ function Install-Apps {
             Write-Host (' - {0}  -> {1} {2}' -f $a.Name, $spec.File, $argsText) -ForegroundColor Green
         } else {
             Write-Host (' - {0}  -> {1}' -f $a.Name, $spec.File) -ForegroundColor Green
+        }
+
+        $rule = Get-MatchingRule -App $a
+        if ($a.Extension -eq '.exe' -and $rule -and ($rule.PSObject.Properties.Name -contains 'WatchCloseProcesses') -and $rule.WatchCloseProcesses) {
+            $wa = 0
+            if ($rule.PSObject.Properties.Name -contains 'WatchCloseAfterSeconds') { $wa = [int]$rule.WatchCloseAfterSeconds }
+            Write-Host ("   Watchdog: Close/Kill [{0}] after {1}s" -f ((@($rule.WatchCloseProcesses)) -join ','), $wa) -ForegroundColor DarkGray
         }
 
         $pre  = Get-PlannedHookInfo -App $a -Stage 'Pre'
@@ -1212,13 +1353,25 @@ function Install-Apps {
         Write-Info ('Installing: {0}' -f $app.Name)
         if ($app.Extension -eq '.msi') {
             Write-Info ("MSI mode: {0}" -f $run.MsiMode)
+        } elseif ($run.WatchCloseProcesses -and $run.WatchCloseProcesses.Count -gt 0 -and $run.WatchCloseAfterSeconds -gt 0) {
+            Write-Info ("Watchdog: will close/kill [{0}] after {1}s" -f (($run.WatchCloseProcesses) -join ','), $run.WatchCloseAfterSeconds)
         }
+
         Log-Line INFO ('InstallStart={0}' -f $app.FullName)
         Log-Line INFO ('Command={0} {1}' -f $run.File, $cmdArgs)
         if ($row.InstallerLog) { Log-Line INFO ("MsiLog={0}" -f $row.InstallerLog) }
+        if ($app.Extension -eq '.exe' -and $run.WatchCloseProcesses -and $run.WatchCloseProcesses.Count -gt 0 -and $run.WatchCloseAfterSeconds -gt 0) {
+            Log-Line INFO ("Watchdog CloseAfter={0}s IncludeExisting={1} Targets={2}" -f $run.WatchCloseAfterSeconds, $run.WatchCloseIncludeExisting, (($run.WatchCloseProcesses) -join ','))
+        }
 
         try {
-            $p = Start-ProcessWait -FilePath $run.File -Args $run.Args
+            $p = Start-ProcessWaitWithWatchdog `
+                -FilePath $run.File `
+                -Args $run.Args `
+                -WatchCloseProcesses $run.WatchCloseProcesses `
+                -WatchCloseAfterSeconds $run.WatchCloseAfterSeconds `
+                -WatchCloseIncludeExisting $run.WatchCloseIncludeExisting
+
             $code = $p.ExitCode
             $row.ExitCode = $code
 
@@ -1269,7 +1422,7 @@ function Install-Apps {
 # Main
 # ---------------------------
 Ensure-Admin
-Write-Header 'Auto App Installer v.2.2.3 (CLI only) (by rhshourav)'
+Write-Header 'Auto App Installer V3.0.1 (CLI only) (by rhshourav)'
 New-Log
 
 try {
