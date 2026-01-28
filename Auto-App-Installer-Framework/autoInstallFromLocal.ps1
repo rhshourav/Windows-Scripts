@@ -132,7 +132,7 @@ $global:InstallerRules = @(
         AppliesTo = 'Exe'
         MatchType = 'Contains'
         Match     = 'Sophos'
-        Args      = @('/quiet')
+        Args      = @('--quiet')
         Preselect = $false
     }
 
