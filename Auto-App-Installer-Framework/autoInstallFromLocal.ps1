@@ -139,11 +139,11 @@ $global:InstallerRules = @(
     },
 
     [pscustomobject]@{
-        Name      = 'Green apps: all users'
+        Name      = 'PDF Factory '
         AppliesTo = 'Exe'
         MatchType = 'Contains'
-        Match     = 'green'
-        Args      = @('/VERYSILENT /ALLUSERS')
+        Match     = 'pdf'
+        Args      = @('/quiet /nodisp /reboot=0')
         Preselect = $false
     },
     [pscustomobject]@{
