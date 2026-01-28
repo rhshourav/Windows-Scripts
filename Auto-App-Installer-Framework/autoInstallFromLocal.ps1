@@ -142,7 +142,7 @@ $global:InstallerRules = @(
         Name      = 'PDF Factory '
         AppliesTo = 'Exe'
         MatchType = 'Contains'
-        Match     = 'pdf'
+        Match     = 'pdfpro'
         Args      = @('/quiet /nodisp /reboot=0')
         Preselect = $false
     },
