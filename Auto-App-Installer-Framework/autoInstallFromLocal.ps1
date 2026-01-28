@@ -1,7 +1,7 @@
 #requires -version 5.1
 <#
 .SYNOPSIS
-  Auto App Installer – CLI Only – V3.0.3 (by rhshourav)
+  Auto App Installer – CLI Only – V4.0.0 (by rhshourav)
 
 .DESCRIPTION
   - Auto-elevates to Admin (PowerShell 5.1 safe, uses -EncodedCommand)
@@ -29,13 +29,17 @@ NOTES
   - Remote hook execution is OFF by default.
   - Trust is domain-based AND HTTPS-only. Prefer pinning raw GitHub URLs to commit SHA.
 
-V3.0.3 changes:
+V4.0.0 changes:
   - EXE watchdog support (fixes installers that spawn an app and wait for it to exit, e.g., Greenshot):
       * Rule fields:
           WatchCloseProcesses       = @('Greenshot')
           WatchCloseAfterSeconds    = 8
           WatchCloseIncludeExisting = $true
       * Installer will be watched; after N seconds the spawned app(s) are closed/killed so installer can exit.
+
+Additional change (per request):
+  - Selected installers are staged to %TEMP% (EXE/MSI) and executed from there.
+  - Sidecar files from the installer directory are copied alongside (excluding other .exe/.msi).
 #>
 
 [CmdletBinding()]
@@ -564,8 +568,6 @@ function Invoke-HookScript {
         $ext = $ScriptFile.Extension.ToLowerInvariant()
         $p = $null
 
-        # Visible, independent window (no Hidden). If you want it to stay open,
-        # add Read-Host/pause inside your hook script itself.
         if ($ext -eq '.ps1') {
             $p = Start-Process -FilePath 'powershell.exe' -ArgumentList @(
                 '-NoProfile',
@@ -983,6 +985,8 @@ function Start-ProcessWaitWithWatchdog {
         [Parameter(Mandatory)][string]$FilePath,
         $Args,
 
+        [string]$WorkingDirectory = '',
+
         [string[]]$WatchCloseProcesses = @(),
         [int]$WatchCloseAfterSeconds = 0,
         [bool]$WatchCloseIncludeExisting = $false
@@ -1003,7 +1007,7 @@ function Start-ProcessWaitWithWatchdog {
     }
     $watchNames = @($watchNames | Select-Object -Unique)
 
-    # Snapshot existing PIDs (so we can avoid killing user processes unless explicitly allowed)
+    # Snapshot existing PIDs
     $existing = @{}
     foreach ($n in $watchNames) {
         $pids = @()
@@ -1012,17 +1016,25 @@ function Start-ProcessWaitWithWatchdog {
     }
 
     # Start installer (NO -Wait; we wait in slices)
+    $sp = @{
+        FilePath = $FilePath
+        PassThru = $true
+    }
+    if (-not [string]::IsNullOrWhiteSpace($WorkingDirectory)) {
+        $sp.WorkingDirectory = $WorkingDirectory
+    }
+
     if ($null -eq $Args) {
-        $p = Start-Process -FilePath $FilePath -PassThru
+        $p = Start-Process @sp
     }
     elseif ($Args -is [System.Array]) {
-        if ($Args.Count -eq 0) { $p = Start-Process -FilePath $FilePath -PassThru }
-        else { $p = Start-Process -FilePath $FilePath -ArgumentList $Args -PassThru }
+        if ($Args.Count -eq 0) { $p = Start-Process @sp }
+        else { $p = Start-Process @sp -ArgumentList $Args }
     }
     else {
         $s = [string]$Args
-        if ([string]::IsNullOrWhiteSpace($s)) { $p = Start-Process -FilePath $FilePath -PassThru }
-        else { $p = Start-Process -FilePath $FilePath -ArgumentList $s -PassThru }
+        if ([string]::IsNullOrWhiteSpace($s)) { $p = Start-Process @sp }
+        else { $p = Start-Process @sp -ArgumentList $s }
     }
 
     $start = Get-Date
@@ -1109,6 +1121,8 @@ function Test-IsUncPath {
     param([Parameter(Mandatory)][string]$Path)
     return ($Path.StartsWith('\\'))
 }
+
+# STAGING: installer -> %TEMP% and copy sidecars (excluding other .exe/.msi)
 function Stage-FileToTemp {
     param(
         [Parameter(Mandatory)][System.IO.FileInfo]$File,
@@ -1119,18 +1133,42 @@ function Stage-FileToTemp {
     New-Item -Path $root -ItemType Directory -Force | Out-Null
 
     $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-    $dst   = Join-Path $root ("{0}_{1}" -f $stamp, $File.Name)
+    $safe  = ($File.BaseName -replace '[^\w\.\-]+','_')
+    $dstDir = Join-Path $root ("{0}_{1}" -f $stamp, $safe)
+    New-Item -Path $dstDir -ItemType Directory -Force | Out-Null
+
+    $dstFile = Join-Path $dstDir $File.Name
 
     for ($i=1; $i -le 3; $i++) {
         try {
-            Copy-Item -LiteralPath $File.FullName -Destination $dst -Force -ErrorAction Stop
-            return (Get-Item -LiteralPath $dst -ErrorAction Stop)
+            Copy-Item -LiteralPath $File.FullName -Destination $dstFile -Force -ErrorAction Stop
+            break
         } catch {
             if ($i -eq 3) { throw }
             Start-Sleep -Milliseconds 500
         }
     }
+
+    try {
+        $srcDir = $File.DirectoryName
+        $sidecars = @(Get-ChildItem -LiteralPath $srcDir -File -ErrorAction SilentlyContinue | Where-Object {
+            $_.FullName -ne $File.FullName -and $_.Extension -notin '.exe', '.msi'
+        })
+
+        foreach ($sc in $sidecars) {
+            try {
+                Copy-Item -LiteralPath $sc.FullName -Destination (Join-Path $dstDir $sc.Name) -Force -ErrorAction Stop
+            } catch {
+                try { Log-Line WARN ("StageSidecarCopyFail File={0} Sidecar={1} Error={2}" -f $File.Name, $sc.Name, $_.Exception.Message) } catch {}
+            }
+        }
+    } catch {
+        try { Log-Line WARN ("StageSidecarEnumFail File={0} Error={1}" -f $File.Name, $_.Exception.Message) } catch {}
+    }
+
+    return (Get-Item -LiteralPath $dstFile -ErrorAction Stop)
 }
+
 function New-MsiLogPath {
     param([Parameter(Mandatory)][System.IO.FileInfo]$App)
     $root = Join-Path $env:TEMP 'rhshourav\WindowsScripts\MsiLogs'
@@ -1203,14 +1241,23 @@ function Get-InstallRunSpec {
         }
     }
 
+    # --- EXE: ALWAYS stage to TEMP and execute from there ---
     if ($App.Extension -ne '.msi') {
+        Write-Info ("Staging EXE to TEMP: {0}" -f $App.Name)
+        Log-Line INFO ("ExeStageStart From={0}" -f $App.FullName)
+
+        $payload = Stage-FileToTemp -File $App -StageTag 'EXE'
+
+        Log-Line OK ("ExeStagedTo={0}" -f $payload.FullName)
+
         $spec = Get-InstallSpec -App $App
         return [pscustomobject]@{
-            File        = [string]$spec.File
+            File        = [string]$payload.FullName
             Args        = $spec.Args
-            PayloadPath = $App.FullName
+            PayloadPath = $payload.FullName
             LogPath     = ''
             MsiMode     = ''
+            WorkingDir  = $payload.DirectoryName
 
             WatchCloseProcesses       = $watchNames
             WatchCloseAfterSeconds    = $watchAfter
@@ -1218,17 +1265,17 @@ function Get-InstallRunSpec {
         }
     }
 
+    # --- MSI: ALWAYS stage to TEMP and run msiexec against staged MSI ---
     if ($rule) { Log-Line INFO ("RuleMatch={0} App={1}" -f $rule.Name, $App.Name) }
 
     $mode = Get-MsiModeForApp -App $App
 
-    $payload = $App
-    if (Test-IsUncPath -Path $App.FullName) {
-        Write-Info ("Staging MSI locally (UNC detected): {0}" -f $App.FullName)
-        Log-Line INFO ("MsiStageStart={0}" -f $App.FullName)
-        $payload = Stage-FileToTemp -File $App -StageTag 'MSI'
-        Log-Line OK ("MsiStagedTo={0}" -f $payload.FullName)
-    }
+    Write-Info ("Staging MSI to TEMP: {0}" -f $App.Name)
+    Log-Line INFO ("MsiStageStart From={0}" -f $App.FullName)
+
+    $payload = Stage-FileToTemp -File $App -StageTag 'MSI'
+
+    Log-Line OK ("MsiStagedTo={0}" -f $payload.FullName)
 
     $msiLog = New-MsiLogPath -App $App
     $msiExe = Get-MsiexecPath
@@ -1246,8 +1293,9 @@ function Get-InstallRunSpec {
         PayloadPath = $payload.FullName
         LogPath     = $msiLog
         MsiMode     = $mode
+        WorkingDir  = $payload.DirectoryName
 
-        WatchCloseProcesses       = @()   # not used for MSI (kept for shape consistency)
+        WatchCloseProcesses       = @()
         WatchCloseAfterSeconds    = 0
         WatchCloseIncludeExisting = $false
     }
@@ -1331,7 +1379,7 @@ function Install-Apps {
             }
         }
 
-        # Pre-install hook
+        # Pre-install hook (runs from original installer folder)
         $preOk = $true
         try {
             $preOk = Run-PreInstallIfAvailable -App $app -RowRef ([ref]$row)
@@ -1350,7 +1398,7 @@ function Install-Apps {
             continue
         }
 
-        # Install (MSI hardened + MSI mode)
+        # Install (staged EXE/MSI)
         $run = Get-InstallRunSpec -App $app
         $row.PayloadPath  = $run.PayloadPath
         $row.InstallerLog = $run.LogPath
@@ -1366,7 +1414,9 @@ function Install-Apps {
         }
 
         Log-Line INFO ('InstallStart={0}' -f $app.FullName)
+        Log-Line INFO ('StagedPayload={0}' -f $run.PayloadPath)
         Log-Line INFO ('Command={0} {1}' -f $run.File, $cmdArgs)
+        if ($run.WorkingDir) { Log-Line INFO ("WorkingDir={0}" -f $run.WorkingDir) }
         if ($row.InstallerLog) { Log-Line INFO ("MsiLog={0}" -f $row.InstallerLog) }
         if ($app.Extension -eq '.exe' -and $run.WatchCloseProcesses -and $run.WatchCloseProcesses.Count -gt 0 -and $run.WatchCloseAfterSeconds -gt 0) {
             Log-Line INFO ("Watchdog CloseAfter={0}s IncludeExisting={1} Targets={2}" -f $run.WatchCloseAfterSeconds, $run.WatchCloseIncludeExisting, (($run.WatchCloseProcesses) -join ','))
@@ -1376,6 +1426,7 @@ function Install-Apps {
             $p = Start-ProcessWaitWithWatchdog `
                 -FilePath $run.File `
                 -Args $run.Args `
+                -WorkingDirectory $run.WorkingDir `
                 -WatchCloseProcesses $run.WatchCloseProcesses `
                 -WatchCloseAfterSeconds $run.WatchCloseAfterSeconds `
                 -WatchCloseIncludeExisting $run.WatchCloseIncludeExisting
@@ -1424,13 +1475,14 @@ function Install-Apps {
     Write-Host ('All done. Transcript: {0}' -f $global:LogFile) -ForegroundColor Cyan
     Write-Host ('Meta log   : {0}' -f $global:MetaLog) -ForegroundColor Cyan
     Write-Host ('MSI logs   : {0}' -f (Join-Path $env:TEMP 'rhshourav\WindowsScripts\MsiLogs')) -ForegroundColor Cyan
+    Write-Host ('Staging dir: {0}' -f (Join-Path $env:TEMP 'rhshourav\WindowsScripts\Staging')) -ForegroundColor Cyan
 }
 
 # ---------------------------
 # Main
 # ---------------------------
 Ensure-Admin
-Write-Header 'Auto App Installer V3.0.3 (CLI only) (by rhshourav)'
+Write-Header 'Auto App Installer V4.0.0 (CLI only) (by rhshourav)'
 New-Log
 
 try {
