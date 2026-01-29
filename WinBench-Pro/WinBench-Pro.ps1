@@ -118,43 +118,135 @@ function Ensure-Admin {
 function Enable-Tls12 {
   try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 }
-function Invoke-Download([string]$Url, [string]$OutFile) {
+function Invoke-Download {
+  param(
+    [Parameter(Mandatory=$true)][string]$Url,
+    [Parameter(Mandatory=$true)][string]$OutFile,
+    [int]$StallSeconds = 120
+  )
+
   Enable-Tls12
-  INF "Downloading: $Url"
-  try {
-    if (Get-Command Invoke-WebRequest -ErrorAction SilentlyContinue) {
-      Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $OutFile
-    } else {
-      $wc = New-Object Net.WebClient
-      $wc.DownloadFile($Url, $OutFile)
+
+  $tmp = $OutFile + ".part"
+  try { Remove-Item $tmp -Force -ErrorAction SilentlyContinue } catch {}
+
+  # --- Prefer BITS (most reliable on Windows) ---
+  if (Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue) {
+    try {
+      INF "Downloading (BITS): $Url"
+      $job = Start-BitsTransfer -Source $Url -Destination $tmp -Asynchronous -DisplayName "WinBench-Pro" -Description "Download"
+
+      $lastBytes = -1L
+      $stall = 0
+
+      while ($job.JobState -in @("Connecting","Transferring")) {
+        Start-Sleep -Seconds 1
+        $job = Get-BitsTransfer -Id $job.Id
+
+        $bt = [double]$job.BytesTransferred
+        $tt = [double]$job.BytesTotal
+
+        $pct = if ($tt -gt 0) { [math]::Round(($bt/$tt)*100,1) } else { 0 }
+        $mbt = [math]::Round($bt/1MB,1)
+        $mbt2= if ($tt -gt 0) { [math]::Round($tt/1MB,1) } else { 0 }
+
+        if ($bt -eq $lastBytes) { $stall++ } else { $stall = 0; $lastBytes = [int64]$bt }
+        if ($stall -ge $StallSeconds) { throw "Download stalled for ~${StallSeconds}s (no progress)." }
+
+        if ($tt -gt 0) {
+          Write-Host -NoNewline ("`r[i]  Downloading... {0}% ({1} MB / {2} MB)" -f $pct,$mbt,$mbt2)
+        } else {
+          Write-Host -NoNewline ("`r[i]  Downloading... {0} MB" -f $mbt)
+        }
+      }
+
+      Write-Host ""
+
+      if ($job.JobState -eq "Transferred") {
+        Complete-BitsTransfer -BitsJob $job
+        Move-Item $tmp $OutFile -Force
+        OK "Saved: $OutFile"
+        return $true
+      }
+
+      throw "BITS ended in state: $($job.JobState)"
+    } catch {
+      Write-Host ""
+      WRN "BITS download failed: $($_.Exception.Message)"
+      try { if ($job) { Remove-BitsTransfer -BitsJob $job -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } } catch {}
+      try { Remove-Item $tmp -Force -ErrorAction SilentlyContinue } catch {}
+      WRN "Falling back to stream download..."
     }
+  }
+
+  # --- Stream fallback (shows progress) ---
+  INF "Downloading (stream): $Url"
+  $resp = $null; $in = $null; $fs = $null
+  try {
+    $req = [System.Net.HttpWebRequest]::Create($Url)
+    $req.Method = "GET"
+    $req.UserAgent = "WinBench-Pro/$ScriptVersion"
+    $req.AllowAutoRedirect = $true
+    $req.Timeout = 30000
+    $req.ReadWriteTimeout = 30000
+
+    $resp = $req.GetResponse()
+    $total = [int64]$resp.ContentLength
+
+    $in = $resp.GetResponseStream()
+    $fs = New-Object System.IO.FileStream($tmp, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
+
+    $buf = New-Object byte[] (1024*1024)
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+    $downloaded = 0L
+    $lastReportSec = -1
+    $lastBytes = 0L
+    $stall = 0
+
+    while (($read = $in.Read($buf,0,$buf.Length)) -gt 0) {
+      $fs.Write($buf,0,$read)
+      $downloaded += $read
+
+      $sec = [int]$sw.Elapsed.TotalSeconds
+      if ($sec -ne $lastReportSec) {
+        $lastReportSec = $sec
+
+        $mb = [math]::Round($downloaded/1MB,1)
+        $mbTot = if ($total -gt 0) { [math]::Round($total/1MB,1) } else { 0 }
+        $pct = if ($total -gt 0) { [math]::Round(($downloaded/$total)*100,1) } else { 0 }
+
+        $speed = ($downloaded - $lastBytes) / 1MB
+        $lastBytes = $downloaded
+
+        if ($speed -le 0) { $stall++ } else { $stall = 0 }
+        if ($stall -ge $StallSeconds) { throw "Download stalled for ~${StallSeconds}s (no progress)." }
+
+        if ($total -gt 0) {
+          Write-Host -NoNewline ("`r[i]  Downloading... {0}% ({1} MB / {2} MB) {3} MB/s" -f $pct,$mb,$mbTot,[math]::Round($speed,1))
+        } else {
+          Write-Host -NoNewline ("`r[i]  Downloading... {0} MB  {1} MB/s" -f $mb,[math]::Round($speed,1))
+        }
+      }
+    }
+
+    Write-Host ""
+    $fs.Close(); $in.Close(); $resp.Close()
+    Move-Item $tmp $OutFile -Force
     OK "Saved: $OutFile"
     return $true
   } catch {
-    WRN "Download failed: $($_.Exception.Message)"
+    Write-Host ""
+    WRN "Stream download failed: $($_.Exception.Message)"
     return $false
+  } finally {
+    try { if ($fs) { $fs.Dispose() } } catch {}
+    try { if ($in) { $in.Dispose() } } catch {}
+    try { if ($resp) { $resp.Dispose() } } catch {}
+    try { Remove-Item $tmp -Force -ErrorAction SilentlyContinue } catch {}
   }
 }
 
-function Expand-ZipPortable([string]$ZipPath, [string]$DestDir) {
-  if (!(Test-Path $DestDir)) { New-Item -ItemType Directory -Path $DestDir | Out-Null }
-  try {
-    if (Get-Command Expand-Archive -ErrorAction SilentlyContinue) {
-      Expand-Archive -LiteralPath $ZipPath -DestinationPath $DestDir -Force
-      return $true
-    }
-  } catch {}
-  try {
-    $shell = New-Object -ComObject Shell.Application
-    $zip = $shell.NameSpace($ZipPath)
-    $dst = $shell.NameSpace($DestDir)
-    if ($zip -and $dst) {
-      $dst.CopyHere($zip.Items(), 0x14) # no UI
-      return $true
-    }
-  } catch {}
-  return $false
-}
 
 # -----------------------------
 # Run capture helper
@@ -344,7 +436,23 @@ function Ensure-FFmpeg {
   if ($NoDownload) { WRN "FFmpeg missing and downloads disabled."; return $null }
 
   $zip = Join-Path $OutRoot "ffmpeg-release-essentials.zip"
-  $url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+  $zip = Join-Path $OutRoot "ffmpeg.zip"
+
+$urls = @(
+  # gyan.dev essentials: compatible with older Windows (vendor states Win7+) :contentReference[oaicite:0]{index=0}
+  "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+
+  # GitHub fallback (BtbN). If your network blocks gyan.dev, this often works. :contentReference[oaicite:1]{index=1}
+  "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+)
+
+$ok = $false
+foreach ($u in $urls) {
+  if (Invoke-Download $u $zip) { $ok = $true; break }
+}
+
+if (-not $ok) { return $null }
+
   if (-not (Invoke-Download $url $zip)) { return $null }
 
   $tmp = Join-Path $OutRoot "ffmpeg_extract"
@@ -871,6 +979,75 @@ function Render-TerminalSummary {
     W (("{0,-$maxCat}  {1,-$maxTest}  {2}" -f $row.Category, $row.Test, $row.Metrics)) $C_DIM
   }
 }
+function Render-ShortSummary {
+  Write-Rule "Short Summary"
+
+  # Helper: find first matching test result by name contains text
+  function Find-One([string]$contains) {
+    foreach ($r in $Global:Results) {
+      if (($r.Name -as [string]) -and $r.Name.ToLower().Contains($contains.ToLower())) { return $r }
+    }
+    return $null
+  }
+
+  # RAM
+  $ram = Find-One "winsat mem (bandwidth)"
+  if ($ram -and $ram.Metrics.ContainsKey("MBps")) {
+    OK ("RAM bandwidth: {0} MB/s (WinSAT)" -f $ram.Metrics["MBps"])
+  } else {
+    WRN "RAM bandwidth: N/A"
+  }
+
+  # Storage: pick best DiskSpd SeqRead across drives, if present
+  $seqReads = @()
+  foreach ($r in $Global:Results) {
+    if (($r.Name -as [string]) -and $r.Name -match "DiskSpd SeqRead 1MiB") {
+      if ($r.Metrics -and $r.Metrics.ContainsKey("MBps")) { $seqReads += $r }
+    }
+  }
+  if ($seqReads.Count -gt 0) {
+    $best = $seqReads | Sort-Object { $_.Metrics["MBps"] } -Descending | Select-Object -First 1
+    OK ("Storage best SeqRead: {0} MB/s  ({1})" -f $best.Metrics["MBps"], $best.Name)
+  } else {
+    # fallback: WinSAT disk
+    $wd = Find-One "winsat disk"
+    if ($wd -and $wd.Metrics.ContainsKey("DiskSeq_MBps")) {
+      OK ("Storage sequential: {0} MB/s (WinSAT)" -f $wd.Metrics["DiskSeq_MBps"])
+    } else {
+      WRN "Storage sequential: N/A"
+    }
+  }
+
+  # CPU: pick libx264 baseline
+  $cpu = Find-One "ffmpeg cpu libx264 (veryfast"
+  if ($cpu -and $cpu.Metrics.ContainsKey("FPS")) {
+    OK ("CPU encode (x264 veryfast): {0} fps | {1}x" -f $cpu.Metrics["FPS"], $cpu.Metrics["SpeedX"])
+  } else {
+    WRN "CPU encode (x264): N/A"
+  }
+
+  # GPU: best hardware encoder (NVENC/QSV/AMF) if present
+  $gpuEnc = @()
+  foreach ($r in $Global:Results) {
+    if (($r.Name -as [string]) -and ($r.Name -match "FFmpeg GPU")) {
+      if ($r.Metrics -and $r.Metrics.ContainsKey("FPS")) { $gpuEnc += $r }
+    }
+  }
+  if ($gpuEnc.Count -gt 0) {
+    $bestG = $gpuEnc | Sort-Object { $_.Metrics["FPS"] } -Descending | Select-Object -First 1
+    OK ("GPU encode best: {0} fps | {1}x  ({2})" -f $bestG.Metrics["FPS"], $bestG.Metrics["SpeedX"], $bestG.Name)
+  } else {
+    INF "GPU encode: no HW encoder test available (NVENC/QSV/AMF not detected or FFmpeg missing)."
+  }
+
+  # Artifacts quick pointers
+  W "" $C_DIM
+  INF ("TXT  : {0}" -f $TxtReport)
+  INF ("HTML : {0}" -f $HtmlReport)
+  if ($Global:TraceState.CountersOut) { INF ("Counters: {0}" -f $Global:TraceState.CountersOut) }
+  if ($Global:TraceState.WprEtl)      { INF ("WPR ETL : {0}" -f $Global:TraceState.WprEtl) }
+  if ($Global:TraceState.ProcmonPml)  { INF ("Procmon : {0}" -f $Global:TraceState.ProcmonPml) }
+}
 
 function Save-TextReport {
   $os  = Get-OsInfo
@@ -1087,6 +1264,8 @@ if ($sel.Count -eq 0) {
   }
 
   Render-TerminalSummary
+Render-ShortSummary
+
 
   if ($Report -in @("Text","Both")) { Save-TextReport }
   if ($Report -in @("Html","Both")) { Save-HtmlReport }
