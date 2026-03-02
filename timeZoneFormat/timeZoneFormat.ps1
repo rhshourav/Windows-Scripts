@@ -353,7 +353,7 @@ function Force-TimeSync([int]$TimeoutSeconds) {
   $svc = Get-Service -Name w32time -ErrorAction Stop
   if ($svc.Status -ne "Running") { Start-Service -Name w32time }
 
-  $peers = "time.windows.com,0x9 pool.ntp.org,0x9"
+  $peers = "time.google.com,0x9 time.windows.com,0x9 pool.ntp.org,0x9"
   Write-Info "Configuring NTP peers (best-effort): $peers"
   try {
     & w32tm /config /manualpeerlist:$peers /syncfromflags:manual /reliable:no /update | Out-Null
