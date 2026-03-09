@@ -14,9 +14,18 @@ $modules = @(
 )
 
 foreach ($m in $modules) {
-    irm "$repo/$m" | iex
-}
 
+    $url = "$repo/$m"
+
+    try {
+        irm $url -ErrorAction Stop | iex
+        Write-Host "[Loaded] $m"
+    }
+    catch {
+        Write-Host "[FAILED] $m not found on GitHub"
+    }
+
+}
 function Show-Menu {
 
     Write-Host ""
