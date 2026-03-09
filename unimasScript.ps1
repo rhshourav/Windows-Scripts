@@ -84,7 +84,7 @@ function Write-Header {
     Show-Logo
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host "                    Windows Scripts (Menu)" -ForegroundColor Cyan
-    Write-Host "Author: rhshourav | GitHub: Windows-Scripts | Version: 1.5.1" -ForegroundColor DarkCyan
+    Write-Host "Author: rhshourav | GitHub: Windows-Scripts | Version: 1.5.2" -ForegroundColor DarkCyan
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Press a key (no Enter).  Q = Quit" -ForegroundColor Green
@@ -211,7 +211,7 @@ $Actions = @{
     'B' = @{ Title="Time/Zone Formatter"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/timeZoneFormat/timeZoneFormat.ps1" }
     'C' = @{ Title="IP Config Tool"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/IPConfig/Ipconfig.ps1"}
     'D' = @{ Title="Disk Manager"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/DiskManager/diskmgr.ps1" }
-    'E' = @{ Title="Install MediCatUSB"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Install-MediCatUSB/Run-MediCat.ps1" }
+    'E' = @{ Title="Install MediCatUSB"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Install-MediCatUSB/installMUSVB.ps1" }
 
     # Maintenance & Optimization
     'F' = @{ Title="Windows Tuner"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/wp-Tuner.ps1" }
