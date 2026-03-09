@@ -1,181 +1,294 @@
 #Requires -RunAsAdministrator
+[Console]::OutputEncoding=[System.Text.Encoding]::UTF8
+chcp 65001 > $null
 
-$LogFile="$env:ProgramData\psdiskmgr.log"
+$Author="rhshourav"
+$Version="2.0.1"
 
-function Log($msg){
-    $time=(Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-    "$time $msg" | Out-File $LogFile -Append
+$LogDir="$env:USERPROFILE\Documents\rhshourav\windowsScripts\logs"
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+$LogFile="$LogDir\diskmgr.log"
+
+function Log($m){
+$t=(Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+"$t | $m" | Out-File $LogFile -Append
 }
 
-function Pause { Read-Host "Press Enter" }
+function Banner{
 
-function Header {
-    Clear-Host
-    Write-Host "PowerShell Disk Manager" -ForegroundColor Cyan
-    Write-Host "================================="
+Clear-Host
+Write-Host "===========================================" -ForegroundColor Cyan
+Write-Host "        Windows Scripts Disk Manager       "
+Write-Host "==========================================="
+Write-Host "Author  : $Author"
+Write-Host "Version : $Version"
+Write-Host ""
+
 }
 
-function Get-SystemDisk {
-    (Get-Partition -DriveLetter $env:SystemDrive[0]).DiskNumber
+function SystemInfo{
+
+$os=(Get-CimInstance Win32_OperatingSystem).Caption
+$ram=[math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1GB,2)
+$total=[math]::Round((Get-Disk|Measure Size -Sum).Sum/1GB,2)
+
+Write-Host "System Information"
+Write-Host "------------------"
+Write-Host "OS           : $os"
+Write-Host "RAM          : $ram GB"
+Write-Host "Total Disk   : $total GB"
+Write-Host "Log Dir      : $LogDir"
+Write-Host ""
+
 }
 
-function DiskList {
-    Header
-    Get-Disk | ft Number,FriendlyName,Size,PartitionStyle
-    Pause
+function Header{
+Banner
+SystemInfo
 }
 
-function PartitionView {
-    Header
-    Get-Partition | ft DiskNumber,PartitionNumber,DriveLetter,Size
-    Pause
+function Pause{Read-Host "Press Enter"}
+
+# --------------------------------------------------
+# lsblk style disk topology
+# --------------------------------------------------
+
+function DiskTopology {
+
+Header
+
+$disks = Get-Disk
+
+foreach($d in $disks){
+
+Write-Host ""
+Write-Host "Disk$d ($($d.FriendlyName)) [$($d.BusType)]"
+
+try {
+$parts = Get-Partition -DiskNumber $d.Number -ErrorAction Stop
+}
+catch {
+Write-Host "  |- No partitions detected"
+continue
 }
 
-function ResizePartitionUI {
-    Header
-    $d=Read-Host "Drive Letter"
-    $s=Read-Host "New Size GB"
-    Resize-Partition -DriveLetter $d -Size ($s*1GB)
-    Log "Resized $d to $s GB"
+foreach($p in $parts){
+
+$vol = Get-Volume -Partition $p -ErrorAction SilentlyContinue
+
+$fs  = $vol.FileSystem
+$dl  = $p.DriveLetter
+$size = [math]::Round($p.Size/1GB,2)
+
+Write-Host "  |- Partition $($p.PartitionNumber)  $dl  $fs  $size GB"
+
 }
 
-function CreatePartitionUI {
-    Header
-    $disk=Read-Host "Disk Number"
-    $size=Read-Host "Size GB"
-    $letter=Read-Host "Drive Letter"
-    New-Partition -DiskNumber $disk -Size ($size*1GB) -DriveLetter $letter
-    Log "Partition created on disk $disk"
 }
 
-function FormatUI {
-    Header
-    $drive=Read-Host "Drive Letter"
-    $fs=Read-Host "Filesystem (NTFS/exFAT/FAT32)"
-    $confirm=Read-Host "Type FORMAT"
-    if($confirm -eq "FORMAT"){
-        Format-Volume -DriveLetter $drive -FileSystem $fs -Confirm:$false
-        Log "Formatted $drive"
-    }
+Pause
+
 }
 
-function BitlockerCheck {
-    Header
-    Get-BitLockerVolume | ft MountPoint,VolumeStatus,ProtectionStatus
-    Pause
+# --------------------------------------------------
+# ASCII visual disk map
+# --------------------------------------------------
+
+function DiskVisualizer{
+
+Header
+
+$disks=Get-Disk
+
+foreach($d in $disks){
+
+Write-Host ""
+Write-Host "Disk $($d.Number)"
+
+$parts=Get-Partition -DiskNumber $d.Number
+
+foreach($p in $parts){
+
+$size=[math]::Round($p.Size/1GB,2)
+$blocks=[math]::Min([int]($size*2),50)
+$bar=("#"* $blocks)
+
+Write-Host "[P$($p.PartitionNumber)] $bar $size GB"
+
 }
 
-function ConvertGPTMBR {
-    Header
-    $disk=Read-Host "Disk Number"
-    $type=Read-Host "Target (GPT/MBR)"
-    if($disk -eq (Get-SystemDisk)){
-        Write-Host "Refusing to convert system disk"
-        return
-    }
-    if($type -eq "GPT"){
-        Set-Disk $disk -PartitionStyle GPT
-    }else{
-        Set-Disk $disk -PartitionStyle MBR
-    }
 }
 
-function MountVHD {
-    Header
-    $path=Read-Host "Path to VHD"
-    Mount-VHD $path
-    Log "Mounted VHD $path"
+Pause
+
 }
 
-function DismountVHD {
-    Header
-    $path=Read-Host "Path to VHD"
-    Dismount-VHD $path
-    Log "Unmounted VHD $path"
+# --------------------------------------------------
+# Resize monitor
+# --------------------------------------------------
+
+function ResizeMonitor{
+
+Header
+
+$drive=Read-Host "Drive letter"
+
+Write-Host "Monitoring resize changes..."
+
+while($true){
+
+$size=(Get-Partition -DriveLetter $drive).Size
+$gb=[math]::Round($size/1GB,2)
+
+Write-Host "$(Get-Date) : $gb GB"
+
+Start-Sleep 2
+
 }
 
-function SecureWipe {
+}
 
-    Header
-    Get-Disk | ft Number,FriendlyName,Size
+# --------------------------------------------------
+# Disk benchmark
+# --------------------------------------------------
 
-    $disk=Read-Host "Disk to wipe"
+function DiskBenchmark{
 
-    if($disk -eq (Get-SystemDisk)){
-        Write-Host "System disk protection active"
-        return
-    }
+Header
 
-    $confirm=Read-Host "Type WIPE"
+$path="$env:TEMP\diskbench.tmp"
 
-    if($confirm -ne "WIPE"){return}
+Write-Host "Running disk benchmark..."
 
-    for($i=1;$i -le 3;$i++){
+$size=200MB
+$buffer=New-Object byte[] $size
 
-        Write-Host "Pass $i / 3"
+$sw=[Diagnostics.Stopwatch]::StartNew()
 
-        $script=@"
+[IO.File]::WriteAllBytes($path,$buffer)
+
+$sw.Stop()
+
+$writeSpeed=[math]::Round(($size/1MB)/$sw.Elapsed.TotalSeconds,2)
+
+Remove-Item $path -Force
+
+Write-Host "Write Speed : $writeSpeed MB/s"
+
+Pause
+
+}
+
+# --------------------------------------------------
+# NVMe / USB detection
+# --------------------------------------------------
+
+function DiskType{
+
+Header
+
+Get-Disk | Select Number,FriendlyName,BusType,Size
+
+Pause
+
+}
+
+# --------------------------------------------------
+# SMART health
+# --------------------------------------------------
+
+function SmartHealth{
+
+Header
+
+Get-WmiObject -Namespace root\wmi -Class MSStorageDriver_FailurePredictStatus |
+Select InstanceName,PredictFailure
+
+Pause
+
+}
+
+# --------------------------------------------------
+# SSD secure erase
+# --------------------------------------------------
+
+function SecureErase{
+
+Header
+
+Get-Disk | ft Number,FriendlyName,BusType
+
+$disk=Read-Host "Disk Number"
+
+$confirm=Read-Host "Type ERASE"
+
+if($confirm -ne "ERASE"){return}
+
+$script=@"
 select disk $disk
 clean all
 exit
 "@
 
-        $script | diskpart
+$script | diskpart
 
-    }
+Log "Secure erase disk $disk"
 
-    Log "Disk $disk wiped"
 }
 
-function CloneDisk {
+# --------------------------------------------------
+# WinRM remote disk command
+# --------------------------------------------------
 
-    Header
+function RemoteDiskManager{
 
-    Get-Disk | ft Number,FriendlyName,Size
+Header
 
-    $src=Read-Host "Source Disk"
-    $dst=Read-Host "Destination Disk"
+$host=Read-Host "Remote Host"
+$cmd=Read-Host "Command (Get-Disk / Get-Partition)"
 
-    if($dst -eq (Get-SystemDisk)){
-        Write-Host "Cannot overwrite system disk"
-        return
-    }
+Invoke-Command -ComputerName $host -ScriptBlock {param($c) Invoke-Expression $c} -ArgumentList $cmd
 
-    Write-Host "Cloning..."
+Pause
 
-    $srcDisk="\\.\PhysicalDrive$src"
-    $dstDisk="\\.\PhysicalDrive$dst"
-
-    $srcStream=[System.IO.File]::OpenRead($srcDisk)
-    $dstStream=[System.IO.File]::OpenWrite($dstDisk)
-
-    $buffer=New-Object byte[] 1MB
-
-    while(($read=$srcStream.Read($buffer,0,$buffer.Length)) -gt 0){
-
-        $dstStream.Write($buffer,0,$read)
-        Write-Progress -Activity "Cloning Disk" -Status "$read bytes copied"
-
-    }
-
-    $srcStream.Close()
-    $dstStream.Close()
-
-    Log "Disk $src cloned to $dst"
 }
 
-$menu=@(
-"List Disks",
-"List Partitions",
-"Resize Partition",
-"Create Partition",
-"Format Partition",
-"BitLocker Status",
-"Convert GPT/MBR",
-"Secure Wipe",
-"Clone Disk",
-"Mount VHD",
-"Dismount VHD",
+# --------------------------------------------------
+# Update from GitHub
+# --------------------------------------------------
+
+function CheckUpdate{
+
+$repo="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/diskmgr.ps1"
+
+$tmp="$env:TEMP\diskmgr_update.ps1"
+
+Invoke-WebRequest $repo -OutFile $tmp
+
+$remote=(Select-String $tmp "Version").Line
+
+if($remote -notmatch $Version){
+
+Write-Host "New version available"
+
+}
+
+}
+
+# --------------------------------------------------
+# Menu (ncurses style navigation)
+# --------------------------------------------------
+
+$options=@(
+"Disk Topology (lsblk style)",
+"Partition Visualizer",
+"Resize Monitor",
+"Disk Benchmark",
+"SMART Health",
+"Disk Type Detection",
+"Secure Erase",
+"Remote Disk Manager",
+"Check Update",
 "Exit"
 )
 
@@ -183,45 +296,43 @@ $index=0
 
 while($true){
 
-    Header
+Header
 
-    for($i=0;$i -lt $menu.Count;$i++){
+for($i=0;$i -lt $options.Count;$i++){
 
-        if($i -eq $index){
-            Write-Host "> $($menu[$i])" -ForegroundColor Yellow
-        }else{
-            Write-Host "  $($menu[$i])"
-        }
+if($i -eq $index){
+Write-Host "> $($options[$i])" -ForegroundColor Yellow
+}else{
+Write-Host "  $($options[$i])"
+}
 
-    }
+}
 
-    $key=[console]::ReadKey($true)
+$key=[console]::ReadKey($true)
 
-    if($key.Key -eq "UpArrow"){ $index-- }
-    if($key.Key -eq "DownArrow"){ $index++ }
+if($key.Key -eq "UpArrow"){$index--}
+if($key.Key -eq "DownArrow"){$index++}
 
-    if($index -lt 0){$index=0}
-    if($index -ge $menu.Count){$index=$menu.Count-1}
+if($index -lt 0){$index=0}
+if($index -ge $options.Count){$index=$options.Count-1}
 
-    if($key.Key -eq "Enter"){
+if($key.Key -eq "Enter"){
 
-        switch($index){
+switch($index){
 
-            0 {DiskList}
-            1 {PartitionView}
-            2 {ResizePartitionUI}
-            3 {CreatePartitionUI}
-            4 {FormatUI}
-            5 {BitlockerCheck}
-            6 {ConvertGPTMBR}
-            7 {SecureWipe}
-            8 {CloneDisk}
-            9 {MountVHD}
-            10{DismountVHD}
-            11{break}
+0{DiskTopology}
+1{DiskVisualizer}
+2{ResizeMonitor}
+3{DiskBenchmark}
+4{SmartHealth}
+5{DiskType}
+6{SecureErase}
+7{RemoteDiskManager}
+8{CheckUpdate}
+9{break}
 
-        }
+}
 
-    }
+}
 
 }
