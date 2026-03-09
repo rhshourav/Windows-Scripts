@@ -2,13 +2,26 @@
   Windows Scripts - Main Menu Launcher
   Author : rhshourav
   GitHub : https://github.com/rhshourav/Windows-Scripts
+  Notes  : Auto-elevates once, menu uses single key press (no Enter),
+           launches selected remote scripts in NEW PowerShell windows.
+
+           Integrated: TEMP "Open File - Security Warning" mitigation for UNC EXEs
+           from \\192.168.18.201\it\... by temporarily adding the IP to
+           Local Intranet zone for the lifetime of each launched window.
 #>
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # -----------------------------
-# Auto-elevate
+# Configure: LAN host(s) to treat as Local Intranet (TEMP per launched window)
+# -----------------------------
+$TrustedIntranetIPs = @(
+  '192.168.18.201'
+)
+
+# -----------------------------
+# Auto-elevate (once)
 # -----------------------------
 function Test-IsAdmin {
     try {
@@ -19,14 +32,26 @@ function Test-IsAdmin {
 }
 
 if (-not (Test-IsAdmin)) {
-    Write-Host "[!] Not running as Administrator. Relaunching..." -ForegroundColor Yellow
-    Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+    Write-Host "[!] Not running as Administrator. Relaunching elevated..." -ForegroundColor Yellow
+    $args = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", "`"$PSCommandPath`""
+    )
+    Start-Process -FilePath "powershell.exe" -ArgumentList $args -Verb RunAs | Out-Null
     exit
 }
 
 # -----------------------------
-# UI Elements
+# UI: black background + bright colors
 # -----------------------------
+try {
+    $raw = $Host.UI.RawUI
+    $raw.BackgroundColor = 'Black'
+    $raw.ForegroundColor = 'White'
+    Clear-Host
+} catch {}
+
 function Show-Logo {
     Clear-Host
     Write-Host @"
@@ -38,7 +63,6 @@ function Show-Logo {
                                                                 |_|            
 "@ -ForegroundColor Cyan
 }
-
 function Write-Section {
     param([string]$Title)
     Write-Host "`n--- $Title ---" -ForegroundColor Yellow
@@ -50,26 +74,129 @@ function Write-Item {
     Write-Host $Description
 }
 
-# -----------------------------
-# Remote launcher
-# -----------------------------
-function Start-RemoteScript {
-    param([string]$Url, [string]$Title)
+function Write-Header {
+    Clear-Host
     try {
-        $cmd = "`$ErrorActionPreference='Stop'; Write-Host '=== $Title ===' -ForegroundColor Cyan; iex (irm '$Url' -UseBasicParsing);"
-        $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-NoExit", "-Command", $cmd)
-        Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList $argList | Out-Null
+        $Host.UI.RawUI.BackgroundColor = 'Black'
+        $Host.UI.RawUI.ForegroundColor = 'White'
+    } catch {}
+    Clear-Host
+
+    Show-Logo
+    Write-Host "============================================================" -ForegroundColor Cyan
+    Write-Host "                    Windows Scripts (Menu)" -ForegroundColor Cyan
+    Write-Host "Author: rhshourav | GitHub: Windows-Scripts | Version: 1.5.1" -ForegroundColor DarkCyan
+    Write-Host "============================================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Press a key (no Enter).  Q = Quit" -ForegroundColor Green
+    Write-Host ""
+}
+
+function Show-Menu {
+     Write-Header
+   Write-Section "APPLICATIONS"
+    Write-Item "1" "App Setup Framework"
+    Write-Item "2" "Office 365"
+    Write-Item "3" "Office LTSC 2021"
+    Write-Item "4" "MS Store (LTSC)"
+    Write-Item "5" "Install Edge"
+    Write-Item "6" "Remove Edge"
+    Write-Item "7" "Remove New Outlook"
+
+    Write-Section "SYSTEM & MAINTENANCE"
+    Write-Item "A" "Activation / Edition Change"
+    Write-Item "B" "Time Sync & Format"
+    Write-Item "C" "IP Config"
+    Write-Item "D" "Disk Manager"
+    Write-Item "E" "Install MediCatUSB (New)"
+    Write-Item "F" "Windows Tuner"
+    Write-Item "G" "Windows Optimizer"
+    Write-Item "H" "Disable Updates"
+    Write-Item "I" "Enable Updates"
+    Write-Item "J" "Upgrade to Win 11"
+
+    Write-Section "HARDWARE & FIXES"
+    Write-Item "K" "Extract Drivers"
+    Write-Item "L" "Install Drivers"
+    Write-Item "M" "Ricoh B&W"
+    Write-Item "N" "Ricoh Color"
+    Write-Item "X" "ERP Setup"
+    Write-Item "Y" "Intel Interrupt Fix"
+    Write-Item "Z" "WPT Interrupt Fix"
+    Write-Host ""
+    Write-Host "  Q) Quit" -ForegroundColor Red
+    Write-Host ""
+    Write-Host -NoNewline "Select: " -ForegroundColor Green
+}
+
+# -----------------------------
+# Remote launcher (new window) + TEMP intranet trust for LAN share
+# -----------------------------
+function Start-RemoteScriptInNewAdminWindow {
+    param(
+        [Parameter(Mandatory)] [string] $Url,
+        [Parameter(Mandatory)] [string] $Title
+    )
+
+    try {
+        # Use TLS 1.2 on older Win10 builds
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+        # Build a literal array for the child window (e.g. '192.168.18.201','x.x.x.x')
+        $ipsLiteral = ($TrustedIntranetIPs | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ','
+
+        $cmd = @"
+`$ErrorActionPreference='Stop';
+
+# ===== TEMP: Add LAN IP(s) to Local Intranet Zone (HKCU) for this window lifetime =====
+`$__TempZoneKeys = New-Object System.Collections.Generic.List[string]
+
+function Add-IntranetIp([string]`$ip) {
+  `$base = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Ranges'
+  `$k = Join-Path `$base ('Range_' + [guid]::NewGuid().ToString('N'))
+  New-Item -Path `$k -Force | Out-Null
+  New-ItemProperty -Path `$k -Name ':Range' -Value `$ip -PropertyType String -Force | Out-Null
+  New-ItemProperty -Path `$k -Name '*'      -Value 1   -PropertyType DWord  -Force | Out-Null  # 1 = Local intranet
+  [void]`$__TempZoneKeys.Add(`$k)
+}
+
+foreach(`$ip in @($ipsLiteral)) { Add-IntranetIp `$ip }
+
+Register-EngineEvent PowerShell.Exiting -MessageData @(`$__TempZoneKeys) -Action {
+  foreach(`$k in `$Event.MessageData) {
+    Remove-Item -Path `$k -Recurse -Force -ErrorAction SilentlyContinue
+  }
+} | Out-Null
+# =====================================================================================
+
+try { [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12 } catch {}
+Write-Host '=== $Title ===' -ForegroundColor Cyan;
+iex (irm '$Url' -UseBasicParsing);
+"@
+
+        $argList = @(
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-NoExit",
+            "-Command", $cmd
+        )
+
+        # You already elevated the menu once. Don’t trigger UAC again per selection.
+        Start-Process -FilePath "powershell.exe" -ArgumentList $argList | Out-Null
+
         Write-Host "`n[+] Launched: $Title" -ForegroundColor Green
-    } catch {
-        Write-Host "`n[!] Error launching $Title" -ForegroundColor Red
+    }
+    catch {
+        Write-Host "`n[!] Failed to launch: $Title" -ForegroundColor Red
+        Write-Host "    $($_.Exception.Message)" -ForegroundColor DarkRed
     }
 }
 
 # -----------------------------
-# Action Mapping
+# Menu map (easy to extend)
 # -----------------------------
 $Actions = @{
-    # App Setup
+     # App Setup
     '1' = @{ Title="App Setup Framework"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Auto-App-Installer-Framework/autoInstallFromLocal.ps1" }
     '2' = @{ Title="Office 365 Install"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/office-Install/o365.ps1" }
     '3' = @{ Title="Office LTSC 2021"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/office-Install/oLTSC-2021.ps1" }
@@ -107,46 +234,10 @@ $Actions = @{
 }
 
 # -----------------------------
-# Main Loop
+# Main loop
 # -----------------------------
 while ($true) {
-    Show-Logo
-    Write-Host "============================================================" -ForegroundColor Cyan
-    Write-Host "   rhshourav Windows-Scripts Launcher | Version 1.5.0" -ForegroundColor DarkCyan
-    Write-Host "============================================================" -ForegroundColor Cyan
-
-    Write-Section "APPLICATIONS"
-    Write-Item "1" "App Setup Framework"
-    Write-Item "2" "Office 365"
-    Write-Item "3" "Office LTSC 2021"
-    Write-Item "4" "MS Store (LTSC)"
-    Write-Item "5" "Install Edge"
-    Write-Item "6" "Remove Edge"
-    Write-Item "7" "Remove New Outlook"
-
-    Write-Section "SYSTEM & MAINTENANCE"
-    Write-Item "A" "Activation / Edition Change"
-    Write-Item "B" "Time Sync & Format"
-    Write-Item "C" "IP Config"
-    Write-Item "D" "Disk Manager"
-    Write-Item "E" "Install MediCatUSB (New)"
-    Write-Item "F" "Windows Tuner"
-    Write-Item "G" "Windows Optimizer"
-    Write-Item "H" "Disable Updates"
-    Write-Item "I" "Enable Updates"
-    Write-Item "J" "Upgrade to Win 11"
-
-    Write-Section "HARDWARE & FIXES"
-    Write-Item "K" "Extract Drivers"
-    Write-Item "L" "Install Drivers"
-    Write-Item "M" "Ricoh B&W"
-    Write-Item "N" "Ricoh Color"
-    Write-Item "X" "ERP Setup"
-    Write-Item "Y" "Intel Interrupt Fix"
-    Write-Item "Z" "WPT Interrupt Fix"
-
-    Write-Host "`n  Q) Quit" -ForegroundColor Red
-    Write-Host -NoNewline "`nSelect an option: " -ForegroundColor Green
+    Show-Menu
 
     $k = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
     $choice = ($k.Character.ToString()).ToUpperInvariant()
@@ -155,9 +246,11 @@ while ($true) {
 
     if ($Actions.ContainsKey($choice)) {
         $item = $Actions[$choice]
-        Start-RemoteScript -Url $item.Url -Title $item.Title
-    } else {
-        Write-Host "`n[!] Invalid: $choice" -ForegroundColor Yellow
-        Start-Sleep -Seconds 1
+        Start-RemoteScriptInNewAdminWindow -Url $item.Url -Title $item.Title
     }
+    else {
+        Write-Host "`n[!] Invalid selection: $choice" -ForegroundColor Yellow
+    }
+
+    Start-Sleep -Milliseconds 700
 }
