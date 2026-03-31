@@ -9,11 +9,12 @@ param(
 )
 
 $ScriptAuthor = 'rhshourav'
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.0.1'
 $ScriptName = 'AutoDriverDeploy'
 $ErrorActionPreference = 'Stop'
 $script:RebootRequired = $false
 $script:ChangesMade = $false
+$script:TranscriptStarted = $false
 
 function Test-IsAdministrator {
     try {
@@ -33,8 +34,33 @@ function Write-Log {
 
     $entry = '{0} [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
     Write-Host $entry
+
     if ($script:LogFile) {
-        Add-Content -LiteralPath $script:LogFile -Value $entry
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+                $encoding = New-Object System.Text.UTF8Encoding($false)
+                $stream = [System.IO.File]::Open($script:LogFile, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+                try {
+                    $stream.Seek(0, [System.IO.SeekOrigin]::End) | Out-Null
+                    $writer = New-Object System.IO.StreamWriter($stream, $encoding)
+                    try {
+                        $writer.WriteLine($entry)
+                        $writer.Flush()
+                    } finally {
+                        $writer.Dispose()
+                    }
+                } finally {
+                    $stream.Dispose()
+                }
+                break
+            } catch {
+                if ($attempt -eq 3) {
+                    Write-Host ('{0} [WARN] Failed to write log entry: {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $_.Exception.Message)
+                } else {
+                    Start-Sleep -Milliseconds 150
+                }
+            }
+        }
     }
 }
 
@@ -311,6 +337,12 @@ if ($logDirectory -and -not (Test-Path -LiteralPath $logDirectory)) {
 
 $script:LogFile = $LogPath
 
+$TranscriptFile = $null
+if (-not $NoTranscript) {
+    $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $TranscriptFile = Join-Path $ScriptRoot ("{0}_{1}.transcript.log" -f $ScriptName, $timestamp)
+}
+
 if (-not (Test-IsAdministrator)) {
     if ($NoElevate) {
         throw 'Administrator privileges are required. Re-run this script in an elevated PowerShell session.'
@@ -338,8 +370,10 @@ if (-not (Test-IsAdministrator)) {
 
 if (-not $NoTranscript) {
     try {
-        Start-Transcript -Path $LogFile -Append | Out-Null
+        Start-Transcript -Path $TranscriptFile -Append | Out-Null
+        $script:TranscriptStarted = $true
     } catch {
+        $script:TranscriptStarted = $false
     }
 }
 
@@ -371,14 +405,12 @@ try {
 
         if ($RebootIfRequired) {
             Write-Log 'Restarting the computer now.' 'WARN'
-            try {
-                if (-not $NoTranscript) {
-                    try {
-                        Stop-Transcript | Out-Null
-                    } catch {
-                    }
+
+            if ($script:TranscriptStarted) {
+                try {
+                    Stop-Transcript | Out-Null
+                } catch {
                 }
-            } catch {
             }
 
             Start-Sleep -Seconds 2
@@ -386,7 +418,7 @@ try {
             exit 0
         }
 
-        if (-not $NoTranscript) {
+        if ($script:TranscriptStarted) {
             try {
                 Stop-Transcript | Out-Null
             } catch {
@@ -402,7 +434,7 @@ try {
         Write-Log 'No driver changes were required.'
     }
 
-    if (-not $NoTranscript) {
+    if ($script:TranscriptStarted) {
         try {
             Stop-Transcript | Out-Null
         } catch {
@@ -413,7 +445,7 @@ try {
 } catch {
     Write-Log ("Fatal error: {0}" -f $_.Exception.Message) 'ERROR'
 
-    if (-not $NoTranscript) {
+    if ($script:TranscriptStarted) {
         try {
             Stop-Transcript | Out-Null
         } catch {
