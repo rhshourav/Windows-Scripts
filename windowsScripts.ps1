@@ -55,8 +55,8 @@ try {
 function Show-Logo {
     Clear-Host
     Write-Host @"
- __        ___                 _                 ____            _   _       
- \ \      / (_)_ __   __| | _____          _____  / ___|  ___ _ __(_)_ __ | |_ ___ 
+ __        ___                 _                ____            _   _       
+ \ \      / (_)_ __   __| | _____      _____  / ___|  ___ _ __(_)_ __ | |_ ___ 
   \ \ /\ / /| | '_ \ / _` |/ _ \ \ /\ / / __| \___ \ / __| '__| | '_ \| __/ __|
    \ V  V / | | | | | (_| | (_) \ V  V /\__ \  ___) | (__| |  | | |_) | |_\__ \
     \_/\_/  |_|_| |_|\__,_|\___/ \_/\_/ |___/ |____/ \___|_|  |_| .__/ \__|___/
@@ -89,7 +89,7 @@ function Write-Header {
     Show-Logo
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host "                    Windows Scripts (Menu)" -ForegroundColor Cyan
-    Write-Host "Author: rhshourav | GitHub: Windows-Scripts | Version: 1.6.0" -ForegroundColor DarkCyan
+    Write-Host "Author: rhshourav | GitHub: Windows-Scripts | Version: 1.6.1" -ForegroundColor DarkCyan
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Press a key (no Enter).  Q = Quit" -ForegroundColor Green
@@ -112,7 +112,7 @@ function Show-Menu {
     Write-Item "B" "Time Sync & Format"
     Write-Item "C" "IP Config"
     Write-Item "D" "Disk Manager"
-    Write-Item "E" "Install MediCatUSB (New)"
+    Write-Item "E" "Install MediCatUSB"
     Write-Item "F" "Windows Tuner"
     Write-Item "G" "Windows Optimizer"
     Write-Item "H" "Disable Updates"
@@ -124,7 +124,7 @@ function Show-Menu {
     Write-Item "L" "Install Drivers"
     Write-Item "M" "Ricoh B&W"
     Write-Item "N" "Ricoh Color"
-    Write-Item "O" "Auto Driver Deploy"
+    Write-Item "O" "Auto Driver Deploy(NEW)"
     Write-Item "X" "ERP Setup"
     Write-Item "Y" "Intel Interrupt Fix"
     Write-Item "Z" "WPT Interrupt Fix"
