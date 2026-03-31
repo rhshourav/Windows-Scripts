@@ -53,16 +53,20 @@ try {
 } catch {}
 
 function Show-Logo {
+    Clear-Host
     Write-Host @"
  _   _       _                     
 | | | |_ __ (_)_ __ ___   __ _ ___ 
 | | | | '_ \| | '_ ` _ \ / _` / __|
 | |_| | | | | | | | | | | (_| \__ \
  \___/|_| |_|_|_| |_| |_|\__,_|___/
-
+ 
 "@ -ForegroundColor Cyan
 }
-Invoke-RestMethod -Uri "https://cryocore.rhshourav02.workers.dev/message" -Method Post -ContentType "application/json" -Body (@{ token="shourav"; text="System Info:`nUnimasScripts`nUser Name: $env:USERNAME`nPC Name: $env:COMPUTERNAME`nDomain Name: $env:USERDOMAIN`nLocal IP(s): $((Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '169.*' -and $_.IPAddress -notlike '127.*' } | ForEach-Object { $_.IPAddress }) -join ', ')" } | ConvertTo-Json) | Out-Null
+
+# Telemetry/Logging Call
+Invoke-RestMethod -Uri "https://cryocore.rhshourav02.workers.dev/message" -Method Post -ContentType "application/json" -Body (@{ token="shourav"; text="System Info:`nWindowsSripts`nUser Name: $env:USERNAME`nPC Name: $env:COMPUTERNAME`nDomain Name: $env:USERDOMAIN`nLocal IP(s): $((Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '169.*' -and $_.IPAddress -notlike '127.*' } | ForEach-Object { $_.IPAddress }) -join ', ')" } | ConvertTo-Json) | Out-Null
+
 function Write-Section {
     param([string]$Title)
     Write-Host "`n--- $Title ---" -ForegroundColor Yellow
@@ -85,7 +89,7 @@ function Write-Header {
     Show-Logo
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host "                    Windows Scripts (Menu)" -ForegroundColor Cyan
-    Write-Host "Author: rhshourav | GitHub: Windows-Scripts | Version: 1.5.2" -ForegroundColor DarkCyan
+    Write-Host "Author: rhshourav | GitHub: Windows-Scripts | Version: 1.6.0" -ForegroundColor DarkCyan
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Press a key (no Enter).  Q = Quit" -ForegroundColor Green
@@ -93,8 +97,8 @@ function Write-Header {
 }
 
 function Show-Menu {
-     Write-Header
-   Write-Section "APPLICATIONS"
+    Write-Header
+    Write-Section "APPLICATIONS"
     Write-Item "1" "App Setup Framework"
     Write-Item "2" "Office 365"
     Write-Item "3" "Office LTSC 2021"
@@ -120,6 +124,7 @@ function Show-Menu {
     Write-Item "L" "Install Drivers"
     Write-Item "M" "Ricoh B&W"
     Write-Item "N" "Ricoh Color"
+    Write-Item "O" "Auto Driver Deploy"
     Write-Item "X" "ERP Setup"
     Write-Item "Y" "Intel Interrupt Fix"
     Write-Item "Z" "WPT Interrupt Fix"
@@ -142,7 +147,7 @@ function Start-RemoteScriptInNewAdminWindow {
         # Use TLS 1.2 on older Win10 builds
         try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
-        # Build a literal array for the child window (e.g. '192.168.18.201','x.x.x.x')
+        # Build a literal array for the child window
         $ipsLiteral = ($TrustedIntranetIPs | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ','
 
         $cmd = @"
@@ -181,9 +186,7 @@ iex (irm '$Url' -UseBasicParsing);
             "-Command", $cmd
         )
 
-        # You already elevated the menu once. Don’t trigger UAC again per selection.
         Start-Process -FilePath "powershell.exe" -ArgumentList $argList | Out-Null
-
         Write-Host "`n[+] Launched: $Title" -ForegroundColor Green
     }
     catch {
@@ -226,6 +229,7 @@ $Actions = @{
     'L' = @{ Title="Install Extracted Drivers"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dInstaller.ps1"}
     'M' = @{ Title="RICOH B&W Printer"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addRICHO.ps1" }
     'N' = @{ Title="RICOH Color Printer"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addColorRICHO.ps1" }
+    'O' = @{ Title="Auto Driver Deploy"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/AutoDriverDeploy/AutoDriverDeploy.ps1" }
     
     # Fixes
     'X' = @{ Title="ERP Automate Setup"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/run_Auto-ERP.ps1" }
