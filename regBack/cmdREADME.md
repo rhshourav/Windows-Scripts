@@ -8,6 +8,10 @@ Run **Command Prompt / PowerShell as Administrator**
 reg export HKLM\SOFTWARE D:\Migration\HKLM_SOFTWARE.reg /y
 reg export HKCU\SOFTWARE D:\Migration\HKCU_SOFTWARE.reg /y
 ```
+or
+```
+New-Item -ItemType Directory -Path D:\Migration -Force reg export HKLM\SOFTWARE D:\Migration\HKLM_SOFTWARE.reg /y
+```
 
 ---
 
