@@ -159,12 +159,6 @@ Windows-Scripts/
 
 ---
 
-## 🧾 License
-
-MIT (or your preferred license)
-
----
-
 ## ⭐ Support
 
 If this helped you:
