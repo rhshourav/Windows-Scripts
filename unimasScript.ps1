@@ -125,6 +125,7 @@ function Show-Menu {
     Write-Item "M" "Ricoh B&W"
     Write-Item "N" "Ricoh Color"
     Write-Item "O" "Auto Driver Deploy"
+    Write-Item "W" "WARDEN[Registry Nexus](NEW)"
     Write-Item "X" "ERP Setup"
     Write-Item "Y" "Intel Interrupt Fix"
     Write-Item "Z" "WPT Interrupt Fix"
@@ -230,6 +231,7 @@ $Actions = @{
     'M' = @{ Title="RICOH B&W Printer"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addRICHO.ps1" }
     'N' = @{ Title="RICOH Color Printer"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addColorRICHO.ps1" }
     'O' = @{ Title="Auto Driver Deploy"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/AutoDriverDeploy/AutoDriverDeploy.ps1" }
+    'W' = @{ Title="WARDEN[Registry Nexus]"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/regBack/WARDEN.ps1"}
     
     # Fixes
     'X' = @{ Title="ERP Automate Setup"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/run_Auto-ERP.ps1" }
