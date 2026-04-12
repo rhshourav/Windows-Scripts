@@ -8,7 +8,7 @@
 To launch WARDEN immediately with administrative privileges, run the following in an **Elevated PowerShell** prompt:
 
 ```powershell
-iex (irm 'https://raw.githubusercontent.com/rhshourav/WindowsScripts/main/regBack/WARDEN.ps1')
+iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/regBack/WARDEN.ps1')
 ```
 *(Note: Ensure your execution policy allows scripts or use `-ExecutionPolicy Bypass` if running the local file).*
 
