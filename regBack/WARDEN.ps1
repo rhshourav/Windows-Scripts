@@ -6,7 +6,7 @@
 ================================================================================
   Author      : rhshourav
   Repository  : https://github.com/rhshourav/WindowsScripts
-  Version     : 1.0.0
+  Version     : 1.1.0
   Category    : Registry / System Administration
   Compatibility: Windows 10 (PowerShell 5.0+) through Windows 11
   Execute via : iex (irm 'https://raw.githubusercontent.com/rhshourav/WindowsScripts/main/Registry/WARDEN.ps1')
