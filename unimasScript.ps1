@@ -89,7 +89,7 @@ function Write-Header {
     Show-Logo
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host "                    Windows Scripts (Menu)" -ForegroundColor Cyan
-    Write-Host "Author: rhshourav | GitHub: Windows-Scripts | Version: 1.6.0" -ForegroundColor DarkCyan
+    Write-Host "Author: rhshourav | GitHub: Windows-Scripts | Version: 1.7.0" -ForegroundColor DarkCyan
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Press a key (no Enter).  Q = Quit" -ForegroundColor Green
@@ -112,7 +112,7 @@ function Show-Menu {
     Write-Item "B" "Time Sync & Format"
     Write-Item "C" "IP Config"
     Write-Item "D" "Disk Manager"
-    Write-Item "E" "Install MediCatUSB (New)"
+    Write-Item "E" "Install MediCatUSB"
     Write-Item "F" "Windows Tuner"
     Write-Item "G" "Windows Optimizer"
     Write-Item "H" "Disable Updates"
