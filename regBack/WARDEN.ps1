@@ -364,7 +364,7 @@ function Start-Services-Blocked {
             _Log "Restored service: $n" 'INFO'
         } catch {
             wW "Cannot restore ${n}: $_"
-            _Log "Restore service fail $n: $_" 'WARN'
+            _Log "Restore service fail ${n}: $_" 'WARN'
         }
     }
     $Script:StoppedServices.Clear()
