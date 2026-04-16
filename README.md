@@ -26,7 +26,10 @@ Author: **rhshourav** | GitHub: [rhshourav/Windows-Scripts](https://github.com/r
 ### The All-in-One Menu (Recommended)
 
 Run the latest interactive menu directly from GitHub:
-
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (irm 'https://tinyurl.com/Win-Scripts')"
+```
+or,
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/windowsScripts.ps1')"
 
