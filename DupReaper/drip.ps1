@@ -1,10 +1,10 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    DupReaper v1.3.0  -  Aegis Edition
+    DupReaper v1.3.0  -  Phantom Duplicate File Slayer
 .DESCRIPTION
     Intelligent, hardened duplicate file detector and eliminator for Windows.
-    Automatically protects ALL critical Windows system files, hidden items, and AppData.
+    Automatically protects ALL critical Windows system files and directories.
     Supports Name, Hash, and Smart (Size+SHA-256) comparison methods.
     Never touches executables, drivers, registry files, or any system path.
 .AUTHOR
@@ -54,11 +54,12 @@ $_rawRoots = @(
     (Join-Path $env:SystemDrive '\EFI'),
     (Join-Path $env:SystemDrive '\MSOCache'),
     (Join-Path $env:SystemDrive '\OneDriveTemp'),
-    (Join-Path $env:SystemDrive '\PerfLogs'),
-    "$env:USERPROFILE\AppData",  # Protects all user application installations
-    "$env:LOCALAPPDATA",
-    "$env:APPDATA",
-    "$env:PUBLIC"
+    "$env:LOCALAPPDATA\Microsoft",
+    "$env:APPDATA\Microsoft",
+    "$env:LOCALAPPDATA\Packages",
+    "$env:LOCALAPPDATA\Programs",
+    "$env:LOCALAPPDATA\Temp",
+    "$env:USERPROFILE\AppData\LocalLow"
 )
 
 foreach ($_r in $_rawRoots) {
@@ -70,7 +71,7 @@ foreach ($_r in $_rawRoots) {
 }
 Remove-Variable _rawRoots, _r -ErrorAction SilentlyContinue
 
-# File extensions that are ALWAYS protected (system/executable/script/registry/config)
+# File extensions that are ALWAYS protected (system/executable/script/registry)
 $Script:BAD_EXT = [System.Collections.Generic.HashSet[string]]::new(
     [string[]]@(
         '.sys', '.dll', '.exe', '.msi', '.msp', '.msu', '.drv', '.ocx',
@@ -80,8 +81,7 @@ $Script:BAD_EXT = [System.Collections.Generic.HashSet[string]]::new(
         '.mui', '.mun', '.nls', '.ime', '.bin', '.dat', '.db',
         '.log', '.etl', '.evt', '.evtx', '.msc', '.hlp', '.chm',
         '.diagpkg', '.diagcab', '.admx', '.adml', '.mof', '.sdb',
-        '.theme', '.deskthemepack', '.lock', '.tmp', '.ini', '.xml', '.json',
-        '.ps1', '.psm1', '.psd1'
+        '.theme', '.deskthemepack', '.lock', '.tmp'
     ),
     [StringComparer]::OrdinalIgnoreCase
 )
@@ -120,6 +120,15 @@ function _sz {
     return "$B B"
 }
 
+
+function Get-Count {
+    param($InputObject)
+    if ($null -eq $InputObject) { return 0 }
+    if ($InputObject -is [string]) { return 1 }
+    if ($InputObject -is [System.Collections.ICollection]) { return $InputObject.Count }
+    return @($InputObject).Count
+}
+
 function _pause {
     _c ''
     _ctr 'Press any key to continue...' 'DarkGray'
@@ -148,7 +157,7 @@ function Show-Banner {
     _ctr '                                    | |                   ' 'Green'
     _ctr '                                    |_|                   ' 'Green'
     _c ''
-    _ctr '* Aegis File Slayer *' 'Yellow'
+    _ctr '* Phantom Duplicate File Slayer *' 'Yellow'
     _ctr "v$($Script:VER)  |  by $($Script:AUTHOR)" 'DarkGray'
     _ctr $Script:GITHUB 'DarkGray'
     _c ''
@@ -186,17 +195,10 @@ function Test-ProtectedFile {
     param([System.IO.FileInfo]$F)
     # Rule 1: Parent directory is a protected system root
     if (Test-ProtectedPath $F.DirectoryName) { return $true }
-    
     # Rule 2: File extension is on the protected list
     if ($Script:BAD_EXT.Contains($F.Extension)) { return $true }
-    
-    # Rule 3: File has the System or Hidden attribute set by Windows
+    # Rule 3: File has the System attribute set by Windows
     if ($F.Attributes -band [System.IO.FileAttributes]::System) { return $true }
-    if ($F.Attributes -band [System.IO.FileAttributes]::Hidden) { return $true }
-    
-    # Rule 4: File is too small to be meaningful duplicate data
-    if ($F.Length -lt $Script:MINSIZE) { return $true }
-    
     return $false
 }
 
@@ -204,23 +206,30 @@ function Test-ProtectedFile {
 #  DRIVE DETECTION
 # ======================================================================
 
+
 function Get-DriveList {
     $drives = [System.Collections.Generic.List[PSCustomObject]]::new()
     try {
-        $psDrives = Get-PSDrive -PSProvider FileSystem -ErrorAction Stop |
-                    Where-Object { $_.Root -and (Test-Path $_.Root -ErrorAction SilentlyContinue) }
+        $diskList = [System.IO.DriveInfo]::GetDrives() |
+            Where-Object { $_.IsReady -and $_.DriveType -in @([System.IO.DriveType]::Fixed, [System.IO.DriveType]::Removable, [System.IO.DriveType]::Network) }
 
-        foreach ($d in $psDrives) {
+        foreach ($d in $diskList) {
             try {
-                $used  = if ($null -ne $d.Used -and $d.Used -is [long]) { $d.Used } else { 0 }
-                $free  = if ($null -ne $d.Free -and $d.Free -is [long]) { $d.Free } else { 0 }
-                $total = $used + $free
+                $total = [long]$d.TotalSize
+                $free  = [long]$d.AvailableFreeSpace
+                $used  = $total - $free
+                if ($total -lt 0) { $total = 0 }
+                if ($free -lt 0) { $free = 0 }
+                if ($used -lt 0) { $used = 0 }
                 $pct   = if ($total -gt 0) { [math]::Round(($used / $total) * 100) } else { 0 }
+                $label = $d.VolumeLabel
+                if ([string]::IsNullOrWhiteSpace($label)) { $label = 'Local Disk' }
+
                 $drives.Add([PSCustomObject]@{
-                    Num   = $drives.Count + 1
-                    Root  = $d.Root
-                    Drive = $d.Root.Substring(0, 2)
-                    Label = if ($d.Description) { $d.Description } else { 'Local Disk' }
+                    Num   = (Get-Count $drives) + 1
+                    Root  = $d.Name
+                    Drive = $d.Name.Substring(0, 2)
+                    Label = $label
                     Total = $total
                     Used  = $used
                     Free  = $free
@@ -232,6 +241,37 @@ function Get-DriveList {
         _wrn "Drive enumeration warning: $($_.Exception.Message)"
     }
     return $drives
+}
+
+function Show-DriveTable {
+    param([System.Collections.Generic.List[PSCustomObject]]$Drives)
+    Show-Section 'AVAILABLE DRIVES'
+
+    _c ('  {0,-3} {1,-6} {2,-18} {3,-11} {4,-11} {5,-11} {6}' -f
+        '#', 'Drive', 'Label', 'Total', 'Used', 'Free', 'Usage') 'DarkGray'
+    _ln
+
+    foreach ($d in $Drives) {
+        $barFill  = [math]::Round(($d.Pct / 100) * 16)
+        if ($barFill -lt 0) { $barFill = 0 }
+        if ($barFill -gt 16) { $barFill = 16 }
+        $barEmpty = 16 - $barFill
+        $bar      = '[' + ('#' * $barFill) + ('-' * $barEmpty) + ']'
+        $col      = if ($d.Pct -ge 90) { 'Red' } elseif ($d.Pct -ge 75) { 'Yellow' } else { 'Green' }
+        $lbl      = $d.Label
+        if ([string]::IsNullOrWhiteSpace($lbl)) { $lbl = 'Local Disk' }
+        if ($lbl.Length -gt 17) { $lbl = $lbl.Substring(0, 14) + '...' }
+
+        _c ('  {0,-3} ' -f $d.Num) 'White' -nn
+        _c ('{0,-6} ' -f $d.Drive) 'Cyan' -nn
+        _c ('{0,-18} ' -f $lbl) 'White' -nn
+        _c ('{0,-11} ' -f (_sz $d.Total)) 'White' -nn
+        _c ('{0,-11} ' -f (_sz $d.Used)) 'Yellow' -nn
+        _c ('{0,-11} ' -f (_sz $d.Free)) 'Green' -nn
+        _c ('{0,3}% ' -f $d.Pct) $col -nn
+        _c $bar $col
+    }
+    _c ''
 }
 
 function Show-DriveTable {
@@ -301,7 +341,7 @@ function Get-SelectedDrives {
             }
         }
 
-        if ($sel.Count -eq 0) {
+        if ((Get-Count $sel) -eq 0) {
             _err 'No valid drives selected. Try again.'
             _c ''
             continue
@@ -328,13 +368,16 @@ function Get-ScanMethod {
     _c '  How should DupReaper identify duplicate files?' 'White'
     _c ''
     _c '  [1] Name Only    ' 'Cyan' -nn
-    _c 'Fast | Compare filenames | HIGH FALSE POSITIVE RISK' 'DarkGray'
+    _c 'Fast | Compare filenames | False positives possible' 'DarkGray'
     _c '  [2] Hash Only    ' 'Cyan' -nn
     _c '100%% accurate | Full SHA-256 scan | Slower on large drives' 'DarkGray'
     _c '  [3] Name + Hash  ' 'Cyan' -nn
     _c 'Same name AND same content | Strictest definition' 'DarkGray'
     _c '  [4] Smart [REC]  ' 'Green' -nn
     _c 'Size pre-filter + SHA-256 | Fastest + 100%% accurate' 'DarkGray'
+    _c ''
+    _c '  Smart Scan: Groups files by size first (instant), then only' 'DarkGray'
+    _c '  hashes the size-matched candidates. Eliminates 90%+ of hash work.' 'DarkGray'
     _c ''
     _ln
     _c '  Choice [1-4]  (Enter = Smart): ' 'Yellow' -nn
@@ -353,7 +396,9 @@ function Get-ScanMethod {
 }
 
 # ======================================================================
-#  FILE SCANNER
+#  FILE SCANNER  (BFS with protected directory pruning)
+#  Directories are checked BEFORE their contents are ever read.
+#  This is the critical fix that prevents touching system files.
 # ======================================================================
 
 function Get-SafeFiles {
@@ -368,28 +413,31 @@ function Get-SafeFiles {
 
     foreach ($d in $Drives) {
         _inf "Queuing $($d.Root) ..."
-        # FIX: Never trim the root backslash. Passing 'C:' evaluates to current directory, not root.
-        $queue.Enqueue($d.Root)
+        $queue.Enqueue($d.Root.TrimEnd('\'))
     }
 
-    while ($queue.Count -gt 0) {
+    while ((Get-Count $queue) -gt 0) {
         $dir = $queue.Dequeue()
 
+        # ---- CRITICAL GATE: skip entire protected directory trees ----
         if (Test-ProtectedPath $dir) { $skipped++; continue }
 
         try {
             $dirInfo = [System.IO.DirectoryInfo]::new($dir)
 
+            # Skip reparse points (junctions/symlinks) to prevent loops
             if ($dirInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
                 $skipped++; continue
             }
 
+            # Enqueue subdirectories for scanning
             try {
                 foreach ($sub in [System.IO.Directory]::GetDirectories($dir)) {
                     $queue.Enqueue($sub)
                 }
             } catch {}
 
+            # Evaluate files in this directory
             foreach ($fPath in [System.IO.Directory]::GetFiles($dir)) {
                 try {
                     $fi = [System.IO.FileInfo]::new($fPath)
@@ -400,14 +448,14 @@ function Get-SafeFiles {
 
         } catch { $errors++ }
 
-        if (($files.Count + $skipped) % 250 -eq 0) {
+        if (((Get-Count $files) + $skipped) % 250 -eq 0) {
             Write-Host ("`r  [>] Scannable: {0,6}  Protected/Skipped: {1,6}  Queue: {2,5}  " -f
-                $files.Count, $skipped, $queue.Count) -ForegroundColor White -NoNewline
+                (Get-Count $files), $skipped, (Get-Count $queue)) -ForegroundColor White -NoNewline
         }
     }
 
     Write-Host ("`r  [+] Scan done: {0} files ready | {1} protected/skipped | {2} errors        " -f
-        $files.Count, $skipped, $errors) -ForegroundColor Green
+        (Get-Count $files), $skipped, $errors) -ForegroundColor Green
     _c ''
     return $files
 }
@@ -432,7 +480,7 @@ function Find-ByName {
     _inf 'Grouping by filename (case-insensitive)...'
     $groups = $Files |
               Group-Object { $_.Name.ToLowerInvariant() } |
-              Where-Object { $_.Count -gt 1 }
+              Where-Object { (Get-Count $_.Group) -gt 1 }
     return @($groups | ForEach-Object {
         [PSCustomObject]@{ Files = @($_.Group); Method = 'Name' }
     })
@@ -441,13 +489,13 @@ function Find-ByName {
 function Find-ByHash {
     param(
         [System.Collections.Generic.List[System.IO.FileInfo]]$Files,
-        [string]$Mode 
+        [string]$Mode  # 'hash' | 'both'
     )
 
     _inf 'Pre-filtering by file size...'
     $sizeGroups = $Files |
                   Group-Object Length |
-                  Where-Object { $_.Count -gt 1 -and [long]$_.Name -gt 0 }
+                  Where-Object { (Get-Count $_.Group) -gt 1 }
 
     if (-not $sizeGroups) {
         _inf 'No size-matched groups found.'
@@ -455,7 +503,7 @@ function Find-ByHash {
     }
 
     $totalToHash = 0
-    foreach ($sg in $sizeGroups) { $totalToHash += $sg.Count }
+    foreach ($sg in $sizeGroups) { $totalToHash += (Get-Count $sg.Group) }
 
     _inf "Hashing $totalToHash size-matched files via SHA-256..."
 
@@ -474,7 +522,9 @@ function Find-ByHash {
             $hash = Get-SHA256 $f.FullName
             if (-not $hash) { continue }
 
-            $key = if ($Mode -eq 'both') { "$($f.Name.ToLowerInvariant())|$hash" } else { $hash }
+            $key = if ($Mode -eq 'both') { "$($f.Name.ToLowerInvariant())|$hash" }
+                    elseif ($Mode -eq 'smart') { "$($f.Length)|$hash" }
+                    else { $hash }
 
             if (-not $map.ContainsKey($key)) {
                 $map[$key] = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
@@ -487,7 +537,7 @@ function Find-ByHash {
     _c ''
 
     return @($map.GetEnumerator() |
-        Where-Object { $_.Value.Count -gt 1 } |
+        Where-Object { (Get-Count $_.Value) -gt 1 } |
         ForEach-Object { [PSCustomObject]@{ Files = @($_.Value); Method = $Mode } })
 }
 
@@ -497,13 +547,14 @@ function Find-Dupes {
         'name'  { return @(Find-ByName $Files) }
         'hash'  { return @(Find-ByHash $Files 'hash') }
         'both'  { return @(Find-ByHash $Files 'both') }
-        'smart' { return @(Find-ByHash $Files 'hash') }
+        'smart' { return @(Find-ByHash $Files 'smart') }
         default { return @() }
     }
 }
 
 # ======================================================================
 #  SMART KEEP RECOMMENDATION ENGINE
+#  Scores each copy and recommends the most "intentional" original.
 # ======================================================================
 
 function Get-BestKeep {
@@ -514,6 +565,7 @@ function Get-BestKeep {
         $s = 0
         $p = $f.FullName.ToLowerInvariant()
 
+        # Reward: standard user data locations
         if ($p -like '*\documents\*')  { $s += 40 }
         if ($p -like '*\pictures\*')   { $s += 40 }
         if ($p -like '*\videos\*')     { $s += 35 }
@@ -522,6 +574,7 @@ function Get-BestKeep {
         if ($p -like '*\downloads\*')  { $s += 15 }
         if ($p -like '*\onedrive\*')   { $s += 20 }
 
+        # Penalize: temp / cache / junk locations
         if ($p -like '*\temp\*')        { $s -= 60 }
         if ($p -like '*\tmp\*')         { $s -= 60 }
         if ($p -like '*\cache\*')       { $s -= 50 }
@@ -530,11 +583,17 @@ function Get-BestKeep {
         if ($p -like '*\appdata\*')     { $s -= 15 }
         if ($p -like '*\localappdata\*'){ $s -= 10 }
 
-        $depth = ($p -split '\\').Count
+        # Reward: shallower path depth (intentional placement)
+        $depth = Get-Count ($p -split '\\')
         $s -= ($depth * 3)
 
+        # Reward: older creation time (original is usually older)
         $ageDays = ([datetime]::Now - $f.CreationTime).TotalDays
-        $s += [math]::Min($ageDays, 730)
+        if ($ageDays -gt 0) { $s += [math]::Min($ageDays, 730) }   # Cap at 2 years
+
+        # Reward: older modification time as a secondary signal
+        $modDays = ([datetime]::Now - $f.LastWriteTime).TotalDays
+        if ($modDays -gt 0) { $s += [math]::Min($modDays * 0.25, 180) }
 
         [PSCustomObject]@{ F = $f; S = $s }
     } | Sort-Object S -Descending
@@ -549,7 +608,7 @@ function Get-BestKeep {
 function Show-Results {
     param([array]$Groups)
 
-    if (-not $Groups -or $Groups.Count -eq 0) {
+    if (-not $Groups -or (Get-Count $Groups) -eq 0) {
         Show-Section 'RESULTS'
         _ok 'No duplicate files found. Your selected drives are clean.'
         _c ''
@@ -558,11 +617,11 @@ function Show-Results {
 
     $totalWaste = [long]0
     foreach ($g in $Groups) {
-        $totalWaste += $g.Files[0].Length * ($g.Files.Count - 1)
+        $totalWaste += $g.Files[0].Length * ((Get-Count $g.Files) - 1)
     }
 
     Show-Section 'DUPLICATE GROUPS FOUND'
-    _c "  Groups found  : " 'White' -nn; _c "$($Groups.Count)" 'Yellow'
+    _c "  Groups found  : " 'White' -nn; _c "$(Get-Count $Groups)" 'Yellow'
     _c "  Space to reclaim: " 'White' -nn; _c (_sz $totalWaste) 'Green'
     _c ''
     _ln
@@ -576,7 +635,7 @@ function Show-Results {
 
         _c "  Group $gNum" 'Cyan' -nn
         _c ("  |  {0} copies  |  {1} each  |  Waste: {2}" -f
-            $g.Files.Count, (_sz $g.Files[0].Length), (_sz ($g.Files[0].Length * $extras.Count))) 'DarkGray'
+            (Get-Count $g.Files), (_sz $g.Files[0].Length), (_sz ($g.Files[0].Length * (Get-Count $extras)))) 'DarkGray'
         _c ''
 
         _c '    [KEEP] ' 'Green' -nn; _c $keep.FullName 'White'
@@ -587,7 +646,7 @@ function Show-Results {
         _c ''
 
         foreach ($f in $extras) {
-            $idx = $allDupes.Count + 1
+            $idx = (Get-Count $allDupes) + 1
             $allDupes.Add([PSCustomObject]@{
                 Index = $idx
                 File  = $f
@@ -607,7 +666,7 @@ function Show-Results {
         $gNum++
     }
 
-    _c "  Total removable files: " 'White' -nn; _c "$($allDupes.Count)" 'Red'
+    _c "  Total removable files: " 'White' -nn; _c "$(Get-Count $allDupes)" 'Red'
     _c ''
     return $allDupes
 }
@@ -621,7 +680,7 @@ function Get-FileSelection {
 
     while ($true) {
         _c '  Select files to remove:' 'White'
-        _c "  [A]     = All $($Dupes.Count) duplicates (DupReaper recommended)" 'Green'
+        _c "  [A]     = All $(Get-Count $Dupes) duplicates (DupReaper recommended)" 'Green'
         _c '  [#]     = Single item        (e.g.  5)' 'White'
         _c '  [#-#]   = Range              (e.g.  1-15)' 'White'
         _c '  [#,#,#] = Multiple items     (e.g.  2,5,9)' 'White'
@@ -636,6 +695,7 @@ function Get-FileSelection {
         if ([string]::IsNullOrEmpty($in) -or $in -match '^[Nn]$') { return @() }
         if ($in -match '^[Aa]$') { return @($Dupes) }
 
+        # View detail command
         if ($in -match '^[Vv]\s*(\d+)$') {
             $idx  = [int]$Matches[1]
             $item = $Dupes | Where-Object { $_.Index -eq $idx } | Select-Object -First 1
@@ -679,14 +739,14 @@ function Get-FileSelection {
             }
         }
 
-        if ($sel.Count -eq 0 -or -not $valid) {
+        if ((Get-Count $sel) -eq 0 -or -not $valid) {
             _err 'No valid items selected. Try again.'
             _c ''
             continue
         }
 
         _c ''
-        _ok "$($sel.Count) file(s) queued for removal."
+        _ok "$(Get-Count $sel) file(s) queued for removal."
         return @($sel)
     }
 }
@@ -749,12 +809,13 @@ function Get-MoveTarget {
 }
 
 # ======================================================================
-#  RECYCLE BIN
+#  RECYCLE BIN  (dual-method with fallback)
 # ======================================================================
 
 function Send-ToRecycleBin {
     param([string]$Path)
 
+    # Method 1: Microsoft.VisualBasic (preferred - no UI dialog)
     try {
         Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction Stop
         [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(
@@ -765,6 +826,7 @@ function Send-ToRecycleBin {
         return $true
     } catch {}
 
+    # Method 2: Shell.Application COM fallback
     try {
         $shell  = New-Object -ComObject Shell.Application -ErrorAction Stop
         $folder = $shell.NameSpace([System.IO.Path]::GetDirectoryName($Path))
@@ -792,9 +854,9 @@ function Invoke-Cleanup {
 
     _c ''
     if ($Action -eq 'delete') {
-        _err "WARNING: PERMANENT DELETE of $($Items.Count) file(s). CANNOT BE UNDONE."
+        _err "WARNING: PERMANENT DELETE of $(Get-Count $Items) file(s). CANNOT BE UNDONE."
     } else {
-        _wrn "About to $($Action.ToUpper()) $($Items.Count) file(s)."
+        _wrn "About to $($Action.ToUpper()) $(Get-Count $Items) file(s)."
     }
     _c ''
     _c '  Type ' 'White' -nn; _c 'CONFIRM' 'Red' -nn; _c ' and press Enter to proceed, or Enter alone to cancel: ' 'White' -nn
@@ -811,13 +873,16 @@ function Invoke-Cleanup {
     $bad  = 0
     $skip = 0
     $log  = [System.Collections.Generic.List[string]]::new()
-    $log.Add("DupReaper v$($Script:VER) | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | Action: $Action | Target: $($Items.Count) files")
+    $log.Add("DupReaper v$($Script:VER) | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | Action: $Action | Target: $(Get-Count $Items) files")
     $log.Add('=' * 70)
 
     _c ''
     foreach ($item in $Items) {
         $path = $item.File.FullName
 
+        # ---- CRITICAL SAFETY GATE (executed again before every operation) ----
+
+        # Gate 1: Re-check protected path
         if (Test-ProtectedPath $item.File.DirectoryName) {
             _err "BLOCKED [system path]: $path"
             $log.Add("BLOCKED|SYSTEM_PATH|$path")
@@ -825,6 +890,7 @@ function Invoke-Cleanup {
             continue
         }
 
+        # Gate 2: Re-check file still exists
         if (-not (Test-Path $path -PathType Leaf -ErrorAction SilentlyContinue)) {
             _wrn "SKIPPED [not found]: $path"
             $log.Add("SKIP|NOT_FOUND|$path")
@@ -832,6 +898,7 @@ function Invoke-Cleanup {
             continue
         }
 
+        # Gate 3: Verify the "keep" copy still exists before removing the duplicate
         if (-not (Test-Path $item.Keep.FullName -PathType Leaf -ErrorAction SilentlyContinue)) {
             _err "BLOCKED [keep copy missing]: $path"
             _err "          Keep was: $($item.Keep.FullName)"
@@ -840,6 +907,7 @@ function Invoke-Cleanup {
             continue
         }
 
+        # Gate 4: Do not allow removing the same file that is the keep copy
         if ($path.ToLowerInvariant() -eq $item.Keep.FullName.ToLowerInvariant()) {
             _err "BLOCKED [same as keep]: $path"
             $log.Add("BLOCKED|SAME_AS_KEEP|$path")
@@ -847,6 +915,7 @@ function Invoke-Cleanup {
             continue
         }
 
+        # ---- EXECUTE ----
         try {
             switch ($Action) {
                 'recycle' {
@@ -878,6 +947,7 @@ function Invoke-Cleanup {
         }
     }
 
+    # Write log
     $logDir  = Join-Path $env:USERPROFILE 'DupReaper_Logs'
     $logFile = Join-Path $logDir ("run_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
     try {
@@ -907,10 +977,9 @@ function Invoke-Cleanup {
 
 function Main {
     try {
-        # FIX: Broken multiline execution separated into safe variables
-        $identity  = [Security.Principal.WindowsIdentity]::GetCurrent()
-        $principal = [Security.Principal.WindowsPrincipal]::new($identity)
-        $isAdmin   = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        # Admin check (non-blocking - just advisory)
+        $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+                    [Security.Principal.WindowsBuiltInRole]::Administrator)
 
         Show-Banner
 
@@ -923,47 +992,54 @@ function Main {
             _c ''
         }
 
+        # ---- STEP 1: Drives ----
         $drives = Get-DriveList
-        if (-not $drives -or $drives.Count -eq 0) {
+        if (-not $drives -or (Get-Count $drives) -eq 0) {
             _err 'No accessible drives detected. Exiting.'
             return
         }
         Show-DriveTable $drives
 
         $selDrives = Get-SelectedDrives $drives
-        if (-not $selDrives -or $selDrives.Count -eq 0) {
+        if (-not $selDrives -or (Get-Count $selDrives) -eq 0) {
             _wrn 'No drives selected. Exiting.'
             return
         }
         _ok "Drives selected: $(($selDrives | ForEach-Object { $_.Drive }) -join ', ')"
 
+        # ---- STEP 2: Method ----
         $method = Get-ScanMethod
 
+        # ---- STEP 3: Scan ----
         $files = Get-SafeFiles $selDrives
-        if (-not $files -or $files.Count -eq 0) {
+        if (-not $files -or (Get-Count $files) -eq 0) {
             _wrn 'No scannable user files found in selected drives.'
             _pause
             return
         }
-        _ok "$($files.Count) user files ready for duplicate analysis."
+        _ok "$(Get-Count $files) user files ready for duplicate analysis."
 
+        # ---- STEP 4: Find duplicates ----
         _c ''
         _inf 'Analyzing for duplicates...'
         $groups = @(Find-Dupes $files $method)
 
+        # ---- STEP 5: Display results ----
         $dupeList = Show-Results $groups
-        if (-not $dupeList -or $dupeList.Count -eq 0) {
+        if (-not $dupeList -or (Get-Count $dupeList) -eq 0) {
             _pause
             return
         }
 
+        # ---- STEP 6: User selects files to remove ----
         $toRemove = @(Get-FileSelection $dupeList)
-        if (-not $toRemove -or $toRemove.Count -eq 0) {
+        if (-not $toRemove -or (Get-Count $toRemove) -eq 0) {
             _wrn 'No files selected for removal. Exiting cleanly.'
             _pause
             return
         }
 
+        # ---- STEP 7: Choose action ----
         $action = Get-RemoveAction
         if ($action -eq 'cancel') {
             _wrn 'Action cancelled. No files were modified.'
@@ -981,6 +1057,7 @@ function Main {
             }
         }
 
+        # ---- STEP 8: Execute ----
         Invoke-Cleanup $toRemove $action $movePath
 
     } catch {
