@@ -66,6 +66,7 @@ Use these commands to run a specific tool immediately without opening the main m
 | **Win Optimizer** | `iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/Windows-Optimizer.ps1')` |
 | **Disable Updates** | `iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Disable-WindowsUpdate.ps1')` |
 | **Win 10 to 11** | `iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/TO-Win11-Auto-Upgrade/Win11-AutoUpgrade.ps1')` |
+| **Remove Duplicate Files** | `iex (irm ' https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/DupReaper/drip.ps1')`|
 
 ### 🔧 Hardware, Printers & Fixes
 
