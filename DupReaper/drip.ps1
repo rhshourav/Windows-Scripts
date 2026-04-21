@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    DupReaper v1.7.5 - Folder-aware duplicate file detector and cleaner.
+    DupReaper v1.7.6 - Folder-aware duplicate file detector and cleaner.
 .DESCRIPTION
     Scans one or more drives, local folders, or SMB/UNC shares.
     Can limit detection and cleanup to a specific folder subtree.
@@ -22,7 +22,7 @@ $WarningPreference     = 'SilentlyContinue'
 # CONSTANTS
 # ======================================================================
 
-$Script:VER     = '1.7.5'
+$Script:VER     = '1.7.6'
 $Script:AUTHOR  = 'rhshourav'
 $Script:W       = 78
 $Script:MINSIZE = 0
@@ -70,7 +70,7 @@ Remove-Variable _rawRoots, _r -ErrorAction SilentlyContinue
 $Script:BAD_EXT = [System.Collections.Generic.HashSet[string]]::new(
     [string[]]@(
         '.sys', '.dll', '.msp', '.msu', '.drv', '.ocx',
-        '.cpl', '.acm', '.ax', '.scr', '.com', '.bat', '.cmd', '.vbs',
+        '.cpl', '.acm', '.ax', '.scr', '.com', '.vbs',
         '.js', '.jse', '.wsf', '.wsh', '.reg', '.inf', '.cat', '.cab',
         '.wim', '.efi', '.pdb', '.lib', '.obj', '.lnk', '.manifest',
         '.mui', '.mun', '.nls', '.ime', '.bin', '.dat', '.db',
