@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    DupReaper v1.7.3 - Folder-aware duplicate file detector and cleaner.
+    DupReaper v1.7.4 - Folder-aware duplicate file detector and cleaner.
 .DESCRIPTION
     Scans one or more drives, local folders, or SMB/UNC shares.
     Can limit detection and cleanup to a specific folder subtree.
@@ -22,7 +22,7 @@ $WarningPreference     = 'SilentlyContinue'
 # CONSTANTS
 # ======================================================================
 
-$Script:VER     = '1.7.3'
+$Script:VER     = '1.7.4'
 $Script:AUTHOR  = 'rhshourav'
 $Script:W       = 78
 $Script:MINSIZE = 0
@@ -847,7 +847,7 @@ function Find-ByHash {
         foreach ($f in $sg.Group) {
             $done++
             if ($done % 5 -eq 0) {
-                Write-Host ("`r  [>] Hashing {0}/{1}  ({2:N0}%%)...  " -f $done, $totalToHash, ($done / $totalToHash * 100)) -ForegroundColor White -NoNewline
+                Write-Host ("`r  [>] Hashing {0}/{1}  ({2:N0}%)...  " -f $done, $totalToHash, ($done / $totalToHash * 100)) -ForegroundColor White -NoNewline
             }
 
             $hash = Get-SHA256 $f.FullName
