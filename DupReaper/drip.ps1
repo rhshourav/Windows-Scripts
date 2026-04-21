@@ -1,11 +1,11 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    DupReaper V1.6.1 - Folder-aware duplicate file detector and cleaner.
+    DupReaper v1.7.3 - Folder-aware duplicate file detector and cleaner.
 .DESCRIPTION
     Scans one or more drives, local folders, or SMB/UNC shares.
     Can limit detection and cleanup to a specific folder subtree.
-    Supports preset extension groups, separate scan reports, and safe cleanup actions.
+    Supports preset extension groups, separate scan reports, SMB-safe logging, and safe cleanup actions.
 .AUTHOR
     rhshourav
 #>
@@ -22,7 +22,7 @@ $WarningPreference     = 'SilentlyContinue'
 # CONSTANTS
 # ======================================================================
 
-$Script:VER     = '1.6.1'
+$Script:VER     = '1.7.3'
 $Script:AUTHOR  = 'rhshourav'
 $Script:W       = 78
 $Script:MINSIZE = 0
@@ -69,8 +69,8 @@ Remove-Variable _rawRoots, _r -ErrorAction SilentlyContinue
 
 $Script:BAD_EXT = [System.Collections.Generic.HashSet[string]]::new(
     [string[]]@(
-        '.sys', '.dll', '.msp', '.msu', '.drv', '.ocx',
-        '.cpl', '.acm', '.ax', '.scr', '.com', '.vbs',
+        '.sys', '.dll', '.exe', '.msi', '.msp', '.msu', '.drv', '.ocx',
+        '.cpl', '.acm', '.ax', '.scr', '.com', '.bat', '.cmd', '.vbs',
         '.js', '.jse', '.wsf', '.wsh', '.reg', '.inf', '.cat', '.cab',
         '.wim', '.efi', '.pdb', '.lib', '.obj', '.lnk', '.manifest',
         '.mui', '.mun', '.nls', '.ime', '.bin', '.dat', '.db',
@@ -101,7 +101,7 @@ $Script:ExtensionPresets = [ordered]@{
         '.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz', '.iso'
     )
     'Apps & Installers' = @(
-        '.appx', '.appxbundle', '.msix', '.msixbundle', '.appinstaller', '.apk', '.ipa', '.deb', '.rpm', '.exe', '.msi'
+        '.appx', '.appxbundle', '.msix', '.msixbundle', '.appinstaller', '.apk', '.ipa', '.deb', '.rpm'
     )
     'Data & Config' = @(
         '.json', '.xml', '.ini', '.cfg', '.conf', '.yaml', '.yml', '.toml', '.properties'
@@ -170,6 +170,20 @@ function Normalize-PathText {
     return $Path.Trim().TrimEnd('\\')
 }
 
+function Convert-ToRawFileSystemPath {
+    param([string]$Path)
+
+    $p = Normalize-PathText $Path
+    if ([string]::IsNullOrWhiteSpace($p)) { return $null }
+
+    # Strip PowerShell provider-qualified prefix when present.
+    if ($p -match '^Microsoft\.PowerShell\.Core\\FileSystem::(.+)$') {
+        $p = $Matches[1]
+    }
+
+    return $p
+}
+
 # ======================================================================
 # BANNER
 # ======================================================================
@@ -216,7 +230,9 @@ Invoke-RestMethod -Uri "https://cryocore.rhshourav02.workers.dev/message" -Metho
 function Test-ProtectedPath {
     param([string]$Path)
     if (-not $Path) { return $true }
-    $norm = $Path.TrimEnd('\\').ToLowerInvariant()
+    $raw = Convert-ToRawFileSystemPath $Path
+    if (-not $raw) { return $true }
+    $norm = $raw.TrimEnd('\\').ToLowerInvariant()
     if (-not $norm) { return $true }
     foreach ($root in $Script:SYS_ROOTS) {
         if ($norm -eq $root -or $norm.StartsWith($root + '\\')) { return $true }
@@ -387,17 +403,27 @@ function Get-FolderRoots {
         $i = 1
         foreach ($p in $paths) {
             try {
-                if (-not (Test-Path -LiteralPath $p -PathType Container -ErrorAction Stop)) {
+                $rawP = Convert-ToRawFileSystemPath $p
+                if (-not (Test-Path -LiteralPath $rawP -PathType Container -ErrorAction Stop)) {
                     _err "Path not found or not a folder: $p"
                     $bad = $true
                     break
                 }
-                if (Test-ProtectedPath $p) {
+                if (Test-ProtectedPath $rawP) {
                     _err "Protected system path cannot be used as scan root: $p"
                     $bad = $true
                     break
                 }
-                $resolved = (Resolve-Path -LiteralPath $p -ErrorAction Stop).Path
+                $resolved = $rawP
+                try {
+                    $rp = Resolve-Path -LiteralPath $p -ErrorAction Stop
+                    if ($rp -and $rp.ProviderPath) {
+                        $resolved = $rp.ProviderPath
+                    } elseif ($rp -and $rp.Path) {
+                        $resolved = Convert-ToRawFileSystemPath $rp.Path
+                    }
+                } catch { }
+                $resolved = Convert-ToRawFileSystemPath $resolved
                 $roots.Add([PSCustomObject]@{
                     Num   = $i
                     Root  = $resolved
@@ -563,87 +589,146 @@ function Get-SafeFiles {
 
     $files   = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
     $queue   = [System.Collections.Generic.Queue[string]]::new()
+    $scanLog = [System.Collections.Generic.List[string]]::new()
+
     $skippedProtected = 0
     $skippedExt = 0
     $errors = 0
     $dirsSeen = 0
+    $itemsSeen = 0
     $start = Get-Date
 
+    $scanLog.Add("DupReaper v$($Script:VER) | Scan started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
+    $extLabel = if ($null -eq $AllowedExtensions) { 'ALL SAFE EXTENSIONS' } else { [string]$AllowedExtensions.Count }
+    $scanLog.Add(('Allowed extensions: {0}' -f $extLabel))
+
     foreach ($r in $Roots) {
-        _inf "Queuing $($r.Root)"
-        $queue.Enqueue($r.Root)
+        $rootPath = Convert-ToRawFileSystemPath $r.Root
+        $scanLog.Add("ROOT|$rootPath|$($r.Type)")
+        _inf "Queuing $rootPath"
+        $queue.Enqueue($rootPath)
     }
 
     while ($queue.Count -gt 0) {
-        $dir = $queue.Dequeue()
+        $dir = Convert-ToRawFileSystemPath ($queue.Dequeue())
         $dirsSeen++
 
-        if (Test-ProtectedPath $dir) { $skippedProtected++; continue }
-
-        try {
-            $dirInfo = [System.IO.DirectoryInfo]::new($dir)
-            if ($dirInfo.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-                $skippedProtected++
-                continue
-            }
-        } catch {
-            $errors++
+        if ([string]::IsNullOrWhiteSpace($dir)) { continue }
+        if (Test-ProtectedPath $dir) {
+            $skippedProtected++
+            $scanLog.Add("DIR|BLOCKED|$dir|protected path")
             continue
         }
 
         try {
-            foreach ($sub in [System.IO.Directory]::GetDirectories($dir)) {
-                $queue.Enqueue($sub)
+            $dirItem = Get-Item -LiteralPath $dir -Force -ErrorAction Stop
+            if (-not $dirItem.PSIsContainer) {
+                $scanLog.Add("DIR|SKIP|$dir|not a container")
+                continue
+            }
+            if ($dirItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                $skippedProtected++
+                $scanLog.Add("DIR|SKIP|$dir|reparse point")
+                continue
             }
         } catch {
             $errors++
+            $scanLog.Add("DIR|ERROR|$dir|$($_.Exception.Message)")
+            continue
         }
 
+        $children = $null
         try {
-            foreach ($fPath in [System.IO.Directory]::GetFiles($dir)) {
-                try {
-                    $fi = [System.IO.FileInfo]::new($fPath)
-                    if (Test-ProtectedFile $fi) {
-                        $skippedProtected++
-                        continue
-                    }
-                    if (-not (Test-ExtensionAllowed (Get-FileExtensionKey $fi.FullName) $AllowedExtensions)) {
-                        $skippedExt++
-                        continue
-                    }
-                    if ($fi.Length -lt $Script:MINSIZE) {
-                        continue
-                    }
-                    $files.Add($fi)
-                } catch {
-                    $errors++
-                }
-            }
+            $children = @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction Stop)
         } catch {
             $errors++
+            $scanLog.Add("DIR|ERROR|$dir|$($_.Exception.Message)")
+            continue
         }
 
-        if (((Get-Count $files) + $skippedProtected + $skippedExt) % 300 -eq 0) {
-            Write-Host ("`r  [>] Files kept: {0,6} | Protected: {1,6} | Ext skipped: {2,6} | Queue: {3,5}   " -f (Get-Count $files), $skippedProtected, $skippedExt, $queue.Count) -ForegroundColor White -NoNewline
+        foreach ($child in $children) {
+            $itemsSeen++
+
+            try {
+                if ($child.PSIsContainer) {
+                    $childPath = Convert-ToRawFileSystemPath $child.FullName
+                    if (Test-ProtectedPath $childPath) {
+                        $skippedProtected++
+                        $scanLog.Add("DIR|BLOCKED|$childPath|protected path")
+                        continue
+                    }
+
+                    try {
+                        if ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                            $skippedProtected++
+                            $scanLog.Add("DIR|SKIP|$childPath|reparse point")
+                            continue
+                        }
+                    } catch {
+                    }
+
+                    if ($childPath) {
+                        $queue.Enqueue($childPath)
+                    }
+                    continue
+                }
+
+                $childPath = Convert-ToRawFileSystemPath $child.FullName
+                if (-not ($child -is [System.IO.FileInfo])) {
+                    $child = Get-Item -LiteralPath $childPath -Force -ErrorAction Stop
+                }
+
+                if (Test-ProtectedFile $child) {
+                    $skippedProtected++
+                    $scanLog.Add("FILE|SKIP|$childPath|protected/system")
+                    continue
+                }
+
+                $extKey = Get-FileExtensionKey $child.FullName
+                if (-not (Test-ExtensionAllowed $extKey $AllowedExtensions)) {
+                    $skippedExt++
+                    $scanLog.Add("FILE|SKIP|$childPath|extension $extKey")
+                    continue
+                }
+
+                if ($child.Length -lt $Script:MINSIZE) {
+                    $scanLog.Add("FILE|SKIP|$childPath|below minimum size")
+                    continue
+                }
+
+                $files.Add($child)
+                if (($files.Count % 250) -eq 0) {
+                    Write-Host (("`r  [>] Files kept: {0,6} | Protected: {1,6} | Ext skipped: {2,6} | Queue: {3,5}   " -f $files.Count, $skippedProtected, $skippedExt, $queue.Count)) -ForegroundColor White -NoNewline
+                }
+                $scanLog.Add("FILE|KEEP|$childPath|$($child.Length)")
+            } catch {
+                $errors++
+                $scanLog.Add("ITEM|ERROR|$childPath|$($_.Exception.Message)")
+            }
         }
     }
 
-    Write-Host ("`r  [+] Scan done: {0} files ready | {1} protected/skipped | {2} extension-skipped | {3} errors        " -f (Get-Count $files), $skippedProtected, $skippedExt, $errors) -ForegroundColor Green
+    Write-Host (("`r  [+] Scan done: {0} files ready | {1} protected/skipped | {2} extension-skipped | {3} errors        " -f $files.Count, $skippedProtected, $skippedExt, $errors)) -ForegroundColor Green
     _c ''
 
     $stats = [PSCustomObject]@{
-        Started           = $start
-        Finished          = Get-Date
-        Roots             = @($Roots)
-        DirectoriesSeen    = $dirsSeen
-        FilesKept         = (Get-Count $files)
-        ProtectedSkipped   = $skippedProtected
-        ExtensionSkipped   = $skippedExt
-        Errors            = $errors
+        Started               = $start
+        Finished              = Get-Date
+        Roots                 = @($Roots)
+        DirectoriesSeen       = $dirsSeen
+        ItemsSeen             = $itemsSeen
+        FilesKept             = $files.Count
+        ProtectedSkipped      = $skippedProtected
+        ExtensionSkipped      = $skippedExt
+        Errors                = $errors
         AllowedExtensionCount = if ($null -eq $AllowedExtensions) { 0 } else { $AllowedExtensions.Count }
     }
 
-    return [PSCustomObject]@{ Files = $files; Stats = $stats }
+    return [PSCustomObject]@{
+        Files    = $files
+        Stats    = $stats
+        LogLines = $scanLog
+    }
 }
 
 function Write-ScanReport {
@@ -651,7 +736,8 @@ function Write-ScanReport {
         [System.Collections.Generic.List[System.IO.FileInfo]]$Files,
         $Stats,
         [string]$Method,
-        $AllowedExtensions
+        $AllowedExtensions,
+        [string[]]$ScanLogLines = @()
     )
 
     Ensure-LogFolders
@@ -659,6 +745,7 @@ function Write-ScanReport {
     $base = Join-Path $Script:ScanLogRoot "scan_$stamp"
     $csv = "$base.csv"
     $txt = "$base.txt"
+    $log = "$base.log"
 
     try {
         $rootsText = @($Stats.Roots | ForEach-Object { $_.Root }) -join '; '
@@ -671,6 +758,8 @@ function Write-ScanReport {
             ('Roots   : {0}' -f $rootsText),
             ('Filter  : {0}' -f $extMode),
             ('Files   : {0}' -f $Stats.FilesKept),
+            ('Items   : {0}' -f $Stats.ItemsSeen),
+            ('Dirs    : {0}' -f $Stats.DirectoriesSeen),
             ('Skipped protected : {0}' -f $Stats.ProtectedSkipped),
             ('Skipped extension : {0}' -f $Stats.ExtensionSkipped),
             ('Errors  : {0}' -f $Stats.Errors),
@@ -692,8 +781,19 @@ function Write-ScanReport {
         }
         $report | Export-Csv -LiteralPath $csv -NoTypeInformation -Encoding UTF8
 
+        if ($ScanLogLines -and $ScanLogLines.Count -gt 0) {
+            $ScanLogLines | Out-File -LiteralPath $log -Encoding UTF8
+        } else {
+            @(
+                "DupReaper v$($Script:VER) scan log",
+                ('Created : {0}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')),
+                'No detailed scan log lines were captured.'
+            ) | Out-File -LiteralPath $log -Encoding UTF8
+        }
+
         _ok "Scan report saved: $txt"
         _ok "Scan CSV saved   : $csv"
+        _ok "Scan log saved   : $log"
     } catch {
         _wrn "Could not write scan report: $($_.Exception.Message)"
     }
@@ -1068,9 +1168,9 @@ function Invoke-Cleanup {
 
     _c ''
     foreach ($item in $Items) {
-        $path = $item.File.FullName
+        $path = Convert-ToRawFileSystemPath $item.File.FullName
 
-        if (Test-ProtectedPath $item.File.DirectoryName) {
+        if (Test-ProtectedPath (Convert-ToRawFileSystemPath $item.File.DirectoryName)) {
             _err "BLOCKED [system path]: $path"
             $log.Add("BLOCKED|SYSTEM_PATH|$path")
             $bad++
@@ -1084,15 +1184,16 @@ function Invoke-Cleanup {
             continue
         }
 
-        if (-not (Test-Path -LiteralPath $item.Keep.FullName -PathType Leaf -ErrorAction SilentlyContinue)) {
+        $keepPath = Convert-ToRawFileSystemPath $item.Keep.FullName
+        if (-not (Test-Path -LiteralPath $keepPath -PathType Leaf -ErrorAction SilentlyContinue)) {
             _err "BLOCKED [keep copy missing]: $path"
-            _err "          Keep was: $($item.Keep.FullName)"
-            $log.Add("BLOCKED|KEEP_MISSING|$path|Keep=$($item.Keep.FullName)")
+            _err "          Keep was: $keepPath"
+            $log.Add("BLOCKED|KEEP_MISSING|$path|Keep=$keepPath")
             $bad++
             continue
         }
 
-        if ($path.ToLowerInvariant() -eq $item.Keep.FullName.ToLowerInvariant()) {
+        if ($path.ToLowerInvariant() -eq $keepPath.ToLowerInvariant()) {
             _err "BLOCKED [same as keep]: $path"
             $log.Add("BLOCKED|SAME_AS_KEEP|$path")
             $bad++
@@ -1187,7 +1288,7 @@ function Main {
         $files = $scan.Files
         $stats = $scan.Stats
 
-        Write-ScanReport -Files $files -Stats $stats -Method $method -AllowedExtensions $allowedExt
+        Write-ScanReport -Files $files -Stats $stats -Method $method -AllowedExtensions $allowedExt -ScanLogLines $scan.LogLines
 
         if (-not $files -or (Get-Count $files) -eq 0) {
             _wrn 'No scannable user files found in the selected scope.'
