@@ -89,7 +89,7 @@ function Write-Header {
     Show-Logo
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host "                    Windows Scripts (Menu)" -ForegroundColor Cyan
-    Write-Host "Author: rhshourav | GitHub: Windows-Scripts | Version: 1.7.0" -ForegroundColor DarkCyan
+    Write-Host "Author: rhshourav | GitHub: Windows-Scripts | Version: 1.8.0" -ForegroundColor DarkCyan
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Press a key (no Enter).  Q = Quit" -ForegroundColor Green
@@ -106,6 +106,7 @@ function Show-Menu {
     Write-Item "5" "Install Edge"
     Write-Item "6" "Remove Edge"
     Write-Item "7" "Remove New Outlook"
+    Write-Item "8" "Remove Duplicate Files(NEW)"
 
     Write-Section "SYSTEM & MAINTENANCE"
     Write-Item "A" "Activation / Edition Change"
@@ -125,7 +126,7 @@ function Show-Menu {
     Write-Item "M" "Ricoh B&W"
     Write-Item "N" "Ricoh Color"
     Write-Item "O" "Auto Driver Deploy"
-    Write-Item "W" "WARDEN[Registry Nexus](NEW)"
+    Write-Item "W" "WARDEN[Registry Nexus]"
     Write-Item "X" "ERP Setup"
     Write-Item "Y" "Intel Interrupt Fix"
     Write-Item "Z" "WPT Interrupt Fix"
@@ -210,6 +211,7 @@ $Actions = @{
     # Uninstalls
     '6' = @{ Title="Edge Uninstaller"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/MicroSoft-Edge/edge-Uninstall.ps1"}
     '7' = @{ Title="New Outlook Uninstaller"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/New%20Outlook%20Uninstaller/uninstall-NOU.ps1" }
+     '8' = @{ Title="Remove Duplicate Files"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/DupReaper/drip.ps1"}
     
     # System Tools
     'A' = @{ Title="Activation & Edition"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/run" }
