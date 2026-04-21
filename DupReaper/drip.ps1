@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    DupReaper v1.7.4 - Folder-aware duplicate file detector and cleaner.
+    DupReaper v1.7.5 - Folder-aware duplicate file detector and cleaner.
 .DESCRIPTION
     Scans one or more drives, local folders, or SMB/UNC shares.
     Can limit detection and cleanup to a specific folder subtree.
@@ -22,7 +22,7 @@ $WarningPreference     = 'SilentlyContinue'
 # CONSTANTS
 # ======================================================================
 
-$Script:VER     = '1.7.4'
+$Script:VER     = '1.7.5'
 $Script:AUTHOR  = 'rhshourav'
 $Script:W       = 78
 $Script:MINSIZE = 0
@@ -69,7 +69,7 @@ Remove-Variable _rawRoots, _r -ErrorAction SilentlyContinue
 
 $Script:BAD_EXT = [System.Collections.Generic.HashSet[string]]::new(
     [string[]]@(
-        '.sys', '.dll', '.exe', '.msi', '.msp', '.msu', '.drv', '.ocx',
+        '.sys', '.dll', '.msp', '.msu', '.drv', '.ocx',
         '.cpl', '.acm', '.ax', '.scr', '.com', '.bat', '.cmd', '.vbs',
         '.js', '.jse', '.wsf', '.wsh', '.reg', '.inf', '.cat', '.cab',
         '.wim', '.efi', '.pdb', '.lib', '.obj', '.lnk', '.manifest',
@@ -101,7 +101,7 @@ $Script:ExtensionPresets = [ordered]@{
         '.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz', '.iso'
     )
     'Apps & Installers' = @(
-        '.appx', '.appxbundle', '.msix', '.msixbundle', '.appinstaller', '.apk', '.ipa', '.deb', '.rpm'
+        '.appx', '.appxbundle', '.msix', '.msixbundle', '.appinstaller', '.apk', '.ipa', '.deb', '.rpm', '.exe', '.msi'
     )
     'Data & Config' = @(
         '.json', '.xml', '.ini', '.cfg', '.conf', '.yaml', '.yml', '.toml', '.properties'
