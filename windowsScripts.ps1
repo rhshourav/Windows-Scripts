@@ -1,28 +1,47 @@
 <#
-  Windows Scripts - Main Menu Launcher
-  Author : rhshourav
-  GitHub : https://github.com/rhshourav/Windows-Scripts
-  Notes  : Auto-elevates once, menu uses single key press (no Enter),
-           launches selected remote scripts in NEW PowerShell windows.
-
-           Integrated: TEMP "Open File - Security Warning" mitigation for UNC EXEs
-           from \\192.168.18.201\it\... by temporarily adding the IP to
-           Local Intranet zone for the lifetime of each launched window.
+  ================================================================
+   Windows Scripts  -  Main Menu Launcher
+   Author  : rhshourav
+   GitHub  : https://github.com/rhshourav/Windows-Scripts
+   Version : 27.1.0
+   Notes   : iex/irm compatible, auto-elevates, single-key nav,
+             launches sub-scripts in new elevated windows,
+             temporarily adds LAN IPs to Local Intranet zone,
+             real-time system status on every draw.
+  ================================================================
 #>
+
+# Runtime version guard (compatible with iex irm, avoids #Requires issues)
+if ($PSVersionTable.PSVersion.Major -lt 5) {
+    Write-Host '' 
+    Write-Host '  [!] PowerShell 5.0 or higher is required.' -ForegroundColor Red
+    Write-Host '      This system has: PowerShell ' -NoNewline -ForegroundColor DarkRed
+    Write-Host $PSVersionTable.PSVersion.ToString() -ForegroundColor Red
+    Write-Host ''
+    Write-Host '  Press any key to exit ...' -ForegroundColor DarkGray
+    try { $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown') } catch { Start-Sleep 3 }
+    exit 1
+}
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# -----------------------------
-# Configure: LAN host(s) to treat as Local Intranet (TEMP per launched window)
-# -----------------------------
-$TrustedIntranetIPs = @(
-  '192.168.18.201'
-)
+# ================================================================
+#  CONSTANTS
+# ================================================================
+$Script:VER    = '27.1.0'
+$Script:AUTHOR = 'rhshourav'
+$Script:GITHUB = 'https://github.com/rhshourav/Windows-Scripts'
 
-# -----------------------------
-# Auto-elevate (once)
-# -----------------------------
+# URL used ONLY when launched via iex/irm and elevation is needed
+$Script:SELF_URL = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/windowsScripts.ps1'
+
+# LAN share host(s) to temporarily trust as Local Intranet per child window
+$Script:TrustedIPs = @('192.168.18.201')
+
+# ================================================================
+#  ADMIN CHECK + AUTO-ELEVATE  (iex/irm safe)
+# ================================================================
 function Test-IsAdmin {
     try {
         $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -32,251 +51,429 @@ function Test-IsAdmin {
 }
 
 if (-not (Test-IsAdmin)) {
-    Write-Host "[!] Not running as Administrator. Relaunching elevated..." -ForegroundColor Yellow
-    $args = @(
-        "-NoProfile",
-        "-ExecutionPolicy", "Bypass",
-        "-File", "`"$PSCommandPath`""
-    )
-    Start-Process -FilePath "powershell.exe" -ArgumentList $args -Verb RunAs | Out-Null
+    try {
+        Write-Host ''
+        Write-Host '  [!] Requires Administrator privileges.  Relaunching elevated ...' -ForegroundColor Yellow
+        Write-Host ''
+
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+        if ([string]::IsNullOrEmpty($PSCommandPath)) {
+            $tmpPath = Join-Path $env:TEMP 'WinScripts_Launcher.ps1'
+            try {
+                (New-Object Net.WebClient).DownloadFile($Script:SELF_URL, $tmpPath)
+                $launchArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-File', "`"$tmpPath`"")
+            } catch {
+                $escaped = $Script:SELF_URL -replace "'", "''"
+                $launchArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-Command',
+                    "try { [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12 } catch {}; iex (irm '$escaped' -UseBasicParsing)")
+            }
+        } else {
+            $launchArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-File', "`"$PSCommandPath`"")
+        }
+
+        Start-Process -FilePath 'powershell.exe' -ArgumentList $launchArgs -Verb RunAs -ErrorAction Stop
+
+    } catch {
+        Write-Host ''
+        Write-Host '  [!] Elevation failed or was cancelled.' -ForegroundColor Red
+        Write-Host "      $($_.Exception.Message)" -ForegroundColor DarkRed
+        Write-Host ''
+        Write-Host '  Press any key to exit ...' -ForegroundColor DarkGray
+        try { $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown') } catch { Start-Sleep 3 }
+    }
     exit
 }
 
-# -----------------------------
-# UI: black background + bright colors
-# -----------------------------
+# ================================================================
+#  CONSOLE SETUP
+# ================================================================
 try {
     $raw = $Host.UI.RawUI
     $raw.BackgroundColor = 'Black'
     $raw.ForegroundColor = 'White'
+    try { $raw.WindowTitle = "Windows Scripts v$($Script:VER)  |  $env:COMPUTERNAME  (Administrator)" } catch {}
+    try {
+        $buf = $raw.BufferSize
+        if ($buf.Width -lt 80) {
+            $raw.BufferSize = New-Object Management.Automation.Host.Size(80, $buf.Height)
+        }
+    } catch {}
     Clear-Host
 } catch {}
 
-function Show-Logo {
-    Clear-Host
-    Write-Host @"
- __        ___                 _                ____            _   _       
- \ \      / (_)_ __   __| | _____      _____  / ___|  ___ _ __(_)_ __ | |_ ___ 
-  \ \ /\ / /| | '_ \ / _` |/ _ \ \ /\ / / __| \___ \ / __| '__| | '_ \| __/ __|
-   \ V  V / | | | | | (_| | (_) \ V  V /\__ \  ___) | (__| |  | | |_) | |_\__ \
-    \_/\_/  |_|_| |_|\__,_|\___/ \_/\_/ |___/ |____/ \___|_|  |_| .__/ \__|___/
-                                                                |_|            
-"@ -ForegroundColor Cyan
-}
-
-# Telemetry/Logging Call
-# Get local IPv4 addresses safely
-$localIPs = @()
+# ================================================================
+#  TELEMETRY
+# ================================================================
 try {
-    $localIPs = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled=True" |
-        ForEach-Object { $_.IPAddress } |
-        Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' } |
-        Select-Object -Unique
-}
-catch {
     $localIPs = @()
+    try {
+        $localIPs = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction SilentlyContinue |
+                    ForEach-Object { $_.IPAddress } | Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' } | Select-Object -Unique
+    } catch {}
+
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+    $body = (@{
+        token = 'shourav'
+        text  = "Windows Scripts v$($Script:VER)`nUser: $env:USERNAME  PC: $env:COMPUTERNAME  Domain: $env:USERDOMAIN  IP: $($localIPs -join ', ')"
+    } | ConvertTo-Json)
+
+    Invoke-RestMethod -Uri 'https://cryocore.rhshourav02.workers.dev/message' -Method Post -ContentType 'application/json' -Body $body -ErrorAction SilentlyContinue | Out-Null
+} catch {}
+
+# ================================================================
+#  REAL-TIME SYSTEM STATUS  (Highly resilient to WMI/CIM failures)
+# ================================================================
+function Get-SystemStatus {
+    $line1 = New-Object System.Collections.ArrayList
+    $line2 = New-Object System.Collections.ArrayList
+
+    # --- 1. CPU ---
+    try {
+        $cpu = (Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop | Measure-Object -Property LoadPercentage -Average).Average
+        if ($null -eq $cpu) { throw "Null CPU" }
+        [void]$line1.Add("CPU: $($cpu)%")
+    } catch {
+        try {
+            $cpu = (Get-WmiObject -Class Win32_Processor -ErrorAction Stop | Measure-Object -Property LoadPercentage -Average).Average
+            if ($null -eq $cpu) { throw "Null CPU" }
+            [void]$line1.Add("CPU: $($cpu)%")
+        } catch { [void]$line1.Add("CPU: N/A") }
+    }
+
+    # --- 2. RAM ---
+    try {
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        $tot = [math]::Round($os.TotalVisibleMemorySize / 1048576, 1)
+        $fre = [math]::Round($os.FreePhysicalMemory / 1048576, 1)
+        $use = $tot - $fre
+        $pct = if ($tot -gt 0) { [math]::Round(($use / $tot) * 100) } else { 0 }
+        [void]$line1.Add("RAM: ${use}/${tot}GB ($pct%)")
+    } catch {
+        try {
+            $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction Stop
+            $tot = [math]::Round($os.TotalVisibleMemorySize / 1048576, 1)
+            $fre = [math]::Round($os.FreePhysicalMemory / 1048576, 1)
+            $use = $tot - $fre
+            $pct = if ($tot -gt 0) { [math]::Round(($use / $tot) * 100) } else { 0 }
+            [void]$line1.Add("RAM: ${use}/${tot}GB ($pct%)")
+        } catch { [void]$line1.Add("RAM: N/A") }
+    }
+
+    # --- 3. DISK (C:) ---
+    try {
+        $disk = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction Stop
+        $tot = [math]::Round($disk.Size / 1GB, 1)
+        $fre = [math]::Round($disk.FreeSpace / 1GB, 1)
+        $use = $tot - $fre
+        $pct = if ($tot -gt 0) { [math]::Round(($use / $tot) * 100) } else { 0 }
+        [void]$line1.Add("C: ${use}/${tot}GB ($pct%)")
+    } catch {
+        try {
+            $disk = Get-WmiObject -Class Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction Stop
+            $tot = [math]::Round($disk.Size / 1GB, 1)
+            $fre = [math]::Round($disk.FreeSpace / 1GB, 1)
+            $use = $tot - $fre
+            $pct = if ($tot -gt 0) { [math]::Round(($use / $tot) * 100) } else { 0 }
+            [void]$line1.Add("C: ${use}/${tot}GB ($pct%)")
+        } catch { [void]$line1.Add("C: N/A") }
+    }
+
+    # --- 4. UPTIME ---
+    $bootTime = $null
+    try {
+        $bootTime = (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
+    } catch {
+        try {
+            $osWmi = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction Stop
+            $bootTime = [System.Management.ManagementDateTimeConverter]::ToDateTime($osWmi.LastBootUpTime)
+        } catch {}
+    }
+    if ($bootTime) {
+        $up = (Get-Date) - $bootTime
+        [void]$line2.Add(("UP: {0}d {1:D2}h {2:D2}m" -f $up.Days, $up.Hours, $up.Minutes))
+    } else {
+        [void]$line2.Add("UP: N/A")
+    }
+
+    # --- 5. IP ADDRESS ---
+    try {
+        $ip = (Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction Stop |
+               Where-Object { $_.IPAddress[0] -notmatch '^169\.|^127\.' } | Select-Object -First 1).IPAddress[0]
+        if (!$ip) { throw "No IP" }
+        [void]$line2.Add("IP: $ip")
+    } catch {
+        try {
+            $ip = (Get-WmiObject -Class Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction Stop |
+                   Where-Object { $_.IPAddress[0] -notmatch '^169\.|^127\.' } | Select-Object -First 1).IPAddress[0]
+            if (!$ip) { throw "No IP" }
+            [void]$line2.Add("IP: $ip")
+        } catch {
+            try {
+                $ip = [Net.Dns]::GetHostAddresses([Net.Dns]::GetHostName()) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1 -ExpandProperty IPAddressToString
+                if ($ip) { [void]$line2.Add("IP: $ip") } else { [void]$line2.Add("IP: N/A") }
+            } catch { [void]$line2.Add("IP: N/A") }
+        }
+    }
+
+    return @(
+        ($line1 -join '   |   '),
+        ($line2 -join '   |   ')
+    )
 }
 
-Invoke-RestMethod -Uri "https://cryocore.rhshourav02.workers.dev/message" `
-    -Method Post `
-    -ContentType "application/json" `
-    -Body (@{
-        token = "shourav"
-        text  = "System Info:`nWindows Scripts`nUser Name: $env:USERNAME`nPC Name: $env:COMPUTERNAME`nDomain Name: $env:USERDOMAIN`nLocal IP(s): $($localIPs -join ', ')"
-    } | ConvertTo-Json) | Out-Null
+# ================================================================
+#  DISPLAY HELPERS
+# ================================================================
+$Script:LINE_WIDTH = 75
+
+function Write-Rule {
+    param([string]$Char = '-', [string]$Color = 'DarkCyan')
+    Write-Host ('  ' + ($Char * $Script:LINE_WIDTH)) -ForegroundColor $Color
+}
+
 function Write-Section {
     param([string]$Title)
-    Write-Host "`n--- $Title ---" -ForegroundColor Yellow
+    Write-Host ''
+    Write-Host "  $Title" -ForegroundColor Yellow
+    Write-Host ("  " + ('-' * $Title.Length)) -ForegroundColor DarkYellow
 }
 
 function Write-Item {
-    param([string]$Key, [string]$Description)
-    Write-Host "  $Key) " -NoNewline -ForegroundColor Green
-    Write-Host $Description
+    param([string]$Key, [string]$Desc, [string]$Tag = '')
+    Write-Host '  ' -NoNewline
+    Write-Host " $Key " -ForegroundColor Black -BackgroundColor DarkGreen -NoNewline
+    Write-Host '  ' -NoNewline
+    Write-Host $Desc -ForegroundColor White -NoNewline
+    if ($Tag) { Write-Host "  $Tag" -ForegroundColor DarkGray } else { Write-Host '' }
 }
 
-function Write-Header {
-    Clear-Host
-    try {
-        $Host.UI.RawUI.BackgroundColor = 'Black'
-        $Host.UI.RawUI.ForegroundColor = 'White'
-    } catch {}
+# ================================================================
+#  LOGO  (Large ASCII Art matching requested style)
+# ================================================================
+function Show-Logo {
+    Write-Host ''
+Write-Host '  ________________________________________________________________' -ForegroundColor DarkCyan
+Write-Host ' |                                                                |' -ForegroundColor DarkCyan
+Write-Host ' |                                __                              |' -ForegroundColor Cyan
+Write-Host ' | \    / o ._   _|  _        _  (_   _ ._ o ._ _|_  _            |' -ForegroundColor Cyan
+Write-Host ' |  \/\/  | | | (_| (_) \/\/ _>  __) (_ |  | |_) |_ _>            |' -ForegroundColor Cyan
+Write-Host ' |                                           |                    |' -ForegroundColor Cyan
+Write-Host ' |                                                                |' -ForegroundColor DarkCyan
+Write-Host ' |              Windows Script Toolkit for Windows                |' -ForegroundColor Gray
+Write-Host ' |              ----------------------------------                |' -ForegroundColor DarkGray
+Write-Host ' |                                                                |' -ForegroundColor DarkCyan
+Write-Host ' |________________________________________________________________|' -ForegroundColor DarkCyan
+Write-Host ''
+}
+
+# ================================================================
+#  FULL MENU DRAW
+# ================================================================
+function Show-Menu {
+    try { $Host.UI.RawUI.BackgroundColor = 'Black'; $Host.UI.RawUI.ForegroundColor = 'White' } catch {}
     Clear-Host
 
     Show-Logo
-    Write-Host "============================================================" -ForegroundColor Cyan
-    Write-Host "                    Windows Scripts (Menu)" -ForegroundColor Cyan
-    Write-Host "Author: rhshourav | GitHub: Windows-Scripts | Version: 2.7.1" -ForegroundColor DarkCyan
-    Write-Host "============================================================" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "Press a key (no Enter).  Q = Quit" -ForegroundColor Green
-    Write-Host ""
+
+    # Meta bar
+    Write-Host "  Author : $($Script:AUTHOR)   Version : $($Script:VER)" -ForegroundColor DarkCyan
+    Write-Host "  GitHub : $($Script:GITHUB)" -ForegroundColor DarkCyan
+    Write-Rule '=' 'Cyan'
+
+    # System status (live multi-line arrays from Get-SystemStatus)
+    $statusLines = Get-SystemStatus
+    foreach ($line in $statusLines) {
+        Write-Host "  $line" -ForegroundColor DarkGreen
+    }
+    Write-Rule '-' 'DarkCyan'
+
+    Write-Host "  HOST : $env:COMPUTERNAME   USER : $env:USERNAME @ $env:USERDOMAIN" -ForegroundColor Gray
+    Write-Rule '=' 'Cyan'
+    Write-Host ''
+    Write-Host '  Single key to launch  |  Q = Quit' -ForegroundColor Green
+    Write-Host ''
+
+    # ---------- APPLICATIONS ----------
+    Write-Section 'APPLICATIONS'
+    Write-Item  '1' 'App Setup Framework'
+    Write-Item  '2' 'Office 365'
+    Write-Item  '3' 'Office LTSC 2021'
+    Write-Item  '4' 'MS Store (LTSC)'
+    Write-Item  '5' 'Install Edge'
+    Write-Item  '6' 'Remove Edge'
+    Write-Item  '7' 'Remove New Outlook'
+    Write-Item  '8' 'Remove Duplicate Files' 'NEW'
+
+    # ---------- SYSTEM & MAINTENANCE ----------
+    Write-Section 'SYSTEM & MAINTENANCE'
+    Write-Item  'A' 'Activation / Edition Change'
+    Write-Item  'B' 'Time Sync & Format'
+    Write-Item  'C' 'IP Config'
+    Write-Item  'D' 'Disk Manager'
+    Write-Item  'E' 'Install MediCatUSB'
+    Write-Item  'F' 'Windows Tuner'
+    Write-Item  'G' 'Windows Optimizer'
+    Write-Item  'H' 'Disable Updates'
+    Write-Item  'I' 'Enable Updates'
+    Write-Item  'J' 'Upgrade to Win 11'
+
+    # ---------- HARDWARE & FIXES ----------
+    Write-Section 'HARDWARE & FIXES'
+    Write-Item  'K' 'Extract Drivers'
+    Write-Item  'L' 'Install Extracted Drivers'
+    Write-Item  'M' 'Ricoh B&W Printer'
+    Write-Item  'N' 'Ricoh Color Printer'
+    Write-Item  'O' 'Auto Driver Deploy'
+    Write-Item  'W' 'WARDEN  [Registry Nexus]'
+    Write-Item  'X' 'ERP Setup'
+    Write-Item  'Y' 'Intel Interrupt Fix'
+    Write-Item  'Z' 'WPT Interrupt Fix'
+
+    Write-Host ''
+    Write-Rule '=' 'Cyan'
+    Write-Host ''
+    Write-Host '  Q ' -ForegroundColor Black -BackgroundColor DarkRed -NoNewline
+    Write-Host '  Quit' -ForegroundColor Red
+    Write-Host ''
+    Write-Host -NoNewline '  Select > ' -ForegroundColor Green
 }
 
-function Show-Menu {
-    Write-Header
-    Write-Section "APPLICATIONS"
-    Write-Item "1" "App Setup Framework"
-    Write-Item "2" "Office 365"
-    Write-Item "3" "Office LTSC 2021"
-    Write-Item "4" "MS Store (LTSC)"
-    Write-Item "5" "Install Edge"
-    Write-Item "6" "Remove Edge"
-    Write-Item "7" "Remove New Outlook"
-    Write-Item "8" "Remove Duplicate Files(NEW)"
-
-    Write-Section "SYSTEM & MAINTENANCE"
-    Write-Item "A" "Activation / Edition Change"
-    Write-Item "B" "Time Sync & Format"
-    Write-Item "C" "IP Config"
-    Write-Item "D" "Disk Manager"
-    Write-Item "E" "Install MediCatUSB"
-    Write-Item "F" "Windows Tuner"
-    Write-Item "G" "Windows Optimizer"
-    Write-Item "H" "Disable Updates"
-    Write-Item "I" "Enable Updates"
-    Write-Item "J" "Upgrade to Win 11"
-
-    Write-Section "HARDWARE & FIXES"
-    Write-Item "K" "Extract Drivers"
-    Write-Item "L" "Install Drivers"
-    Write-Item "M" "Ricoh B&W"
-    Write-Item "N" "Ricoh Color"
-    Write-Item "O" "Auto Driver Deploy"
-    Write-Item "W" "WARDEN[Registry Nexus]"
-    Write-Item "X" "ERP Setup"
-    Write-Item "Y" "Intel Interrupt Fix"
-    Write-Item "Z" "WPT Interrupt Fix"
-    Write-Host ""
-    Write-Host "  Q) Quit" -ForegroundColor Red
-    Write-Host ""
-    Write-Host -NoNewline "Select: " -ForegroundColor Green
-}
-
-# -----------------------------
-# Remote launcher (new window) + TEMP intranet trust for LAN share
-# -----------------------------
-function Start-RemoteScriptInNewAdminWindow {
-    param(
-        [Parameter(Mandatory)] [string] $Url,
-        [Parameter(Mandatory)] [string] $Title
-    )
+# ================================================================
+#  REMOTE SCRIPT LAUNCHER
+# ================================================================
+function Start-RemoteScript {
+    param([Parameter(Mandatory)][string]$Url, [Parameter(Mandatory)][string]$Title)
 
     try {
-        # Use TLS 1.2 on older Win10 builds
         try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
-        # Build a literal array for the child window
-        $ipsLiteral = ($TrustedIntranetIPs | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ','
+        $ipsLiteral = ($Script:TrustedIPs | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ','
 
         $cmd = @"
-`$ErrorActionPreference='Stop';
+`$ErrorActionPreference = 'Stop'
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
-# ===== TEMP: Add LAN IP(s) to Local Intranet Zone (HKCU) for this window lifetime =====
-`$__TempZoneKeys = New-Object System.Collections.Generic.List[string]
-
-function Add-IntranetIp([string]`$ip) {
-  `$base = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Ranges'
-  `$k = Join-Path `$base ('Range_' + [guid]::NewGuid().ToString('N'))
-  New-Item -Path `$k -Force | Out-Null
-  New-ItemProperty -Path `$k -Name ':Range' -Value `$ip -PropertyType String -Force | Out-Null
-  New-ItemProperty -Path `$k -Name '*'      -Value 1   -PropertyType DWord  -Force | Out-Null  # 1 = Local intranet
-  [void]`$__TempZoneKeys.Add(`$k)
+`$__ZoneKeys = New-Object System.Collections.Generic.List[string]
+function Add-IntranetIP([string]`$ip) {
+    `$base = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Ranges'
+    `$k    = Join-Path `$base ('Range_' + [guid]::NewGuid().ToString('N'))
+    New-Item      -Path `$k                                      -Force | Out-Null
+    New-ItemProperty -Path `$k -Name ':Range' -Value `$ip -PropertyType String -Force | Out-Null
+    New-ItemProperty -Path `$k -Name '*'      -Value 1   -PropertyType DWord  -Force | Out-Null
+    `$__ZoneKeys.Add(`$k) | Out-Null
 }
-
-foreach(`$ip in @($ipsLiteral)) { Add-IntranetIp `$ip }
-
-Register-EngineEvent PowerShell.Exiting -MessageData @(`$__TempZoneKeys) -Action {
-  foreach(`$k in `$Event.MessageData) {
-    Remove-Item -Path `$k -Recurse -Force -ErrorAction SilentlyContinue
-  }
+foreach (`$ip in @($ipsLiteral)) { Add-IntranetIP `$ip }
+Register-EngineEvent PowerShell.Exiting -MessageData `$__ZoneKeys -Action {
+    foreach (`$k in `$Event.MessageData) { Remove-Item -Path `$k -Recurse -Force -ErrorAction SilentlyContinue }
 } | Out-Null
-# =====================================================================================
 
-try { [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12 } catch {}
-Write-Host '=== $Title ===' -ForegroundColor Cyan;
-iex (irm '$Url' -UseBasicParsing);
+try {
+    `$Host.UI.RawUI.BackgroundColor = 'Black'
+    `$Host.UI.RawUI.ForegroundColor = 'White'
+    try { `$Host.UI.RawUI.WindowTitle = '$Title' } catch {}
+    Clear-Host
+} catch {}
+
+Write-Host ''
+Write-Host '  +--------------------------------------------------------------+' -ForegroundColor Cyan
+Write-Host "  |  $Title" -ForegroundColor Cyan
+Write-Host '  +--------------------------------------------------------------+' -ForegroundColor Cyan
+Write-Host ''
+
+try {
+    Invoke-Expression (Invoke-RestMethod '$Url' -UseBasicParsing)
+} catch {
+    Write-Host ''
+    Write-Host '  [!] Script execution error:' -ForegroundColor Red
+    Write-Host "      `$(`$_.Exception.Message)" -ForegroundColor DarkRed
+}
+Write-Host ''
+Write-Host '  [Done] Press Enter to close this window ...' -ForegroundColor DarkGray
+`$null = Read-Host
 "@
 
-        $argList = @(
-            "-NoProfile",
-            "-ExecutionPolicy", "Bypass",
-            "-NoExit",
-            "-Command", $cmd
-        )
+        $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $cmd)
+        Start-Process -FilePath 'powershell.exe' -ArgumentList $argList | Out-Null
 
-        Start-Process -FilePath "powershell.exe" -ArgumentList $argList | Out-Null
-        Write-Host "`n[+] Launched: $Title" -ForegroundColor Green
-    }
-    catch {
-        Write-Host "`n[!] Failed to launch: $Title" -ForegroundColor Red
-        Write-Host "    $($_.Exception.Message)" -ForegroundColor DarkRed
+        Write-Host ''
+        Write-Host "  [+] Launched : $Title" -ForegroundColor Green
+
+    } catch {
+        Write-Host ''
+        Write-Host "  [!] Failed to launch : $Title" -ForegroundColor Red
+        Write-Host "      $($_.Exception.Message)" -ForegroundColor DarkRed
     }
 }
 
-# -----------------------------
-# Menu map (easy to extend)
-# -----------------------------
+# ================================================================
+#  ACTION MAP
+# ================================================================
 $Actions = @{
-     # App Setup
-    '1' = @{ Title="App Setup Framework"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Auto-App-Installer-Framework/autoInstallFromLocal.ps1" }
-    '2' = @{ Title="Office 365 Install"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/office-Install/o365.ps1" }
-    '3' = @{ Title="Office LTSC 2021"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/office-Install/oLTSC-2021.ps1" }
-    '4' = @{ Title="Microsoft Store (LTSC)"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/LTSC-ADD-MS_Store-2019/DL-RUN.ps1" }
-    '5' = @{ Title="Edge Installer"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/MicroSoft-Edge/installEdge.ps1"}
-    
-    # Uninstalls
-    '6' = @{ Title="Edge Uninstaller"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/MicroSoft-Edge/edge-Uninstall.ps1"}
-    '7' = @{ Title="New Outlook Uninstaller"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/New%20Outlook%20Uninstaller/uninstall-NOU.ps1" }
-
-    #System Cleanup
-    '8' = @{ Title="Remove Duplicate Files"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/DupReaper/drip.ps1"}
-    
-    # System Tools
-    'A' = @{ Title="Activation & Edition"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/run" }
-    'B' = @{ Title="Time/Zone Formatter"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/timeZoneFormat/timeZoneFormat.ps1" }
-    'C' = @{ Title="IP Config Tool"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/IPConfig/Ipconfig.ps1"}
-    'D' = @{ Title="Disk Manager"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/DiskManager/diskmgr.ps1" }
-    'E' = @{ Title="Install MediCatUSB"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Install-MediCatUSB/installMUSVB.ps1" }
-
-    # Maintenance & Optimization
-    'F' = @{ Title="Windows Tuner"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/wp-Tuner.ps1" }
-    'G' = @{ Title="Windows Optimizer"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/Windows-Optimizer.ps1" }
-    'H' = @{ Title="Disable Win Update"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Disable-WindowsUpdate.ps1" }
-    'I' = @{ Title="Enable Win Update"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Enable-WindowsUpdate.ps1" }
-    'J' = @{ Title="Win 10 to 11 Upgrade"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/TO-Win11-Auto-Upgrade/Win11-AutoUpgrade.ps1" }
-
-    # Drivers & Printer
-    'K' = @{ Title="Extract Drivers"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dExtractor.ps1"}
-    'L' = @{ Title="Install Extracted Drivers"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dInstaller.ps1"}
-    'M' = @{ Title="RICOH B&W Printer"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addRICHO.ps1" }
-    'N' = @{ Title="RICOH Color Printer"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addColorRICHO.ps1" }
-    'O' = @{ Title="Auto Driver Deploy"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/AutoDriverDeploy/AutoDriverDeploy.ps1" }
-    'W' = @{ Title="WARDEN[Registry Nexus]"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/regBack/WARDEN.ps1"}
-    
-    # Fixes
-    'X' = @{ Title="ERP Automate Setup"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/run_Auto-ERP.ps1" }
-    'Y' = @{ Title="Intel Interrupt Fix"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/SystemInterrupt-Fix/Intel-SystemInterrupt-Fix.ps1" }
-    'Z' = @{ Title="WPT Interrupt Fix"; Url="https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/SystemInterrupt-Fix/wpt_interrupt_fix_plus.ps1" }
+    '1' = @{ Title = 'App Setup Framework';       Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Auto-App-Installer-Framework/autoInstallFromLocal.ps1' }
+    '2' = @{ Title = 'Office 365';                Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/office-Install/o365.ps1' }
+    '3' = @{ Title = 'Office LTSC 2021';          Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/office-Install/oLTSC-2021.ps1' }
+    '4' = @{ Title = 'Microsoft Store (LTSC)';    Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/LTSC-ADD-MS_Store-2019/DL-RUN.ps1' }
+    '5' = @{ Title = 'Edge Installer';            Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/MicroSoft-Edge/installEdge.ps1' }
+    '6' = @{ Title = 'Edge Uninstaller';          Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/MicroSoft-Edge/edge-Uninstall.ps1' }
+    '7' = @{ Title = 'New Outlook Uninstaller';   Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/New%20Outlook%20Uninstaller/uninstall-NOU.ps1' }
+    '8' = @{ Title = 'Remove Duplicate Files';    Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/DupReaper/drip.ps1' }
+    'A' = @{ Title = 'Activation & Edition';      Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/run' }
+    'B' = @{ Title = 'Time / Zone Formatter';     Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/timeZoneFormat/timeZoneFormat.ps1' }
+    'C' = @{ Title = 'IP Config Tool';            Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/IPConfig/Ipconfig.ps1' }
+    'D' = @{ Title = 'Disk Manager';              Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/DiskManager/diskmgr.ps1' }
+    'E' = @{ Title = 'Install MediCatUSB';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Install-MediCatUSB/installMUSVB.ps1' }
+    'F' = @{ Title = 'Windows Tuner';             Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/wp-Tuner.ps1' }
+    'G' = @{ Title = 'Windows Optimizer';         Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/Windows-Optimizer.ps1' }
+    'H' = @{ Title = 'Disable Win Updates';       Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Disable-WindowsUpdate.ps1' }
+    'I' = @{ Title = 'Enable Win Updates';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Enable-WindowsUpdate.ps1' }
+    'J' = @{ Title = 'Win 10 to 11 Upgrade';      Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/TO-Win11-Auto-Upgrade/Win11-AutoUpgrade.ps1' }
+    'K' = @{ Title = 'Extract Drivers';           Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dExtractor.ps1' }
+    'L' = @{ Title = 'Install Extracted Drivers'; Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dInstaller.ps1' }
+    'M' = @{ Title = 'RICOH B&W Printer';         Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addRICHO.ps1' }
+    'N' = @{ Title = 'RICOH Color Printer';       Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addColorRICHO.ps1' }
+    'O' = @{ Title = 'Auto Driver Deploy';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/AutoDriverDeploy/AutoDriverDeploy.ps1' }
+    'W' = @{ Title = 'WARDEN [Registry Nexus]';   Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/regBack/WARDEN.ps1' }
+    'X' = @{ Title = 'ERP Automate Setup';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/run_Auto-ERP.ps1' }
+    'Y' = @{ Title = 'Intel Interrupt Fix';       Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/SystemInterrupt-Fix/Intel-SystemInterrupt-Fix.ps1' }
+    'Z' = @{ Title = 'WPT Interrupt Fix';         Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/SystemInterrupt-Fix/wpt_interrupt_fix_plus.ps1' }
 }
 
-# -----------------------------
-# Main loop
-# -----------------------------
+# ================================================================
+#  MAIN LOOP
+# ================================================================
 while ($true) {
     Show-Menu
 
-    $k = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-    $choice = ($k.Character.ToString()).ToUpperInvariant()
+    try {
+        $key    = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+        $choice = ($key.Character.ToString()).ToUpperInvariant()
+    } catch {
+        try {
+            $choice = (Read-Host).Trim().ToUpperInvariant()
+            if ($choice.Length -gt 1) { $choice = $choice.Substring(0,1) }
+        } catch {
+            Start-Sleep -Milliseconds 300
+            continue
+        }
+    }
 
-    if ($choice -eq 'Q') { break }
+    if ($choice -eq 'Q') {
+        Clear-Host
+        Write-Host ''
+        Write-Host '  Goodbye.' -ForegroundColor Cyan
+        Write-Host ''
+        Start-Sleep -Milliseconds 500
+        break
+    }
 
     if ($Actions.ContainsKey($choice)) {
         $item = $Actions[$choice]
-        Start-RemoteScriptInNewAdminWindow -Url $item.Url -Title $item.Title
-    }
-    else {
-        Write-Host "`n[!] Invalid selection: $choice" -ForegroundColor Yellow
+        Start-RemoteScript -Url $item.Url -Title $item.Title
+    } else {
+        Write-Host ''
+        Write-Host "  [?] No action for key : [$choice]" -ForegroundColor Yellow
     }
 
     Start-Sleep -Milliseconds 700
