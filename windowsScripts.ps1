@@ -3,7 +3,7 @@
    Windows Scripts  -  Main Menu Launcher
    Author  : rhshourav
    GitHub  : https://github.com/rhshourav/Windows-Scripts
-   Version : 27.3.0
+   Version : 27.4.0
    Notes   : iex/irm compatible, auto-elevates, single-key nav,
              launches sub-scripts in new elevated windows,
              temporarily adds LAN IPs to Local Intranet zone,
@@ -29,7 +29,7 @@ $ErrorActionPreference = 'Stop'
 # ================================================================
 #  CONSTANTS
 # ================================================================
-$Script:VER    = '27.3.0'
+$Script:VER    = '27.4.0'
 $Script:AUTHOR = 'rhshourav'
 $Script:GITHUB = 'https://github.com/rhshourav/Windows-Scripts'
 
@@ -390,27 +390,29 @@ function Show-Menu {
     Write-Item  '5' 'Install Edge'
     Write-Item  '6' 'Remove Edge'
     Write-Item  '7' 'Remove New Outlook'
-    Write-Item  '8' 'Remove Duplicate Files' 'NEW'
+    Write-Item  '8' 'RICHO Printer Setup' 'NEW' 
 
     # ---------- SYSTEM & MAINTENANCE ----------
     Write-Section 'SYSTEM & MAINTENANCE'
     Write-Item  'A' 'Activation / Edition Change'
     Write-Item  'B' 'Time Sync & Format'
-    Write-Item  'C' 'IP Config'
-    Write-Item  'D' 'Disk Manager'
-    Write-Item  'E' 'Install MediCatUSB'
-    Write-Item  'F' 'Windows Tuner'
-    Write-Item  'G' 'Windows Optimizer'
-    Write-Item  'H' 'Disable Updates'
-    Write-Item  'I' 'Enable Updates'
-    Write-Item  'J' 'Upgrade to Win 11'
+    Write-Item  'C' 'Remove Duplicate Files' 'NEW'
+    Write-Item  'D' 'IP Config'
+    Write-Item  'E' 'Disk Manager'
+    Write-Item  'F' 'Install MediCatUSB'
+    Write-Item  'G' 'Windows Tuner'
+    Write-Item  'H' 'Windows Optimizer'
+    Write-Item  'I' 'Disable Updates'
+    Write-Item  'J' 'Enable Updates'
+    Write-Item  'K' 'Upgrade to Win 11'
 
     # ---------- HARDWARE & FIXES ----------
     Write-Section 'HARDWARE & FIXES'
-    Write-Item  'K' 'Extract Drivers'
-    Write-Item  'L' 'Install Extracted Drivers'
-    Write-Item  'M' 'Ricoh B&W Printer'
-    Write-Item  'N' 'Ricoh Color Printer'
+    Write-Item  'L' 'Extract Drivers'
+    Write-Item  'M' 'Install Extracted Drivers'
+    
+   # Write-Item  'M' 'Ricoh Printer '
+    Write-Item  'N' 'ERP Font Install' 'NEW'
     Write-Item  'O' 'Auto Driver Deploy'
     Write-Item  'W' 'WARDEN  [Registry Nexus]'
     Write-Item  'X' 'ERP Setup'
@@ -529,21 +531,22 @@ $Actions = @{
     '5' = @{ Title = 'Edge Installer';            Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/MicroSoft-Edge/installEdge.ps1' }
     '6' = @{ Title = 'Edge Uninstaller';          Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/MicroSoft-Edge/edge-Uninstall.ps1' }
     '7' = @{ Title = 'New Outlook Uninstaller';   Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/New%20Outlook%20Uninstaller/uninstall-NOU.ps1' }
-    '8' = @{ Title = 'Remove Duplicate Files';    Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/DupReaper/drip.ps1' }
+    '8' = @{ Title = 'RICHO Printer Setup';       Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/aoRICHO.ps1' }
     'A' = @{ Title = 'Activation & Edition';      Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/run' }
     'B' = @{ Title = 'Time / Zone Formatter';     Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/timeZoneFormat/timeZoneFormat.ps1' }
-    'C' = @{ Title = 'IP Config Tool';            Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/IPConfig/Ipconfig.ps1' }
-    'D' = @{ Title = 'Disk Manager';              Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/DiskManager/diskmgr.ps1' }
-    'E' = @{ Title = 'Install MediCatUSB';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Install-MediCatUSB/installMUSVB.ps1' }
-    'F' = @{ Title = 'Windows Tuner';             Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/wp-Tuner.ps1' }
-    'G' = @{ Title = 'Windows Optimizer';         Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/Windows-Optimizer.ps1' }
-    'H' = @{ Title = 'Disable Win Updates';       Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Disable-WindowsUpdate.ps1' }
-    'I' = @{ Title = 'Enable Win Updates';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Enable-WindowsUpdate.ps1' }
-    'J' = @{ Title = 'Win 10 to 11 Upgrade';      Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/TO-Win11-Auto-Upgrade/Win11-AutoUpgrade.ps1' }
-    'K' = @{ Title = 'Extract Drivers';           Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dExtractor.ps1' }
-    'L' = @{ Title = 'Install Extracted Drivers'; Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dInstaller.ps1' }
-    'M' = @{ Title = 'RICOH B&W Printer';         Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addRICHO.ps1' }
-    'N' = @{ Title = 'RICOH Color Printer';       Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addColorRICHO.ps1' }
+    'C' = @{ Title = 'Remove Duplicate Files';    Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/DupReaper/drip.ps1' }
+    'D' = @{ Title = 'IP Config Tool';            Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/IPConfig/Ipconfig.ps1' }
+    'E' = @{ Title = 'Disk Manager';              Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/DiskManager/diskmgr.ps1' }
+    'F' = @{ Title = 'Install MediCatUSB';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Install-MediCatUSB/installMUSVB.ps1' }
+    'G' = @{ Title = 'Windows Tuner';             Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/wp-Tuner.ps1' }
+    'H' = @{ Title = 'Windows Optimizer';         Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/Windows-Optimizer.ps1' }
+    'I' = @{ Title = 'Disable Win Updates';       Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Disable-WindowsUpdate.ps1' }
+    'J' = @{ Title = 'Enable Win Updates';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Enable-WindowsUpdate.ps1' }
+    'K' = @{ Title = 'Win 10 to 11 Upgrade';      Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/TO-Win11-Auto-Upgrade/Win11-AutoUpgrade.ps1' }
+    'L' = @{ Title = 'Extract Drivers';           Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dExtractor.ps1' }
+    'M' = @{ Title = 'Install Extracted Drivers'; Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dInstaller.ps1' }
+     #'M' = @{ Title = 'RICOH B&W Printer';         Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addRICHO.ps1' }
+    'N' = @{ Title = 'ERP Font Install';          Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/font_install.ps1' }
     'O' = @{ Title = 'Auto Driver Deploy';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/AutoDriverDeploy/AutoDriverDeploy.ps1' }
     'W' = @{ Title = 'WARDEN [Registry Nexus]';   Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/regBack/WARDEN.ps1' }
     'X' = @{ Title = 'ERP Automate Setup';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/run_Auto-ERP.ps1' }
