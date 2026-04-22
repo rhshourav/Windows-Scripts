@@ -106,7 +106,7 @@ function Write-Header {
     Show-Logo
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host "                    Windows Scripts (Menu)" -ForegroundColor Cyan
-    Write-Host "Author: rhshourav | GitHub: Windows-Scripts | Version: 1.8.0" -ForegroundColor DarkCyan
+    Write-Host "Author: rhshourav | GitHub: Windows-Scripts | Version: 2.7.1" -ForegroundColor DarkCyan
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Press a key (no Enter).  Q = Quit" -ForegroundColor Green
