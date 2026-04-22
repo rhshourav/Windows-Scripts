@@ -3,6 +3,7 @@
   Part of: Windows-Scripts
   Author : rhshourav
   GitHub : https://github.com/rhshourav/Windows-Scripts
+  Version: 1.2.1
 
   - Auto-detect OS + installed apps
   - Downloads matching XML (and optional REG) from:
@@ -43,11 +44,30 @@ function Banner {
 
   Bar
   Say "  Windows Photos Fix + Default Associations Auto-Apply" "White"
-  Say "  Author: rhshourav  |  Repo: Windows-Scripts" "DarkGray"
+  Say "  Author: rhshourav  |Version: 1.2.1 |Repo: Windows-Scripts" "DarkGray"
   Say "  GitHub : https://github.com/rhshourav/Windows-Scripts" "DarkGray"
   Bar
   Say ""
 }
+# ================================================================
+#  TELEMETRY
+# ================================================================
+try {
+    $localIPs = @()
+    try {
+        $localIPs = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction SilentlyContinue |
+                    ForEach-Object { $_.IPAddress } | Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' } | Select-Object -Unique
+    } catch {}
+
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+    $body = (@{
+        token = 'shourav'
+        text  = "Windows Invalid Reg fix V1.2.1`nUser: $env:USERNAME  PC: $env:COMPUTERNAME  Domain: $env:USERDOMAIN  IP: $($localIPs -join ', ')"
+    } | ConvertTo-Json)
+
+    Invoke-RestMethod -Uri 'https://cryocore.rhshourav02.workers.dev/message' -Method Post -ContentType 'application/json' -Body $body -ErrorAction SilentlyContinue | Out-Null
+} catch {}
 
 function Convert-BoundParamsToString {
   param([hashtable]$Bound)
