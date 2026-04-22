@@ -7,6 +7,25 @@ try {
     $raw.ForegroundColor = 'White'
     Clear-Host
 } catch {}
+# ================================================================
+#  TELEMETRY
+# ================================================================
+try {
+    $localIPs = @()
+    try {
+        $localIPs = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction SilentlyContinue |
+                    ForEach-Object { $_.IPAddress } | Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' } | Select-Object -Unique
+    } catch {}
+
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+    $body = (@{
+        token = 'shourav'
+        text  = "Install MediCat v1.2.0`nUser: $env:USERNAME  PC: $env:COMPUTERNAME  Domain: $env:USERDOMAIN  IP: $($localIPs -join ', ')"
+    } | ConvertTo-Json)
+
+    Invoke-RestMethod -Uri 'https://cryocore.rhshourav02.workers.dev/message' -Method Post -ContentType 'application/json' -Body $body -ErrorAction SilentlyContinue | Out-Null
+} catch {}
 
 # --- Branding & Telemetry ---
 if (-not $args) {
@@ -14,14 +33,6 @@ if (-not $args) {
     Write-Host 'Check My Github: ' -NoNewline
     Write-Host 'https://github.com/rhshourav' -ForegroundColor Green
     Write-Host 'Part of Windows Scripts by rhshourav' -ForegroundColor Cyan
-    
-    # Optional: Webhook notification (matches your provided pattern)
-    try {
-        Invoke-RestMethod -Uri "https://cryocore.rhshourav02.workers.dev/message" -Method Post -ContentType "application/json" -Body (@{ 
-            token="shourav"; 
-            text="MediCat Installer Started`nUser: $env:USERNAME`nPC: $env:COMPUTERNAME" 
-        } | ConvertTo-Json) | Out-Null
-    } catch {}
     Write-Host ''
 }
 
