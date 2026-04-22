@@ -3,7 +3,7 @@
    Windows Scripts  -  Main Menu Launcher
    Author  : rhshourav
    GitHub  : https://github.com/rhshourav/Windows-Scripts
-   Version : 27.1.0
+   Version : 27.2.0
    Notes   : iex/irm compatible, auto-elevates, single-key nav,
              launches sub-scripts in new elevated windows,
              temporarily adds LAN IPs to Local Intranet zone,
@@ -29,7 +29,7 @@ $ErrorActionPreference = 'Stop'
 # ================================================================
 #  CONSTANTS
 # ================================================================
-$Script:VER    = '27.1.0'
+$Script:VER    = '27.2.0'
 $Script:AUTHOR = 'rhshourav'
 $Script:GITHUB = 'https://github.com/rhshourav/Windows-Scripts'
 
@@ -344,31 +344,44 @@ function Show-Menu {
 #  REMOTE SCRIPT LAUNCHER
 # ================================================================
 function Start-RemoteScript {
-    param([Parameter(Mandatory)][string]$Url, [Parameter(Mandatory)][string]$Title)
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$Title
+    )
 
     try {
+        # Ensure TLS 1.2 is used for the session
         try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
+        # Prepare the Trusted IPs for the child window
+        # (Using the variable name from your v3.0.0 script)
         $ipsLiteral = ($Script:TrustedIPs | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ','
 
-        $cmd = @"
+        # This is the exact logic from your script, formatted for encoding
+        $innerScript = @"
 `$ErrorActionPreference = 'Stop'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
+# --- TEMP: Add LAN IP(s) to Local Intranet Zone (HKCU) ---
 `$__ZoneKeys = New-Object System.Collections.Generic.List[string]
 function Add-IntranetIP([string]`$ip) {
     `$base = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Ranges'
     `$k    = Join-Path `$base ('Range_' + [guid]::NewGuid().ToString('N'))
-    New-Item      -Path `$k                                      -Force | Out-Null
+    New-Item -Path `$k -Force | Out-Null
     New-ItemProperty -Path `$k -Name ':Range' -Value `$ip -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path `$k -Name '*'      -Value 1   -PropertyType DWord  -Force | Out-Null
+    New-ItemProperty -Path `$k -Name '*' -Value 1 -PropertyType DWord -Force | Out-Null
     `$__ZoneKeys.Add(`$k) | Out-Null
 }
 foreach (`$ip in @($ipsLiteral)) { Add-IntranetIP `$ip }
+
+# Register the cleanup event to remove Registry keys on exit
 Register-EngineEvent PowerShell.Exiting -MessageData `$__ZoneKeys -Action {
-    foreach (`$k in `$Event.MessageData) { Remove-Item -Path `$k -Recurse -Force -ErrorAction SilentlyContinue }
+    foreach (`$k in `$Event.MessageData) {
+        Remove-Item -Path `$k -Recurse -Force -ErrorAction SilentlyContinue
+    }
 } | Out-Null
 
+# --- UI Setup ---
 try {
     `$Host.UI.RawUI.BackgroundColor = 'Black'
     `$Host.UI.RawUI.ForegroundColor = 'White'
@@ -382,20 +395,33 @@ Write-Host "  |  $Title" -ForegroundColor Cyan
 Write-Host '  +--------------------------------------------------------------+' -ForegroundColor Cyan
 Write-Host ''
 
+# --- Execution ---
 try {
-    Invoke-Expression (Invoke-RestMethod '$Url' -UseBasicParsing)
+    Write-Host '  [>] Downloading and executing...' -ForegroundColor Gray
+    Invoke-Expression (Invoke-RestMethod -Uri '$Url' -UseBasicParsing)
 } catch {
     Write-Host ''
     Write-Host '  [!] Script execution error:' -ForegroundColor Red
     Write-Host "      `$(`$_.Exception.Message)" -ForegroundColor DarkRed
 }
+
 Write-Host ''
 Write-Host '  [Done] Press Enter to close this window ...' -ForegroundColor DarkGray
 `$null = Read-Host
 "@
 
-        $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $cmd)
-        Start-Process -FilePath 'powershell.exe' -ArgumentList $argList | Out-Null
+        # CONVERT TO BASE64: This is the critical fix.
+        # It bypasses all command-line parsing issues.
+        $bytes = [System.Text.Encoding]::Unicode.GetBytes($innerScript)
+        $encodedCommand = [Convert]::ToBase64String($bytes)
+
+        $argList = @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-EncodedCommand', $encodedCommand
+        )
+
+        Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -WindowStyle Normal
 
         Write-Host ''
         Write-Host "  [+] Launched : $Title" -ForegroundColor Green
@@ -406,7 +432,6 @@ Write-Host '  [Done] Press Enter to close this window ...' -ForegroundColor Dark
         Write-Host "      $($_.Exception.Message)" -ForegroundColor DarkRed
     }
 }
-
 # ================================================================
 #  ACTION MAP
 # ================================================================
