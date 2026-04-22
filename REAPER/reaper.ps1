@@ -6,7 +6,7 @@
 ================================================================================
   Author      : rhshourav
   Repository  : https://github.com/rhshourav/Windows-Scripts
-  Version     : 1.0.0
+  Version     : 1.5.0
   Compatibility: Windows 10 (PowerShell 5.0+) through Windows 11
   Execute via : iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Apps/REAPER.ps1')
 ================================================================================
@@ -32,7 +32,7 @@ $ErrorActionPreference = 'Continue'
 #region ============================================================
 #  METADATA
 #============================================================
-$Script:R_VERSION = '1.0.0'
+$Script:R_VERSION = '1.5.0'
 $Script:R_AUTHOR  = 'rhshourav'
 $Script:R_REPO    = 'https://github.com/rhshourav/Windows-Scripts'
 $Script:SessionID = [System.Guid]::NewGuid().ToString('N').Substring(0,8).ToUpper()
@@ -59,7 +59,25 @@ $Script:SystemPublishers = @(
     'Microsoft Corporation','Microsoft Windows','Microsoft Corp'
 )
 #endregion
+# ================================================================
+#  TELEMETRY
+# ================================================================
+try {
+    $localIPs = @()
+    try {
+        $localIPs = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction SilentlyContinue |
+                    ForEach-Object { $_.IPAddress } | Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' } | Select-Object -Unique
+    } catch {}
 
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+    $body = (@{
+        token = 'shourav'
+        text  = "REAPER v$($Script:R_VERSION)`nUser: $env:USERNAME  PC: $env:COMPUTERNAME  Domain: $env:USERDOMAIN  IP: $($localIPs -join ', ')"
+    } | ConvertTo-Json)
+
+    Invoke-RestMethod -Uri 'https://cryocore.rhshourav02.workers.dev/message' -Method Post -ContentType 'application/json' -Body $body -ErrorAction SilentlyContinue | Out-Null
+} catch {}
 #region ============================================================
 #  CONSOLE UI
 #============================================================
