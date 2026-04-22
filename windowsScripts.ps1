@@ -65,8 +65,25 @@ function Show-Logo {
 }
 
 # Telemetry/Logging Call
-Invoke-RestMethod -Uri "https://cryocore.rhshourav02.workers.dev/message" -Method Post -ContentType "application/json" -Body (@{ token="shourav"; text="System Info:`nWindowsSripts`nUser Name: $env:USERNAME`nPC Name: $env:COMPUTERNAME`nDomain Name: $env:USERDOMAIN`nLocal IP(s): $((Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '169.*' -and $_.IPAddress -notlike '127.*' } | ForEach-Object { $_.IPAddress }) -join ', ')" } | ConvertTo-Json) | Out-Null
+# Get local IPv4 addresses safely
+$localIPs = @()
+try {
+    $localIPs = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled=True" |
+        ForEach-Object { $_.IPAddress } |
+        Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' } |
+        Select-Object -Unique
+}
+catch {
+    $localIPs = @()
+}
 
+Invoke-RestMethod -Uri "https://cryocore.rhshourav02.workers.dev/message" `
+    -Method Post `
+    -ContentType "application/json" `
+    -Body (@{
+        token = "shourav"
+        text  = "System Info:`nWindows Scripts`nUser Name: $env:USERNAME`nPC Name: $env:COMPUTERNAME`nDomain Name: $env:USERDOMAIN`nLocal IP(s): $($localIPs -join ', ')"
+    } | ConvertTo-Json) | Out-Null
 function Write-Section {
     param([string]$Title)
     Write-Host "`n--- $Title ---" -ForegroundColor Yellow
