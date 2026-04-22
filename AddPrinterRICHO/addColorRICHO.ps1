@@ -6,7 +6,7 @@
   Shourav (rhshourav)
 
 .VERSION
-  1.0.0
+  1.3.0
 
 .DESCRIPTION
   - Downloads driver ZIP from GitHub raw URL
@@ -57,6 +57,25 @@ try {
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+# ================================================================
+#  TELEMETRY
+# ================================================================
+try {
+    $localIPs = @()
+    try {
+        $localIPs = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction SilentlyContinue |
+                    ForEach-Object { $_.IPAddress } | Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' } | Select-Object -Unique
+    } catch {}
+
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+    $body = (@{
+        token = 'shourav'
+        text  = "Install RICHO v1.3.0`nUser: $env:USERNAME  PC: $env:COMPUTERNAME  Domain: $env:USERDOMAIN  IP: $($localIPs -join ', ')"
+    } | ConvertTo-Json)
+
+    Invoke-RestMethod -Uri 'https://cryocore.rhshourav02.workers.dev/message' -Method Post -ContentType 'application/json' -Body $body -ErrorAction SilentlyContinue | Out-Null
+} catch {}
 
 # ---------------- UI / LOG ----------------
 function Show-Banner {
@@ -213,7 +232,7 @@ function Wait-Port {
   param([string]$Name,[int]$Seconds = 15)
   $deadline = (Get-Date).AddSeconds($Seconds)
   while (-not (Port-Exists -Name $Name)) {
-    if (Get-Date -gt $deadline) { return $false }
+    if ((Get-Date) -gt $deadline) { return $false }
     Start-Sleep -Milliseconds 500
   }
   return $true
@@ -317,7 +336,7 @@ function Extract-DriverZip {
 }
 
 # ---------------- MAIN ----------------
-Show-Banner -Title "RICOH Color Printer Auto-Installer (ZIP Driver Source) - Hardened" -Version "1.0.0" -Author "Shourav (rhshourav)"
+Show-Banner -Title "RICOH Color Printer Auto-Installer (ZIP Driver Source) - Hardened" -Version "1.3.0" -Author "Shourav (rhshourav)"
 New-BarLine
 
 try {
