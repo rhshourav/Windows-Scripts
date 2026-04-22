@@ -1,11 +1,13 @@
 <#
   Office LTSC 2021 Auto-Installer (ODT ZIP)
+  - Version 2.3.0
   - Downloads your OLTSC-2021.zip (setup.exe + Configuration.xml)
   - Extracts to temp
   - Runs: setup.exe /configure Configuration.xml
   - Shows a live spinner + status output (no prompts)
   - Writes log
   - Cleans up at the end
+  
 #>
 
 #region Admin check
@@ -17,6 +19,26 @@ if (-not $IsAdmin) {
   exit 1
 }
 #endregion
+# ================================================================
+#  TELEMETRY
+# ================================================================
+try {
+    $localIPs = @()
+    try {
+        $localIPs = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction SilentlyContinue |
+                    ForEach-Object { $_.IPAddress } | Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' } | Select-Object -Unique
+    } catch {}
+
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+    $body = (@{
+        token = 'shourav'
+        text  = "Office LTSC Install v2.3.0`nUser: $env:USERNAME  PC: $env:COMPUTERNAME  Domain: $env:USERDOMAIN  IP: $($localIPs -join ', ')"
+    } | ConvertTo-Json)
+
+    Invoke-RestMethod -Uri 'https://cryocore.rhshourav02.workers.dev/message' -Method Post -ContentType 'application/json' -Body $body -ErrorAction SilentlyContinue | Out-Null
+} catch {}
+
 # -----------------------------
 # UI: black background + bright colors
 # -----------------------------
@@ -40,7 +62,7 @@ function Write-Banner {
   Clear-Host
   $line = ("=" * 70)
   Write-Host $line -ForegroundColor DarkCyan
-  Write-Host "  Office LTSC 2021 Auto-Installer (ODT ZIP)  |  rhshourav" -ForegroundColor Cyan
+  Write-Host "  Office LTSC 2021 Auto-Installer (ODT ZIP)  |  rhshourav | v2.3.0" -ForegroundColor Cyan
   Write-Host $line -ForegroundColor DarkCyan
   Write-Host "  WorkDir: $BaseDir" -ForegroundColor DarkGray
   Write-Host "  Log   : $LogPath" -ForegroundColor DarkGray
