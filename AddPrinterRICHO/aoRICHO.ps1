@@ -7,7 +7,7 @@
   GitHub: https://github.com/rhshourav/Windows-Scripts
 
 .VERSION
-  2.1.0
+  2.2.0
 
 .DESCRIPTION
   Combined auto-installer for RICOH B&W and Color network printers.
@@ -15,7 +15,7 @@
     [2] RICOH IM C2000 PCL 6     -> "Secure-Color-Printer" (Color, port LPR_192.168.18.245)
     [3] Both printers at once
 
-  Port-registration fix (v2.1.0):
+  Port-registration fix (v2.2.0):
     Win32_TCPIPPrinterPort (WMI) does NOT always surface LPR ports immediately
     after prnport.vbs creates them - LPR ports live in the LPR Port Monitor's
     own registry hive and the spooler must reload before WMI sees them.
@@ -92,7 +92,7 @@ try {
 
     $body = (@{
         token = 'shourav'
-        text  = "RICHO All In One V2.1.0`nUser: $env:USERNAME  PC: $env:COMPUTERNAME  Domain: $env:USERDOMAIN  IP: $($localIPs -join ', ')"
+        text  = "RICHO All In One V2.2.0`nUser: $env:USERNAME  PC: $env:COMPUTERNAME  Domain: $env:USERDOMAIN  IP: $($localIPs -join ', ')"
     } | ConvertTo-Json)
 
     Invoke-RestMethod -Uri 'https://cryocore.rhshourav02.workers.dev/message' -Method Post -ContentType 'application/json' -Body $body -ErrorAction SilentlyContinue | Out-Null
@@ -125,7 +125,7 @@ function Show-Logo {
   Write-Host "|" -ForegroundColor $L
   Write-Host $mid -ForegroundColor $L
   Write-Host "|" -NoNewline -ForegroundColor $L
-  Write-Host (PL "  Network Printer Auto-Installer Suite  v2.1.0") -NoNewline -ForegroundColor $W
+  Write-Host (PL "  Network Printer Auto-Installer Suite  v2.2.0") -NoNewline -ForegroundColor $W
   Write-Host "|" -ForegroundColor $L
   Write-Host "|" -NoNewline -ForegroundColor $L
   Write-Host (PL "  Author : Shourav (rhshourav)") -NoNewline -ForegroundColor $G
@@ -326,14 +326,55 @@ function Port-Exists {
 
 function Delete-PortBestEffort {
   param([string]$PortName)
+
+  try {
+    if (Get-Command Remove-PrinterPort -ErrorAction SilentlyContinue) {
+      try { Remove-PrinterPort -Name $PortName -ErrorAction SilentlyContinue } catch {}
+    }
+  } catch {}
+
   try {
     $vbs = Get-PrnPortVbs
     $null = cmd.exe /c "cscript //nologo `"$vbs`" -d -s localhost -r `"$PortName`"" 2>&1
   } catch {}
+
+  try {
+    $monBase = "HKLM:\SYSTEM\CurrentControlSet\Control\Print\Monitors"
+    Get-ChildItem $monBase -ErrorAction SilentlyContinue | ForEach-Object {
+      $portsKey = Join-Path $_.PSPath "Ports"
+      if (Test-Path $portsKey) {
+        $portPath = Join-Path $portsKey $PortName
+        if (Test-Path $portPath) {
+          Remove-Item $portPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+      }
+    }
+  } catch {}
+}
+
+function Remove-PortAndWaitGone {
+  param([string]$PortName, [int]$Seconds = 30)
+
+  Delete-PortBestEffort -PortName $PortName
+
+  $deadline = (Get-Date).AddSeconds($Seconds)
+  while (Port-Exists -Name $PortName) {
+    if ((Get-Date) -gt $deadline) { return $false }
+    Start-Sleep -Milliseconds 500
+  }
+  return $true
 }
 
 function Ensure-LprPort {
   param([string]$PortName, [string]$IP, [string]$Queue)
+
+  if (Port-Exists -Name $PortName) {
+    if (-not (Remove-PortAndWaitGone -PortName $PortName -Seconds 30)) {
+      throw "Port '$PortName' still exists after cleanup."
+    }
+    try { Stop-SpoolerHard; Start-Spooler } catch {}
+  }
+
   $vbs = Get-PrnPortVbs
 
   # Attempt 1 - with -2e (double-spool / byte-counting mode)
@@ -595,7 +636,13 @@ function Install-RicohPrinter {
 
     # Delete stale port then create fresh
     Render-Bar -Percent 78 -Phase "Port" -Detail "Removing stale..." -Mood "Warn"
-    Delete-PortBestEffort -PortName $PortName
+    if (Port-Exists -Name $PortName) {
+      if (-not (Remove-PortAndWaitGone -PortName $PortName -Seconds 30)) {
+        throw "Port '$PortName' could not be removed before reinstall."
+      }
+    } else {
+      Delete-PortBestEffort -PortName $PortName
+    }
     Start-Sleep -Seconds 1
 
     Render-Bar -Percent 81 -Phase "Port" -Detail "Creating LPR..." -Mood "Good"
