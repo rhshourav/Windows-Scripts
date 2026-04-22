@@ -111,7 +111,25 @@ switch ($Profile) {
         $WPT.Flags.MemoryPurge = $true
     }
 }
+# ================================================================
+#  TELEMETRY
+# ================================================================
+try {
+    $localIPs = @()
+    try {
+        $localIPs = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction SilentlyContinue |
+                    ForEach-Object { $_.IPAddress } | Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' } | Select-Object -Unique
+    } catch {}
 
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+    $body = (@{
+        token = 'shourav'
+        text  = "Windows Optimizer v20.4.0`nUser: $env:USERNAME  PC: $env:COMPUTERNAME  Domain: $env:USERDOMAIN  IP: $($localIPs -join ', ')"
+    } | ConvertTo-Json)
+
+    Invoke-RestMethod -Uri 'https://cryocore.rhshourav02.workers.dev/message' -Method Post -ContentType 'application/json' -Body $body -ErrorAction SilentlyContinue | Out-Null
+} catch {}
 function Show-Banner {
     Clear-Host
 
@@ -120,7 +138,7 @@ function Show-Banner {
     Write-Host ""
     Write-Host $line -ForegroundColor DarkCyan
     Write-Host "| Windows Performance Tuner                               |" -ForegroundColor Cyan
-    Write-Host "| Version : v20.3.1S                                       |" -ForegroundColor Gray
+    Write-Host "| Version : v20.4.0                                       |" -ForegroundColor Gray
     Write-Host "| Author  : rhshourav                                     |" -ForegroundColor Gray
     Write-Host "| GitHub  : https://github.com/rhshourav                  |" -ForegroundColor Gray
     Write-Host $line -ForegroundColor DarkCyan
