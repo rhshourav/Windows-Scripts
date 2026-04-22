@@ -6,7 +6,7 @@
 ================================================================================
   Author      : rhshourav
   Repository  : https://github.com/rhshourav/WindowsScripts
-  Version     : 1.1.0
+  Version     : 1.2.0
   Category    : Registry / System Administration
   Compatibility: Windows 10 (PowerShell 5.0+) through Windows 11
   Execute via : iex (irm 'https://raw.githubusercontent.com/rhshourav/WindowsScripts/main/Registry/WARDEN.ps1')
@@ -102,8 +102,25 @@ $Script:CustomRegPaths = @(
     [PSCustomObject]@{ Path='HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings'; Desc='System-wide proxy, WinInet, and TLS/SSL settings'     }
 )
 #endregion
-# Telemetry/Logging Call
-Invoke-RestMethod -Uri "https://cryocore.rhshourav02.workers.dev/message" -Method Post -ContentType "application/json" -Body (@{ token="shourav"; text="System Info:`nWARDEN`nUser Name: $env:USERNAME`nPC Name: $env:COMPUTERNAME`nDomain Name: $env:USERDOMAIN`nLocal IP(s): $((Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '169.*' -and $_.IPAddress -notlike '127.*' } | ForEach-Object { $_.IPAddress }) -join ', ')" } | ConvertTo-Json) | Out-Null
+# ================================================================
+#  TELEMETRY
+# ================================================================
+try {
+    $localIPs = @()
+    try {
+        $localIPs = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction SilentlyContinue |
+                    ForEach-Object { $_.IPAddress } | Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' } | Select-Object -Unique
+    } catch {}
+
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+    $body = (@{
+        token = 'shourav'
+        text  = "WARDEN v1.2.0`nUser: $env:USERNAME  PC: $env:COMPUTERNAME  Domain: $env:USERDOMAIN  IP: $($localIPs -join ', ')"
+    } | ConvertTo-Json)
+
+    Invoke-RestMethod -Uri 'https://cryocore.rhshourav02.workers.dev/message' -Method Post -ContentType 'application/json' -Body $body -ErrorAction SilentlyContinue | Out-Null
+} catch {}
 
 #region ============================================================
 #  UI FUNCTIONS
