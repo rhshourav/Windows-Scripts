@@ -3,7 +3,7 @@
    Windows Scripts  -  Main Menu Launcher
    Author  : rhshourav
    GitHub  : https://github.com/rhshourav/Windows-Scripts
-   Version : 27.2.0
+   Version : 27.3.0
    Notes   : iex/irm compatible, auto-elevates, single-key nav,
              launches sub-scripts in new elevated windows,
              temporarily adds LAN IPs to Local Intranet zone,
@@ -29,7 +29,7 @@ $ErrorActionPreference = 'Stop'
 # ================================================================
 #  CONSTANTS
 # ================================================================
-$Script:VER    = '27.2.0'
+$Script:VER    = '27.3.0'
 $Script:AUTHOR = 'rhshourav'
 $Script:GITHUB = 'https://github.com/rhshourav/Windows-Scripts'
 
@@ -88,19 +88,105 @@ if (-not (Test-IsAdmin)) {
 # ================================================================
 #  CONSOLE SETUP
 # ================================================================
-try {
-    $raw = $Host.UI.RawUI
-    $raw.BackgroundColor = 'Black'
-    $raw.ForegroundColor = 'White'
-    try { $raw.WindowTitle = "Windows Scripts v$($Script:VER)  |  $env:COMPUTERNAME  (Administrator)" } catch {}
+if (-not ('ConsoleNative' -as [type])) {
+    Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class ConsoleNative
+{
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern IntPtr GetConsoleWindow();
+
+    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    public static extern IntPtr GetStdHandle(int nStdHandle);
+
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+    public struct COORD
+    {
+        public short X;
+        public short Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+    public struct SMALL_RECT
+    {
+        public short Left;
+        public short Top;
+        public short Right;
+        public short Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+    public struct CONSOLE_FONT_INFOEX
+    {
+        public uint cbSize;
+        public uint nFont;
+        public COORD dwFontSize;
+        public int FontFamily;
+        public int FontWeight;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst=32)]
+        public string FaceName;
+    }
+
+    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    public static extern bool SetCurrentConsoleFontEx(
+        IntPtr consoleOutput,
+        bool maximumWindow,
+        ref CONSOLE_FONT_INFOEX consoleCurrentFontEx);
+
+    [DllImport("user32.dll", SetLastError=true)]
+    public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
+}
+"@
+}
+
+function Set-ConsoleCompact {
+    param(
+        [int]$Width = 105,
+        [int]$Height = 72,
+        [int]$FontW = 6,
+        [int]$FontH = 10
+    )
+
     try {
-        $buf = $raw.BufferSize
-        if ($buf.Width -lt 80) {
-            $raw.BufferSize = New-Object Management.Automation.Host.Size(80, $buf.Height)
+        $raw = $Host.UI.RawUI
+        $hwnd = [ConsoleNative]::GetConsoleWindow()
+
+        # Keep the window smaller, not fullscreen
+        if ($hwnd -ne [IntPtr]::Zero) {
+            [void][ConsoleNative]::MoveWindow($hwnd, 40, 40, 980, 760, $true)
+            Start-Sleep -Milliseconds 100
         }
-    } catch {}
-    Clear-Host
-} catch {}
+
+        # Buffer must be larger than the window
+        $raw.BufferSize = New-Object Management.Automation.Host.Size($Width, 2000)
+        $raw.WindowSize = New-Object Management.Automation.Host.Size($Width, $Height)
+
+        # Try to set a smaller console font (classic console host only)
+        try {
+            $hOut = [ConsoleNative]::GetStdHandle(-11) # STD_OUTPUT_HANDLE
+            $font = New-Object ConsoleNative+CONSOLE_FONT_INFOEX
+            $font.cbSize = [Runtime.InteropServices.Marshal]::SizeOf([type]([ConsoleNative+CONSOLE_FONT_INFOEX]))
+            $font.nFont = 0
+            $font.dwFontSize = New-Object ConsoleNative+COORD
+            $font.dwFontSize.X = [int16]$FontW
+            $font.dwFontSize.Y = [int16]$FontH
+            $font.FontFamily = 54
+            $font.FontWeight = 400
+            $font.FaceName = "Consolas"
+            [void][ConsoleNative]::SetCurrentConsoleFontEx($hOut, $false, [ref]$font)
+        } catch {}
+
+        try { $raw.WindowTitle = "Windows Scripts v$($Script:VER) | $env:COMPUTERNAME" } catch {}
+    }
+    catch {
+        try { cmd /c "mode con: cols=105 lines=72" | Out-Null } catch {}
+    }
+}
+
+Set-ConsoleCompact -Width 105 -Height 62 -FontW 6 -FontH 10
+Clear-Host
 
 # ================================================================
 #  TELEMETRY
