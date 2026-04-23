@@ -188,9 +188,9 @@ function Write-Banner {
 #  ADMIN CHECK
 # ================================================================
 function Assert-Admin {
-    $isAdmin = ([Security.Principal.WindowsPrincipal]
-                [Security.Principal.WindowsIdentity]::GetCurrent()
-               ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
     if (-not $isAdmin) {
         Write-Fail "Administrator privileges required."
