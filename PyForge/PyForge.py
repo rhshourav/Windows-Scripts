@@ -291,13 +291,37 @@ function Install-Deps {
     C '  INSTALLING DEPENDENCIES' 'Yellow'
     Ruler
 
+    # ── Ensure Python Scripts dir is on PATH (Store / user installs often miss this) ──
+    Show-Bar 5 'Checking Python Scripts PATH...'
+    $pythonScripts = & python -c "import sysconfig; print(sysconfig.get_path('scripts'))" 2>&1
+    if ($pythonScripts -and (Test-Path $pythonScripts)) {
+        if ($env:PATH -notlike "*$pythonScripts*") {
+            $env:PATH = "$pythonScripts;$env:PATH"
+            Finish-Bar 'Scripts dir added to PATH'
+            OK "Added to PATH: $pythonScripts"
+        } else {
+            Finish-Bar 'Scripts PATH OK'
+        }
+    } else {
+        Finish-Bar 'Scripts PATH check done'
+    }
+    Blank
+
     function pip-install ($pkg, [int]$pct, [string]$label) {
         Show-Bar $pct $label
         $result = & python -m pip install $pkg --upgrade --quiet 2>&1
-        if ($LASTEXITCODE -ne 0) {
+        # Non-zero exit OR output contains "error" (case-insensitive), but ignore PATH warnings
+        $hasError = ($LASTEXITCODE -ne 0) -and (($result -join '') -match '(?i)error')
+        if ($hasError) {
             Write-Host ''
-            ERR "pip install $pkg failed:`n$result"
+            ERR "pip install $pkg failed:"
+            $result | ForEach-Object { C "    $_" 'DarkGray' }
             exit 1
+        }
+        # Re-check PATH after install in case Scripts dir appeared
+        $newScripts = & python -c "import sysconfig; print(sysconfig.get_path('scripts'))" 2>&1
+        if ($newScripts -and (Test-Path $newScripts) -and ($env:PATH -notlike "*$newScripts*")) {
+            $env:PATH = "$newScripts;$env:PATH"
         }
         Finish-Bar "$pkg ready"
     }
