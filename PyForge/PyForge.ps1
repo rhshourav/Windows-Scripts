@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    PyForge v2.2.0 - Universal Python to EXE Compiler
+    PyForge v1.0.0 - Universal Python to EXE Compiler
 .DESCRIPTION
     Compiles any Python script into a standalone Windows EXE.
     Supports PyInstaller & Nuitka engines, icon branding,
@@ -21,7 +21,7 @@ $ErrorActionPreference = 'Stop'
 # ─────────────────────────────────────────────────────────────
 #  GLOBALS
 # ─────────────────────────────────────────────────────────────
-$PYFORGE_VERSION = '2.2.0'
+$PYFORGE_VERSION = '1.0.0'
 $PYFORGE_AUTHOR  = 'rhshourav'
 $BUILD_TEMP      = Join-Path $env:TEMP "PyForge_$(Get-Random)"
 $ORIGINAL_DIR    = Get-Location
@@ -207,7 +207,7 @@ function Get-BuildConfig {
     Blank
 
     # Version
-    $script:CFG_VERSION = Ask 'Version string' '2.2.0'
+    $script:CFG_VERSION = Ask 'Version string' '1.0.0'
     OK "Version: $($script:CFG_VERSION)"
     Blank
 
@@ -387,11 +387,16 @@ function Invoke-PyInstaller {
     $versionFile = Join-Path $BUILD_TEMP 'version_info.txt'
     New-VersionFile $versionFile
 
+    # Detect Python bitness to match target arch
+    $pyArch = & python -c "import struct; print('x86_64' if struct.calcsize('P')*8==64 else 'x86')" 2>&1
+    if ($pyArch -notmatch 'x86') { $pyArch = 'x86_64' }
+
     $args = @(
         '--onefile',
         '--clean',
         "--name=$($script:CFG_NAME)",
         "--version-file=$versionFile",
+        "--target-arch=$pyArch",
         "--distpath=$(Join-Path $BUILD_TEMP 'dist_pyinstaller')",
         "--workpath=$(Join-Path $BUILD_TEMP 'work_pyinstaller')",
         "--specpath=$BUILD_TEMP"
