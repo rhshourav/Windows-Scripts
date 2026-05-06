@@ -32,6 +32,15 @@
     Cleanup     : Temp files removed on exit or mid-session abort
 
 .CHANGELOG
+    v3.2.2 - Ghost device detection is now optional (default OFF)
+             * Show-GhostDevicePrompt explains what ghost devices are,
+               lists examples, and shows pros/cons before asking [y/N]
+             * Default is N -- only present hardware is scanned by default
+             * Get-LocalHardwareIDs -IncludeGhost param: uses PresentOnly:$true
+               (faster) when ghosts excluded, PresentOnly:$false otherwise
+             * [PRESENT]/[GHOST] badges only shown in the match list when
+               ghost mode is ON (no noise in the default present-only mode)
+             * Yellow = ghost+needs install colour only appears when relevant
     v3.2.1 - Hotfix: accurate presence + installed-version detection
              * IsPresent now uses ConfigManagerErrorCode (0=ok, 24/45/47=absent)
                instead of unreliable Present/Status properties -- fixes [GHOST]
@@ -83,7 +92,7 @@ param(
 #  GLOBAL STATE
 # ================================================================
 $ErrorActionPreference   = 'Stop'
-$script:ScriptVersion    = '3.2.1'
+$script:ScriptVersion    = '3.2.2'
 $script:ScriptName       = 'AutoDriverDeploy'
 $script:ScriptAuthor     = 'rhshourav'
 $script:RebootRequired   = $false
@@ -91,6 +100,7 @@ $script:ChangesMade      = $false
 $script:TranscriptStart  = $false
 $script:TempRoot         = $null
 $script:LogFile          = $null
+$script:IncludeGhostDevices = $false   # set at runtime by ghost-device prompt
 
 # LDC GitHub constants  (mirrors ldc_builder_v4.5.4-rest constants)
 $script:LDC_REPO_OWNER    = 'rhshourav'
@@ -822,11 +832,54 @@ function Get-LdcManifests {
 }
 
 # ================================================================
+#  LDC -- GHOST DEVICE PROMPT
+# ================================================================
+function Show-GhostDevicePrompt {
+    <#
+    .SYNOPSIS
+        Explain ghost devices to the user and ask whether to include them.
+        Returns $true if the user wants ghost devices included.
+        Default answer is N (exclude ghosts).
+    #>
+    Write-Section '  GHOST DEVICE DETECTION  ' 'DarkCyan'
+    Write-Host ''
+    Write-Host '  What are ghost / non-present devices?' -ForegroundColor Cyan
+    Write-Host ''
+    Write-Host '  Windows remembers every piece of hardware that was EVER connected,' -ForegroundColor White
+    Write-Host '  even if it is currently unplugged or no longer in the system.' -ForegroundColor White
+    Write-Host '  These "ghost" devices are invisible in Device Manager by default.' -ForegroundColor White
+    Write-Host ''
+    Write-Host '  Examples of ghost devices:' -ForegroundColor White
+    Write-Host '    - A USB Wi-Fi adapter or dongle that is not plugged in right now'  -ForegroundColor DarkGray
+    Write-Host '    - A docking station that is disconnected'                           -ForegroundColor DarkGray
+    Write-Host '    - An old GPU or NIC from a previous hardware configuration'        -ForegroundColor DarkGray
+    Write-Host '    - A Bluetooth device that was paired but is currently off'         -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host '  Including ghosts:' -ForegroundColor White
+    Write-Host '    [+] Drivers get pre-installed -- hardware works instantly on reconnect' -ForegroundColor Green
+    Write-Host '    [-] May offer drivers for hardware you no longer own'                   -ForegroundColor Yellow
+    Write-Host '    [-] Slightly more matches = slightly longer install time'               -ForegroundColor Yellow
+    Write-Host ''
+    Write-Host '  Excluding ghosts (default -- recommended for most users):'  -ForegroundColor White
+    Write-Host '    [+] Only installs drivers for hardware physically present now'          -ForegroundColor Green
+    Write-Host '    [+] Faster, no unnecessary installs'                                    -ForegroundColor Green
+    Write-Host ''
+    Write-Divider '-' 'DarkCyan'
+
+    Write-Host '  Include ghost / non-present devices in scan? [y/N]: ' -ForegroundColor Yellow -NoNewline
+    $inp = (Read-Host).Trim()
+    # Default is N -- only explicit Y/y includes ghosts
+    return ($inp.ToUpper() -eq 'Y')
+}
+
+# ================================================================
 #  LDC -- HARDWARE DETECTION & MATCHING
 # ================================================================
 function Get-LocalHardwareIDs {
-    $list            = [System.Collections.ArrayList]@()
-    $hwid2ver        = @{}   # HWID.ToUpper() -> DriverVersion  (for HWID match lookups)
+    param([bool]$IncludeGhost = $false)
+
+    $list     = [System.Collections.ArrayList]@()
+    $hwid2ver = @{}   # HWID.ToUpper() -> DriverVersion  (for HWID match lookups)
 
     # ── Query Win32_PnPSignedDriver once -- store flat list at script scope ───
     #    $script:LDC_SignedDriversAll is used by Find-LdcMatches for CAT lookups
@@ -864,11 +917,12 @@ function Get-LocalHardwareIDs {
     }
 
     # ── Primary path: Get-PnpDevice (PS 5.1+, Win10+) ───────────────────────
-    #    -PresentOnly:$false returns ALL devices including ghosts
+    #    When IncludeGhost=$false use PresentOnly:$true (faster, no ghost noise).
+    #    When IncludeGhost=$true  use PresentOnly:$false to capture all devices.
     $pnpDevices = @()
     try {
         $pnpDevices = @(
-            Get-PnpDevice -PresentOnly:$false -ErrorAction SilentlyContinue |
+            Get-PnpDevice -PresentOnly:(-not $IncludeGhost) -ErrorAction SilentlyContinue |
             Where-Object { $_.HardwareID -and @($_.HardwareID).Count -gt 0 }
         )
     } catch {}
@@ -896,7 +950,7 @@ function Get-LocalHardwareIDs {
                 InstalledDriverVersion = $instVer
             })
         }
-        Write-Log "Get-PnpDevice enumerated $($list.Count) device(s) (all, including non-present)." 'INFO'
+        Write-Log "Get-PnpDevice enumerated $($list.Count) device(s) (IncludeGhost=$IncludeGhost)." 'INFO'
         return @($list)
     }
 
@@ -912,6 +966,8 @@ function Get-LocalHardwareIDs {
             if ($hwids.Count -eq 0) { continue }
 
             $isPresent = script:Test-DevicePresent -Dev $dev
+            # Skip ghost devices unless user opted in
+            if (-not $IncludeGhost -and -not $isPresent) { continue }
             $pnpClass  = if ($dev.PNPClass) { $dev.PNPClass.ToLower() } else { '' }
             $instVer   = script:Get-InstalledVer -HWIDs $hwids -CompatIDs $compats
 
@@ -1369,11 +1425,26 @@ function Invoke-LdcMode {
     $toInstall = @()
 
     if ($mode -eq '1') {
-        Write-Info 'Enumerating ALL PnP devices (present + non-present / ghost)...'
-        $localDevices = Get-LocalHardwareIDs
-        $presentCount = @($localDevices | Where-Object { $_.IsPresent }).Count
-        $ghostCount   = $localDevices.Count - $presentCount
-        Write-OK "Found $($localDevices.Count) PnP device(s)  ($presentCount present, $ghostCount non-present/ghost)."
+        # ── Ghost device prompt (default N = present-only, fast) ──────────────
+        $includeGhost = Show-GhostDevicePrompt
+        $script:IncludeGhostDevices = $includeGhost
+        Write-Host ''
+
+        if ($includeGhost) {
+            Write-Info 'Enumerating ALL PnP devices (present + ghost / non-present)...'
+        } else {
+            Write-Info 'Enumerating present PnP devices only...'
+        }
+
+        $localDevices = Get-LocalHardwareIDs -IncludeGhost $includeGhost
+
+        if ($includeGhost) {
+            $presentCount = @($localDevices | Where-Object { $_.IsPresent }).Count
+            $ghostCount   = $localDevices.Count - $presentCount
+            Write-OK "Found $($localDevices.Count) PnP device(s)  ($presentCount present, $ghostCount ghost)."
+        } else {
+            Write-OK "Found $($localDevices.Count) present PnP device(s)."
+        }
 
         Write-Info 'Matching against LDC manifest (HWID first, category fallback)...'
         $matches = Find-LdcMatches -ManifestDrivers $allDrivers -LocalDevices $localDevices
@@ -1390,34 +1461,39 @@ function Invoke-LdcMode {
         Write-Section "  MATCHED DRIVERS  ($($matches.Count) found -- $($needsInstall.Count) to install, $($alreadyOK.Count) up-to-date)  " 'Green'
 
         foreach ($m in $matches) {
-            $tag      = if ($m.MatchType -eq 'HWID') { '[HWID]' } else { '[CAT] ' }
-            $n        = if ($m.Driver.name)     { $m.Driver.name }    else { $m.Driver.id }
-            $v        = if ($m.Driver.version)  { "v$($m.Driver.version)" } else { '' }
-            $c        = if ($m.Driver.category) { $m.Driver.category } else { '' }
-            $pts      = if ($m.Driver.zip_parts -and [int]$m.Driver.zip_parts -gt 1) {
-                            "[$($m.Driver.zip_parts) parts]" } else { '' }
+            $tag  = if ($m.MatchType -eq 'HWID') { '[HWID]' } else { '[CAT] ' }
+            $n    = if ($m.Driver.name)     { $m.Driver.name }    else { $m.Driver.id }
+            $v    = if ($m.Driver.version)  { "v$($m.Driver.version)" } else { '' }
+            $c    = if ($m.Driver.category) { $m.Driver.category } else { '' }
+            $pts  = if ($m.Driver.zip_parts -and [int]$m.Driver.zip_parts -gt 1) {
+                        "[$($m.Driver.zip_parts) parts]" } else { '' }
 
-            # Presence badge
-            $presTag  = if ($m.IsPresent) { '[PRESENT]' } else { '[GHOST]  ' }
+            # Presence badge: only shown in ghost mode (in present-only mode every device is present)
+            $presTag = if ($includeGhost) {
+                           if ($m.IsPresent) { '[PRESENT] ' } else { '[GHOST]   ' }
+                       } else { '' }
 
             # Install status badge
-            $instTag  = if ($m.InstalledDriverVersion) {
-                            if ($m.NeedsUpdate) { "[UPDATE from v$($m.InstalledDriverVersion)]" }
-                            else                { "[UP-TO-DATE v$($m.InstalledDriverVersion)]" }
-                        } else { '[MISSING]' }
+            $instTag = if ($m.InstalledDriverVersion) {
+                           if ($m.NeedsUpdate) { "[UPDATE from v$($m.InstalledDriverVersion)]" }
+                           else                { "[UP-TO-DATE v$($m.InstalledDriverVersion)]" }
+                       } else { '[MISSING]' }
 
-            # Color: green=present+needs install, yellow=ghost, darkgray=already current
-            $col = if (-not $m.NeedsUpdate)    { 'DarkGray' }
-                   elseif (-not $m.IsPresent)  { 'Yellow' }
-                   else                        { 'Green' }
+            # Color logic
+            $col = if (-not $m.NeedsUpdate)                      { 'DarkGray' }
+                   elseif ($includeGhost -and -not $m.IsPresent) { 'Yellow'   }
+                   else                                           { 'Green'    }
 
-            Write-Host "  $tag  $presTag  $instTag  $n  $v  ($c) $pts" -ForegroundColor $col
+            Write-Host "  $tag  $presTag$instTag  $n  $v  ($c) $pts" -ForegroundColor $col
         }
 
-        if ($alreadyOK.Count -gt 0) {
-            Write-Host ''
-            Write-Host "  (DarkGray = already up-to-date, Yellow = ghost/non-present device)" -ForegroundColor DarkGray
+        Write-Host ''
+        Write-Host '  Legend:' -ForegroundColor DarkGray
+        Write-Host '    Green    = driver missing or outdated, device present now'          -ForegroundColor DarkGray
+        if ($includeGhost) {
+        Write-Host '    Yellow   = driver missing or outdated on a ghost (unplugged) device' -ForegroundColor DarkGray
         }
+        Write-Host '    DarkGray = driver already up-to-date, skipped'                     -ForegroundColor DarkGray
         Write-Divider
 
         if ($needsInstall.Count -eq 0) {
