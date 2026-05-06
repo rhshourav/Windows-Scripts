@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    AutoDriverDeploy v3.0.0  --  Unified Windows Driver Deployment Tool
+    AutoDriverDeploy v3.1.0  --  Unified Windows Driver Deployment Tool
     Author  : rhshourav
     Repo    : https://github.com/rhshourav/Windows-Scripts
     Runs via: irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/AutoDriverDeploy/AutoDriverDeploy.ps1 | iex
@@ -20,6 +20,8 @@
       * ldc_index.json shard discovery (falls back to sequential probe)
       * 7z multi-volume archive format (.7z.0001, .7z.0002 ...)
         -- Uses system 7z/7za binary if found on PATH or common locations
+        -- Downloads 7za.exe from repo as first fallback
+        -- Downloads 7zextra.zip from repo, extracts 7za.exe as second fallback
         -- Falls back to pure-PS byte-join + .NET ZipFile for ZIP packs
       * 'parts' metadata per manifest entry (part_num, filename, url)
       * Legacy single-zip entries (zip / zip_url fields) still supported
@@ -30,6 +32,11 @@
     Cleanup     : Temp files removed on exit or mid-session abort
 
 .CHANGELOG
+    v3.1.0 - 7z binary repo fallback
+             * Try downloading 7za.exe directly from repo if not found locally
+             * Try downloading 7zextra.zip from repo, extract 7za.exe if direct download fails
+             * Both fallbacks use existing Invoke-Download with progress bar
+             * Downloaded binary is cached in TempRoot for the session
     v3.0.0 - LDC Builder v4.5.4-rest compatibility
              * ldc_index.json shard discovery with sequential fallback
              * Full 7z multi-volume download + extraction
@@ -56,7 +63,7 @@ param(
 #  GLOBAL STATE
 # ================================================================
 $ErrorActionPreference   = 'Stop'
-$script:ScriptVersion    = '3.0.0'
+$script:ScriptVersion    = '3.1.0'
 $script:ScriptName       = 'AutoDriverDeploy'
 $script:ScriptAuthor     = 'rhshourav'
 $script:RebootRequired   = $false
@@ -73,6 +80,10 @@ $script:LDC_INDEX_FILE    = 'ldc_index.json'
 $script:LDC_MANIFEST_BASE = 'https://raw.githubusercontent.com/rhshourav/LDC/main/drivers.manifest'
 $script:LDC_INDEX_URL     = 'https://raw.githubusercontent.com/rhshourav/LDC/main/ldc_index.json'
 $script:LDC_BASE_RAW      = 'https://raw.githubusercontent.com/rhshourav/LDC/main/drivers'
+
+# 7z repo fallback URLs
+$script:SEVENZ_EXE_URL    = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/tools/7za.exe'
+$script:SEVENZ_ZIP_URL    = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/tools/7zextra.zip'
 
 # ================================================================
 #  CONSOLE SETUP
@@ -345,17 +356,23 @@ function Invoke-Download {
 }
 
 # ================================================================
-#  7Z BINARY DETECTION  (new in v3.0.0)
+#  7Z BINARY DETECTION  (v3.1.0 -- repo fallback)
 # ================================================================
 function Find-SevenZipBinary {
     <#
     .SYNOPSIS
         Locate a usable 7z / 7za / 7zz executable.
-        Returns the full path, or $null if none found.
+        Search order:
+          1. System PATH
+          2. Common Windows install locations
+          3. Download 7za.exe directly from GitHub repo
+          4. Download 7zextra.zip from GitHub repo, extract and locate 7za.exe
+        Returns the full path, or $null if all methods fail.
     #>
+
     $candidates = @('7z', '7za', '7zz')
 
-    # Check PATH entries first
+    # ── 1. Check PATH ────────────────────────────────────────────────────────
     foreach ($name in $candidates) {
         $cmd = Get-Command $name -ErrorAction SilentlyContinue
         if ($cmd) {
@@ -367,7 +384,7 @@ function Find-SevenZipBinary {
         }
     }
 
-    # Common install locations on Windows
+    # ── 2. Common install locations ──────────────────────────────────────────
     $installDirs = @(
         "${env:ProgramFiles}\7-Zip",
         "${env:ProgramFiles(x86)}\7-Zip",
@@ -384,12 +401,71 @@ function Find-SevenZipBinary {
         }
     }
 
-    Write-Log '7z binary not found -- will use pure-PS fallback for 7z volumes.' 'INFO'
+    # ── 3. Download 7za.exe directly from repo ───────────────────────────────
+    Write-Warn '7z not found locally. Trying to download 7za.exe from repo...'
+    $dl7zaPath = Join-Path $script:TempRoot '7za.exe'
+    try {
+        Invoke-Download -Url $script:SEVENZ_EXE_URL -OutPath $dl7zaPath -Label '7za.exe [repo]'
+        if ((Test-Path -LiteralPath $dl7zaPath) -and (Get-Item $dl7zaPath).Length -gt 10240) {
+            Write-OK "7za.exe downloaded successfully from repo."
+            Write-Log "7z binary obtained via direct download: $dl7zaPath" 'INFO'
+            return $dl7zaPath
+        } else {
+            Write-Warn '7za.exe download completed but file appears invalid -- trying zip fallback.'
+            Remove-Item $dl7zaPath -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+        Write-Warn "Direct 7za.exe download failed: $($_.Exception.Message)"
+    }
+
+    # ── 4. Download 7zextra.zip from repo, extract 7za.exe ──────────────────
+    Write-Warn 'Trying 7zextra.zip from repo...'
+    $dlZipPath    = Join-Path $script:TempRoot '7zextra.zip'
+    $dlZipExtract = Join-Path $script:TempRoot '7zextra_extracted'
+    try {
+        Invoke-Download -Url $script:SEVENZ_ZIP_URL -OutPath $dlZipPath -Label '7zextra.zip [repo]'
+
+        if (-not (Test-Path -LiteralPath $dlZipPath) -or (Get-Item $dlZipPath).Length -lt 1024) {
+            Write-Warn '7zextra.zip download appears invalid.'
+            Remove-Item $dlZipPath -Force -ErrorAction SilentlyContinue
+        } else {
+            # Extract the zip using .NET
+            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Path $dlZipExtract -Force | Out-Null
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($dlZipPath, $dlZipExtract)
+            Remove-Item $dlZipPath -Force -ErrorAction SilentlyContinue
+
+            # Search recursively for any usable 7z binary inside the extracted folder
+            $found = Get-ChildItem -Path $dlZipExtract -Recurse -Include '7za.exe','7z.exe','7zz.exe' `
+                         -ErrorAction SilentlyContinue |
+                     Where-Object { $_.Length -gt 10240 } |
+                     Sort-Object { $_.Name } |   # prefer 7z.exe > 7za.exe > 7zz.exe alphabetically reversed; close enough
+                     Select-Object -First 1
+
+            if ($found) {
+                # Copy to TempRoot so it survives if extracted folder gets cleaned
+                $finalPath = Join-Path $script:TempRoot $found.Name
+                Copy-Item -LiteralPath $found.FullName -Destination $finalPath -Force
+                Write-OK "7z binary extracted from 7zextra.zip: $($found.Name)"
+                Write-Log "7z binary obtained via zip extraction: $finalPath" 'INFO'
+                return $finalPath
+            } else {
+                Write-Warn 'No usable 7z binary found inside 7zextra.zip.'
+            }
+        }
+    } catch {
+        Write-Warn "7zextra.zip fallback failed: $($_.Exception.Message)"
+    } finally {
+        Remove-Item $dlZipExtract -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # ── All methods exhausted ────────────────────────────────────────────────
+    Write-Log '7z binary unavailable -- will use pure-PS byte-concat fallback.' 'WARN'
     return $null
 }
 
 # Cache 7z path once per session
-$script:SevenZipPath = $null
+$script:SevenZipPath    = $null
 $script:SevenZipChecked = $false
 
 function Get-SevenZipPath {
@@ -401,7 +477,7 @@ function Get-SevenZipPath {
 }
 
 # ================================================================
-#  ARCHIVE EXTRACTION  (new in v3.0.0)
+#  ARCHIVE EXTRACTION  (v3.0.0: archive-agnostic)
 # ================================================================
 function Expand-DriverArchive {
     <#
@@ -410,10 +486,10 @@ function Expand-DriverArchive {
 
         Handles three formats produced by LDC Builder v4.5.4-rest:
           1. Single .zip  (legacy or ZIP fallback)
-          2. Multi-part .zip  (partNN.zip — concatenate then unzip)
-          3. Multi-volume .7z (.7z.0001 / .7z.0002 …)
+          2. Multi-part .zip  (partNN.zip -- concatenate then unzip)
+          3. Multi-volume .7z (.7z.0001 / .7z.0002 ...)
              a. If 7z binary available: invoke 7z directly against the
-                first volume — 7z handles the rest automatically.
+                first volume -- 7z handles the rest automatically.
              b. If no binary: concatenate all parts byte-by-byte into
                 a single combined file, then try ZIP extraction
                 (works only when the builder used its ZIP fallback path).
@@ -462,7 +538,7 @@ function Expand-DriverArchive {
             }
         }
 
-        # No binary — warn and attempt byte-concat + ZIP fallback
+        # No binary -- warn and attempt byte-concat + ZIP fallback
         Write-Warn '7z binary not found. Attempting byte-concatenation fallback.'
         Write-Warn 'Note: This only works if the builder used its ZIP fallback path.'
         $combinedPath = Join-Path (Split-Path $firstPath) '_combined_fallback.zip'
@@ -713,9 +789,6 @@ function Get-LdcManifests {
         foreach ($e in $enabled) { [void]$allDrivers.Add($e) }
         Write-OK "Shard $shardNum loaded -- $($enabled.Count) driver(s)"
 
-        # If we got here from the index (not sequential probe), don't stop early
-        # For sequential probe mode: stop when a shard has no "next_shard" hint
-        # and the shard count equals what we've already loaded via the index.
         if ($json.PSObject.Properties.Name -contains 'total_shards') {
             $total = [int]$json.total_shards
             if ($shardNum -ge $total) { break }
@@ -1086,13 +1159,14 @@ function Invoke-LdcMode {
         return
     }
 
-    # Check 7z availability once and report
+    # Check 7z availability once and report (this triggers the full fallback chain)
+    Write-Info 'Checking for 7z binary...'
     $sz = Get-SevenZipPath
     if ($sz) {
-        Write-OK "7z binary found: $sz"
+        Write-OK "7z binary ready: $sz"
     } else {
-        Write-Warn '7z binary not found -- 7z multi-volume drivers will use byte-concat fallback.'
-        Write-Warn 'Install 7-Zip from https://7-zip.org for full 7z support.'
+        Write-Warn '7z binary unavailable -- 7z multi-volume drivers will use byte-concat fallback.'
+        Write-Warn 'Install 7-Zip from https://7-zip.org for guaranteed 7z support.'
     }
 
     # Sub-menu
