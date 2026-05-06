@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    AutoDriverDeploy v2.0.0  --  Unified Windows Driver Deployment Tool
+    AutoDriverDeploy v3.0.0  --  Unified Windows Driver Deployment Tool
     Author  : rhshourav
     Repo    : https://github.com/rhshourav/Windows-Scripts
     Runs via: irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/AutoDriverDeploy/AutoDriverDeploy.ps1 | iex
@@ -16,10 +16,30 @@
       AUTO   - HWID match first, category fallback
       SEARCH - Browse manifest, multi-select specific drivers
 
+    Compatible with LDC Builder v4.5.4-rest:
+      * ldc_index.json shard discovery (falls back to sequential probe)
+      * 7z multi-volume archive format (.7z.0001, .7z.0002 ...)
+        -- Uses system 7z/7za binary if found on PATH or common locations
+        -- Falls back to pure-PS byte-join + .NET ZipFile for ZIP packs
+      * 'parts' metadata per manifest entry (part_num, filename, url)
+      * Legacy single-zip entries (zip / zip_url fields) still supported
+
 .NOTES
     Compatible  : Windows 10+  /  PowerShell 5.1+
     Elevation   : Auto-elevates to Administrator if needed
     Cleanup     : Temp files removed on exit or mid-session abort
+
+.CHANGELOG
+    v3.0.0 - LDC Builder v4.5.4-rest compatibility
+             * ldc_index.json shard discovery with sequential fallback
+             * Full 7z multi-volume download + extraction
+             * 7z binary auto-detection (PATH + common install paths)
+             * Pure-PS byte-concat fallback for ZIP legacy packs
+             * Updated PnpClassMap to match builder _CLASS_TO_TYPE exactly
+             * Hardened error handling throughout -- no unhandled exceptions
+             * All network calls use try/catch with descriptive messages
+             * Removed all bare throws in favour of Write-Err + return
+    v2.0.0 - Initial public release
 #>
 
 [CmdletBinding()]
@@ -36,7 +56,7 @@ param(
 #  GLOBAL STATE
 # ================================================================
 $ErrorActionPreference   = 'Stop'
-$script:ScriptVersion    = '2.0.0'
+$script:ScriptVersion    = '3.0.0'
 $script:ScriptName       = 'AutoDriverDeploy'
 $script:ScriptAuthor     = 'rhshourav'
 $script:RebootRequired   = $false
@@ -45,8 +65,13 @@ $script:TranscriptStart  = $false
 $script:TempRoot         = $null
 $script:LogFile          = $null
 
-# LDC GitHub constants
+# LDC GitHub constants  (mirrors ldc_builder_v4.5.4-rest constants)
+$script:LDC_REPO_OWNER    = 'rhshourav'
+$script:LDC_REPO_NAME     = 'LDC'
+$script:LDC_GH_BRANCH     = 'main'
+$script:LDC_INDEX_FILE    = 'ldc_index.json'
 $script:LDC_MANIFEST_BASE = 'https://raw.githubusercontent.com/rhshourav/LDC/main/drivers.manifest'
+$script:LDC_INDEX_URL     = 'https://raw.githubusercontent.com/rhshourav/LDC/main/ldc_index.json'
 $script:LDC_BASE_RAW      = 'https://raw.githubusercontent.com/rhshourav/LDC/main/drivers'
 
 # ================================================================
@@ -226,10 +251,14 @@ function Invoke-DeviceScan {
     $pnp = Get-PnPUtilPath
     if (-not $pnp) { Write-Warn 'pnputil.exe not found, skipping device scan.'; return }
     Write-Info 'Triggering device rescan...'
-    $code = Invoke-Executable -FilePath $pnp -Arguments @('/scan-devices')
-    if     ($code -eq 0)    { Write-OK 'Device rescan complete.' }
-    elseif ($code -eq 3010) { $script:RebootRequired = $true; Write-Warn 'Device rescan: reboot required.' }
-    else                    { Write-Warn "Device rescan exit code: $code" }
+    try {
+        $code = Invoke-Executable -FilePath $pnp -Arguments @('/scan-devices')
+        if     ($code -eq 0)    { Write-OK 'Device rescan complete.' }
+        elseif ($code -eq 3010) { $script:RebootRequired = $true; Write-Warn 'Device rescan: reboot required.' }
+        else                    { Write-Warn "Device rescan exit code: $code" }
+    } catch {
+        Write-Warn "Device rescan failed: $($_.Exception.Message)"
+    }
 }
 
 function ConvertTo-ArgumentString {
@@ -269,7 +298,6 @@ function Show-DownloadBar {
     $tot    = if ($Total -gt 0) { ' / {0:N1} MB' -f ($Total / 1MB) } else { '' }
     $pctStr = if ($pct -ge 0) { '{0,3}%' -f $pct } else { '  ? %' }
 
-    # Truncate label if needed
     $maxLabel = $script:ConsoleWidth - $BarWidth - 28
     if ($Label.Length -gt $maxLabel -and $maxLabel -gt 5) {
         $Label = $Label.Substring(0, $maxLabel - 3) + '...'
@@ -317,86 +345,380 @@ function Invoke-Download {
 }
 
 # ================================================================
-#  LDC -- INF CLASS -> CATEGORY MAP  (mirrors ldc_builder.py)
+#  7Z BINARY DETECTION  (new in v3.0.0)
 # ================================================================
-$script:PnpClassMap = @{
-    # Network
-    'net'           = 'Net';   'nettrans'    = 'Net';   'netservice'    = 'Net'
-    'netclient'     = 'Net';   'network'     = 'Net'
-    # Display
-    'display'       = 'Display'; 'monitor'   = 'Display'; 'hdc'         = 'Display'
-    # Audio
-    'media'         = 'Audio'; 'audio'       = 'Audio'; 'hdaudio'       = 'Audio'
-    'audioendpoint' = 'Audio'
-    # Storage
-    'diskdrive'     = 'Storage'; 'cdrom'     = 'Storage'; 'scsiadapter' = 'Storage'
-    'storage'       = 'Storage'; 'tapedrive' = 'Storage'; 'volume'      = 'Storage'
-    'floppydisk'    = 'Storage'
-    # USB
-    'usb'           = 'USB';  'usbdevice'   = 'USB'
-    # Bluetooth
-    'bluetooth'     = 'Bluetooth'; 'bth'    = 'Bluetooth'; 'bthle'      = 'Bluetooth'
-    'bluetoothaudio'= 'Wireless'
-    # Input / HID
-    'hid'           = 'Input'; 'hidclass'   = 'Input'; 'keyboard'       = 'Input'
-    'mouse'         = 'Input'; 'pen'        = 'Input'; 'sensor'         = 'Input'
-    'biometric'     = 'Input'; 'tabletinputdevice' = 'Input'
-    # Chipset / System
-    'system'        = 'Chipset'; 'processor' = 'Chipset'; 'computer'   = 'Chipset'
-    'acpi'          = 'Chipset'; 'unknown'   = 'Chipset'; 'battery'    = 'Chipset'
-    'smartcardreader' = 'Chipset'
-    # Ports
-    'ports'         = 'Ports'; 'multiportserial' = 'Ports'; 'modem'    = 'Ports'
-    # Imaging
-    'image'         = 'Imaging'; 'camera'   = 'Imaging'; 'stillimage'  = 'Imaging'
-    'scanner'       = 'Imaging'
-    # Printer
-    'printer'       = 'Printer'; 'printqueue' = 'Printer'; 'pnpprinters' = 'Printer'
-    # Security
-    'securityaccelerator' = 'Security'; 'securitydevices' = 'Security'
-    'smartcard'     = 'Security'
-    # Firmware
-    'firmware'      = 'Firmware'; 'softwaredevice' = 'Firmware'
-    'softwarecomponent' = 'Firmware'
-    # Wireless
-    'wireless'      = 'Wireless'; 'wlan' = 'Wireless'
-    # Power
-    'power'         = 'Power'
+function Find-SevenZipBinary {
+    <#
+    .SYNOPSIS
+        Locate a usable 7z / 7za / 7zz executable.
+        Returns the full path, or $null if none found.
+    #>
+    $candidates = @('7z', '7za', '7zz')
+
+    # Check PATH entries first
+    foreach ($name in $candidates) {
+        $cmd = Get-Command $name -ErrorAction SilentlyContinue
+        if ($cmd) {
+            $path = if ($cmd.Path) { $cmd.Path } else { $cmd.Definition }
+            if ($path -and (Test-Path -LiteralPath $path)) {
+                Write-Log "7z binary found on PATH: $path" 'INFO'
+                return $path
+            }
+        }
+    }
+
+    # Common install locations on Windows
+    $installDirs = @(
+        "${env:ProgramFiles}\7-Zip",
+        "${env:ProgramFiles(x86)}\7-Zip",
+        "${env:ProgramData}\chocolatey\bin",
+        "${env:LOCALAPPDATA}\Programs\7-Zip"
+    )
+    foreach ($dir in $installDirs) {
+        foreach ($name in @('7z.exe','7za.exe','7zz.exe')) {
+            $full = Join-Path $dir $name
+            if (Test-Path -LiteralPath $full) {
+                Write-Log "7z binary found at: $full" 'INFO'
+                return $full
+            }
+        }
+    }
+
+    Write-Log '7z binary not found -- will use pure-PS fallback for 7z volumes.' 'INFO'
+    return $null
+}
+
+# Cache 7z path once per session
+$script:SevenZipPath = $null
+$script:SevenZipChecked = $false
+
+function Get-SevenZipPath {
+    if (-not $script:SevenZipChecked) {
+        $script:SevenZipPath    = Find-SevenZipBinary
+        $script:SevenZipChecked = $true
+    }
+    return $script:SevenZipPath
 }
 
 # ================================================================
-#  LDC -- MANIFEST LOADER (multi-shard)
+#  ARCHIVE EXTRACTION  (new in v3.0.0)
 # ================================================================
+function Expand-DriverArchive {
+    <#
+    .SYNOPSIS
+        Extract a driver archive to $Destination.
+
+        Handles three formats produced by LDC Builder v4.5.4-rest:
+          1. Single .zip  (legacy or ZIP fallback)
+          2. Multi-part .zip  (partNN.zip — concatenate then unzip)
+          3. Multi-volume .7z (.7z.0001 / .7z.0002 …)
+             a. If 7z binary available: invoke 7z directly against the
+                first volume — 7z handles the rest automatically.
+             b. If no binary: concatenate all parts byte-by-byte into
+                a single combined file, then try ZIP extraction
+                (works only when the builder used its ZIP fallback path).
+
+        Returns $true on success, $false on failure.
+    #>
+    param(
+        [string[]]$ArchivePaths,   # ordered list of part paths on disk
+        [string]$Destination
+    )
+
+    if (-not $ArchivePaths -or $ArchivePaths.Count -eq 0) {
+        Write-Err 'Expand-DriverArchive: no archive paths supplied.'
+        return $false
+    }
+
+    $firstPath = $ArchivePaths[0]
+
+    # Determine archive format from first filename
+    $firstName = [System.IO.Path]::GetFileName($firstPath).ToLower()
+
+    $is7z     = $firstName -match '\.7z(\.\d{4})?$'
+    $isZip    = $firstName.EndsWith('.zip')
+    $isMulti  = ($ArchivePaths.Count -gt 1)
+
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+
+    # ── 7z multi-volume ─────────────────────────────────────────────────────
+    if ($is7z) {
+        $sevenZip = Get-SevenZipPath
+
+        if ($sevenZip) {
+            # Use binary -- point at first volume; 7z finds the rest automatically
+            Write-Info "Extracting 7z archive with binary: $sevenZip"
+            try {
+                $code = Invoke-Executable -FilePath $sevenZip `
+                    -Arguments @('x', $firstPath, "-o$Destination", '-y', '-aoa')
+                if ($code -eq 0 -or $code -eq 1) {  # 1 = warnings but ok
+                    return $true
+                }
+                Write-Err "7z extraction exited with code $code"
+                return $false
+            } catch {
+                Write-Err "7z extraction failed: $($_.Exception.Message)"
+                return $false
+            }
+        }
+
+        # No binary — warn and attempt byte-concat + ZIP fallback
+        Write-Warn '7z binary not found. Attempting byte-concatenation fallback.'
+        Write-Warn 'Note: This only works if the builder used its ZIP fallback path.'
+        $combinedPath = Join-Path (Split-Path $firstPath) '_combined_fallback.zip'
+        $ok = Merge-PartsToFile -PartPaths $ArchivePaths -OutPath $combinedPath
+        if (-not $ok) { return $false }
+
+        $result = Expand-ZipFile -ZipPath $combinedPath -Destination $Destination
+        Remove-Item $combinedPath -Force -ErrorAction SilentlyContinue
+        return $result
+    }
+
+    # ── Multi-part ZIP (partNN.zip) ─────────────────────────────────────────
+    if ($isZip -and $isMulti) {
+        Write-Info "Combining $($ArchivePaths.Count) ZIP parts..."
+        $combinedPath = Join-Path (Split-Path $firstPath) '_combined.zip'
+        $ok = Merge-PartsToFile -PartPaths $ArchivePaths -OutPath $combinedPath
+        if (-not $ok) { return $false }
+
+        $result = Expand-ZipFile -ZipPath $combinedPath -Destination $Destination
+        Remove-Item $combinedPath -Force -ErrorAction SilentlyContinue
+        return $result
+    }
+
+    # ── Single ZIP ───────────────────────────────────────────────────────────
+    if ($isZip) {
+        return (Expand-ZipFile -ZipPath $firstPath -Destination $Destination)
+    }
+
+    Write-Err "Unrecognised archive format: $firstName"
+    return $false
+}
+
+function Merge-PartsToFile {
+    <#
+    .SYNOPSIS
+        Concatenate ordered part files into a single output file.
+        Returns $true on success.
+    #>
+    param([string[]]$PartPaths, [string]$OutPath)
+
+    $outStream = $null
+    try {
+        $outStream = [System.IO.File]::Create($OutPath)
+        foreach ($part in $PartPaths) {
+            if (-not (Test-Path -LiteralPath $part)) {
+                Write-Err "Part file missing: $part"
+                return $false
+            }
+            $bytes = [System.IO.File]::ReadAllBytes($part)
+            $outStream.Write($bytes, 0, $bytes.Length)
+        }
+        return $true
+    } catch {
+        Write-Err "Part merge failed: $($_.Exception.Message)"
+        return $false
+    } finally {
+        if ($outStream) {
+            try { $outStream.Flush(); $outStream.Close() } catch {}
+        }
+    }
+}
+
+function Expand-ZipFile {
+    <#
+    .SYNOPSIS
+        Extract a single .zip file using .NET ZipFile.
+        Returns $true on success.
+    #>
+    param([string]$ZipPath, [string]$Destination)
+
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $Destination)
+        return $true
+    } catch {
+        Write-Err "ZIP extraction failed: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+# ================================================================
+#  LDC -- INF CLASS -> CATEGORY MAP
+#  Kept in exact sync with ldc_builder_v4.5.4-rest _CLASS_TO_TYPE
+# ================================================================
+$script:PnpClassMap = @{
+    # Network
+    'net'                 = 'Net';   'nettrans'            = 'Net'
+    'netservice'          = 'Net';   'netclient'           = 'Net'
+    'network'             = 'Net'
+    # Display / GPU
+    'display'             = 'Display'; 'monitor'           = 'Display'
+    'hdc'                 = 'Display'
+    # Audio / Media
+    'media'               = 'Audio';   'audio'             = 'Audio'
+    'hdaudio'             = 'Audio';   'audioendpoint'     = 'Audio'
+    # Storage
+    'diskdrive'           = 'Storage'; 'cdrom'             = 'Storage'
+    'floppydisk'          = 'Storage'; 'tapedrive'         = 'Storage'
+    'storage'             = 'Storage'; 'scsiadapter'       = 'Storage'
+    'volumesnapshot'      = 'Storage'; 'volume'            = 'Storage'
+    'mediumchanger'       = 'Storage'
+    # USB
+    'usb'                 = 'USB';     'usbdevice'         = 'USB'
+    # Bluetooth
+    'bluetooth'           = 'Bluetooth'; 'bth'             = 'Bluetooth'
+    'bthle'               = 'Bluetooth'
+    # Input / HID
+    'hid'                 = 'Input';   'hidclass'          = 'Input'
+    'keyboard'            = 'Input';   'mouse'             = 'Input'
+    'pen'                 = 'Input';   'sensor'            = 'Input'
+    'biometric'           = 'Input';   'tabletinputdevice' = 'Input'
+    # Chipset / System
+    'system'              = 'Chipset'; 'processor'         = 'Chipset'
+    'computer'            = 'Chipset'; 'acpi'              = 'Chipset'
+    'unknown'             = 'Chipset'; 'battery'           = 'Chipset'
+    'smartcardreader'     = 'Chipset'
+    # Ports / Serial
+    'ports'               = 'Ports';   'multiportserial'   = 'Ports'
+    'modem'               = 'Ports'
+    # Imaging / Camera
+    'image'               = 'Imaging'; 'camera'            = 'Imaging'
+    'stillimage'          = 'Imaging'; 'scanner'           = 'Imaging'
+    # Printer
+    'printer'             = 'Printer'; 'printqueue'        = 'Printer'
+    'pnpprinters'         = 'Printer'
+    # Security / SmartCard
+    'securityaccelerator' = 'Security'; 'securitydevices'  = 'Security'
+    'smartcard'           = 'Security'
+    # Firmware / UEFI
+    'firmware'            = 'Firmware'; 'softwaredevice'   = 'Firmware'
+    'softwarecomponent'   = 'Firmware'
+    # Wireless
+    'wireless'            = 'Wireless'; 'wlan'             = 'Wireless'
+    'bluetoothaudio'      = 'Wireless'
+    # Power
+    'power'               = 'Power'
+    # Other (infra / virtual -- builder maps these to "Other")
+    'infrared'            = 'Other';    'multifunction'    = 'Other'
+    '1394'                = 'Other';    '61883'            = 'Other'
+    'dot4'                = 'Other';    'dot4print'        = 'Other'
+    'ieeef16'             = 'Other';    'extension'        = 'Other'
+}
+
+# ================================================================
+#  LDC -- INDEX + MANIFEST LOADER  (updated for ldc_index.json)
+# ================================================================
+function Invoke-SafeRestMethod {
+    <#
+    .SYNOPSIS
+        Wraps Invoke-RestMethod with TLS 1.2 and error handling.
+        Returns the parsed object or $null on failure.
+    #>
+    param([string]$Uri, [string]$Label = $Uri)
+
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    try {
+        return Invoke-RestMethod -Uri $Uri -ErrorAction Stop
+    } catch {
+        Write-Log "HTTP fetch failed for $Label : $($_.Exception.Message)" 'WARN'
+        return $null
+    }
+}
+
+function Get-LdcIndex {
+    <#
+    .SYNOPSIS
+        Download ldc_index.json from GitHub.
+        Returns the parsed index object, or $null if unavailable.
+    #>
+    Write-Info 'Fetching ldc_index.json from GitHub...'
+    $idx = Invoke-SafeRestMethod -Uri $script:LDC_INDEX_URL -Label 'ldc_index.json'
+    if ($idx -and $idx.manifest_shards) {
+        Write-OK "ldc_index.json loaded -- $(@($idx.manifest_shards).Count) manifest shard(s) listed."
+        return $idx
+    }
+    Write-Warn 'ldc_index.json not available or has no shard list -- will probe sequentially.'
+    return $null
+}
+
 function Get-LdcManifests {
+    <#
+    .SYNOPSIS
+        Load all enabled driver entries from every manifest shard.
+
+        Discovery order (mirrors github_pull_manifest in builder):
+          1. Download ldc_index.json
+          2. If index has manifest_shards list, download those shards in order
+          3. Fallback: probe .2.json / .3.json ... until 404
+
+        Returns a flat array of driver entry objects.
+    #>
     Write-Info 'Fetching LDC manifest(s) from GitHub...'
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
     $allDrivers = [System.Collections.ArrayList]@()
-    $shard      = 1
 
-    while ($true) {
-        $url = if ($shard -eq 1) {
-            "$($script:LDC_MANIFEST_BASE).json"
-        } else {
-            "$($script:LDC_MANIFEST_BASE).$shard.json"
+    # ── Step 1: try ldc_index.json for exact shard list ──────────────────────
+    $index = Get-LdcIndex
+    $shardUrls = [System.Collections.ArrayList]@()
+
+    if ($index -and $index.manifest_shards) {
+        $shards = @($index.manifest_shards)
+        foreach ($shard in $shards) {
+            $fname = $shard.filename
+            if (-not $fname) { continue }
+            # Build raw URL from filename (always in repo root)
+            $url = "https://raw.githubusercontent.com/$($script:LDC_REPO_OWNER)/$($script:LDC_REPO_NAME)/$($script:LDC_GH_BRANCH)/$fname"
+            [void]$shardUrls.Add($url)
         }
+        Write-Info "Using $($shardUrls.Count) shard URL(s) from ldc_index.json."
+    }
 
-        try {
-            $json    = Invoke-RestMethod -Uri $url -ErrorAction Stop
-            $entries = @($json.drivers) | Where-Object { $_ -and $_.enabled -ne $false }
-            foreach ($e in $entries) { [void]$allDrivers.Add($e) }
-            Write-OK "Shard $shard loaded  --  $($entries.Count) driver(s)"
+    if ($shardUrls.Count -eq 0) {
+        # ── Fallback: sequential probe ─────────────────────────────────────────
+        Write-Info 'Falling back to sequential shard probe...'
+        [void]$shardUrls.Add("$($script:LDC_MANIFEST_BASE).json")
+        for ($i = 2; $i -le 50; $i++) {
+            [void]$shardUrls.Add("$($script:LDC_MANIFEST_BASE).$i.json")
+        }
+    }
 
-            # Check for more shards
-            $totalShards = if ($json.total_shards) { [int]$json.total_shards } else { 1 }
-            if ($shard -lt $totalShards) { $shard++ } else { break }
+    $shardNum = 0
+    foreach ($url in $shardUrls) {
+        $shardNum++
+        $json = Invoke-SafeRestMethod -Uri $url -Label "shard $shardNum"
 
-        } catch {
-            if ($shard -eq 1) {
-                Write-Err "Cannot reach LDC manifest: $($_.Exception.Message)"
+        if (-not $json) {
+            if ($shardNum -eq 1) {
+                Write-Err "Cannot reach LDC manifest. Check your internet connection."
                 return @()
             }
+            # 404 or error on a non-primary shard -- stop probing
             break
+        }
+
+        # Accept either a bare array or an object with a "drivers" property
+        $entries = $null
+        if ($json -is [array]) {
+            $entries = $json
+        } elseif ($json.drivers) {
+            $entries = @($json.drivers)
+        } else {
+            Write-Warn "Shard $shardNum has unexpected structure -- skipping."
+            continue
+        }
+
+        $enabled = @($entries | Where-Object { $_ -and $_.enabled -ne $false })
+        foreach ($e in $enabled) { [void]$allDrivers.Add($e) }
+        Write-OK "Shard $shardNum loaded -- $($enabled.Count) driver(s)"
+
+        # If we got here from the index (not sequential probe), don't stop early
+        # For sequential probe mode: stop when a shard has no "next_shard" hint
+        # and the shard count equals what we've already loaded via the index.
+        if ($json.PSObject.Properties.Name -contains 'total_shards') {
+            $total = [int]$json.total_shards
+            if ($shardNum -ge $total) { break }
         }
     }
 
@@ -434,18 +756,16 @@ function Find-LdcMatches {
     $matched = [System.Collections.ArrayList]@()
 
     foreach ($driver in $ManifestDrivers) {
-        # Arch filter
         $dArch = if ($driver.arch) { $driver.arch } else { 'x64' }
         if ($dArch -ne '*' -and $dArch -ne $arch) { continue }
 
-        $dHwids  = if ($driver.hwids)        { @($driver.hwids)        } else { @() }
-        $dCompat = if ($driver.compatible_ids){ @($driver.compatible_ids) } else { @() }
-        $dCat    = if ($driver.category)     { $driver.category         } else { '' }
+        $dHwids  = if ($driver.hwids)         { @($driver.hwids)         } else { @() }
+        $dCompat = if ($driver.compatible_ids) { @($driver.compatible_ids) } else { @() }
+        $dCat    = if ($driver.category)      { $driver.category          } else { '' }
 
         $matchType   = $null
         $matchDevice = $null
 
-        # --- Priority 1: HWID / CompatID exact prefix match ---
         :outer foreach ($dev in $LocalDevices) {
             foreach ($hwid in $dev.HardwareIDs) {
                 foreach ($mhwid in $dHwids) {
@@ -468,7 +788,6 @@ function Find-LdcMatches {
             }
         }
 
-        # --- Priority 2: Category fallback ---
         if (-not $matchType -and $dCat) {
             foreach ($dev in $LocalDevices) {
                 $devCat = $script:PnpClassMap[$dev.PNPClass]
@@ -491,73 +810,96 @@ function Find-LdcMatches {
 }
 
 # ================================================================
-#  LDC -- DOWNLOAD DRIVER (multi-part support)
+#  LDC -- DOWNLOAD DRIVER  (v3.0.0: parts-aware)
 # ================================================================
-function Get-LdcDriver {
+function Get-LdcDriverParts {
+    <#
+    .SYNOPSIS
+        Download all parts of a driver entry.
+
+        Supports three manifest shapes from LDC Builder v4.5.4-rest:
+
+          A) New 'parts' array  (primary path):
+             Each element has {part_num, filename, url}
+
+          B) Legacy 'zip' / 'zip_url' single-file entries
+
+          C) Derived URL from type_folder + id (last-resort fallback)
+
+        Returns an ordered array of local file paths, or @() on failure.
+    #>
     param([object]$Driver)
 
     $name   = if ($Driver.name) { $Driver.name } else { $Driver.id }
     $safeId = ($Driver.id -replace '[^a-zA-Z0-9_-]', '_')
     $dest   = Join-Path $script:TempRoot "dl_$safeId"
-    New-Item -ItemType Directory -Path $dest -Force | Out-Null
-
-    $parts = if ($Driver.parts) { @($Driver.parts) | Sort-Object { [int]$_.part_num } } else { @() }
-
-    if ($parts.Count -gt 1) {
-        # --- Multi-part download ---
-        Write-Info "$name has $($parts.Count) parts -- downloading all..."
-        $partFiles = @()
-
-        foreach ($part in $parts) {
-            $pUrl  = $part.url
-            $pFile = Join-Path $dest $part.filename
-            Write-Info "  Part $($part.part_num) / $($parts.Count): $($part.filename)"
-            Invoke-Download -Url $pUrl -OutPath $pFile -Label "$name [Part $($part.part_num)]"
-            $partFiles += $pFile
-        }
-
-        # Combine into single ZIP
-        $combined = Join-Path $dest "$safeId.zip"
-        Write-Info 'Combining parts...'
-        $outStream = [System.IO.File]::Create($combined)
-        try {
-            foreach ($pf in $partFiles) {
-                $chunk = [System.IO.File]::ReadAllBytes($pf)
-                $outStream.Write($chunk, 0, $chunk.Length)
-                Remove-Item $pf -Force -ErrorAction SilentlyContinue
-            }
-        } finally {
-            $outStream.Flush(); $outStream.Close()
-        }
-        return $combined
-
-    } else {
-        # --- Single ZIP ---
-        $zipUrl = ''
-        if ($parts.Count -eq 1 -and $parts[0].url) {
-            $zipUrl = $parts[0].url
-        } elseif ($Driver.zip) {
-            $zipUrl = $Driver.zip
-        } elseif ($Driver.zip_url) {
-            $zipUrl = $Driver.zip_url
-        } else {
-            # Construct fallback URL from known structure
-            $typeFolder = if ($Driver.type_folder) { $Driver.type_folder } else { $Driver.category }
-            $zipUrl = "$($script:LDC_BASE_RAW)/$typeFolder/DP_$($Driver.id)/$($Driver.id).zip"
-        }
-
-        $filename = [System.IO.Path]::GetFileName($zipUrl)
-        if (-not $filename -or -not $filename.ToLower().EndsWith('.zip')) {
-            $filename = "$safeId.zip"
-        }
-        $zipFile = Join-Path $dest $filename
-        Invoke-Download -Url $zipUrl -OutPath $zipFile -Label $name
-        return $zipFile
+    try { New-Item -ItemType Directory -Path $dest -Force | Out-Null } catch {
+        Write-Err "Cannot create download dir: $($_.Exception.Message)"
+        return @()
     }
+
+    # ── A) parts array (LDC Builder v4.5.4-rest primary format) ──────────────
+    $parts = @()
+    if ($Driver.parts) { $parts = @($Driver.parts | Sort-Object { [int]$_.part_num }) }
+
+    if ($parts.Count -gt 0) {
+        $localFiles = @()
+        $idx = 0
+        foreach ($part in $parts) {
+            $idx++
+            $pUrl  = $part.url
+            if (-not $pUrl) {
+                Write-Warn "Part $idx of '$name' has no URL -- skipping part."
+                continue
+            }
+            $pFile = if ($part.filename) {
+                Join-Path $dest $part.filename
+            } else {
+                Join-Path $dest "part$('{0:D4}' -f $idx)"
+            }
+
+            Write-Info "  Part $idx / $($parts.Count): $([System.IO.Path]::GetFileName($pFile))"
+            try {
+                Invoke-Download -Url $pUrl -OutPath $pFile -Label "$name [Part $idx]"
+                $localFiles += $pFile
+            } catch {
+                Write-Err "Failed to download part $idx of '$name': $($_.Exception.Message)"
+                return @()
+            }
+        }
+        return $localFiles
+    }
+
+    # ── B) Legacy single-file (zip / zip_url) ────────────────────────────────
+    $zipUrl = ''
+    if ($Driver.zip)     { $zipUrl = $Driver.zip }
+    if (-not $zipUrl -and $Driver.zip_url) { $zipUrl = $Driver.zip_url }
+
+    if (-not $zipUrl) {
+        # ── C) Derived URL fallback ───────────────────────────────────────────
+        $typeFolder = if ($Driver.type_folder) { $Driver.type_folder }
+                      elseif ($Driver.category) { $Driver.category }
+                      else { 'Other' }
+        $zipUrl = "$($script:LDC_BASE_RAW)/$typeFolder/DP_$($Driver.id)/$($Driver.id).zip"
+        Write-Warn "No URL in manifest entry -- derived fallback: $zipUrl"
+    }
+
+    $filename = [System.IO.Path]::GetFileName($zipUrl.Split('?')[0])
+    if (-not $filename -or $filename.Length -lt 3) { $filename = "$safeId.zip" }
+    $zipFile = Join-Path $dest $filename
+
+    try {
+        Invoke-Download -Url $zipUrl -OutPath $zipFile -Label $name
+    } catch {
+        Write-Err "Failed to download '$name': $($_.Exception.Message)"
+        return @()
+    }
+
+    return @($zipFile)
 }
 
 # ================================================================
-#  LDC -- EXTRACT & INSTALL DRIVER
+#  LDC -- EXTRACT & INSTALL DRIVER  (v3.0.0: archive-agnostic)
 # ================================================================
 function Install-LdcDriver {
     param([object]$Driver)
@@ -567,37 +909,62 @@ function Install-LdcDriver {
     $extractTo = Join-Path $script:TempRoot "ext_$safeId"
 
     try {
-        $zipFile = Get-LdcDriver -Driver $Driver
-
-        # Extract ZIP
-        Write-Info "Extracting: $name"
-        New-Item -ItemType Directory -Path $extractTo -Force | Out-Null
-        try {
-            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
-            [System.IO.Compression.ZipFile]::ExtractToDirectory($zipFile, $extractTo)
-        } catch {
-            throw "ZIP extraction failed: $($_.Exception.Message)"
+        # 1. Download all parts
+        $partFiles = Get-LdcDriverParts -Driver $Driver
+        if (-not $partFiles -or $partFiles.Count -eq 0) {
+            Write-Err "No files downloaded for '$name' -- skipping."
+            return
         }
-        Remove-Item $zipFile -Force -ErrorAction SilentlyContinue
 
+        # 2. Extract (handles .zip, multi-part .zip, .7z multi-volume)
+        Write-Info "Extracting: $name"
+        $ok = Expand-DriverArchive -ArchivePaths $partFiles -Destination $extractTo
+        if (-not $ok) {
+            Write-Err "Extraction failed for '$name'."
+            return
+        }
+
+        # Clean up downloaded parts
+        foreach ($pf in $partFiles) {
+            Remove-Item $pf -Force -ErrorAction SilentlyContinue
+        }
+
+        # 3. Install via pnputil
         $pnp = Get-PnPUtilPath
-        if (-not $pnp) { throw 'pnputil.exe not found.' }
+        if (-not $pnp) {
+            Write-Err 'pnputil.exe not found.'
+            return
+        }
 
-        # Prefer specific INF if declared
         $code = $null
+
+        # Prefer specific INF if declared in manifest
         if ($Driver.inf_file -and $Driver.inf_file.Trim().Length -gt 0) {
-            $infHit = Get-ChildItem -Path $extractTo -Filter $Driver.inf_file -Recurse -ErrorAction SilentlyContinue |
+            $infHit = Get-ChildItem -Path $extractTo -Filter $Driver.inf_file `
+                          -Recurse -ErrorAction SilentlyContinue |
                       Select-Object -First 1
             if ($infHit) {
                 Write-Info "Targeting INF: $($infHit.Name)"
-                $code = Invoke-Executable -FilePath $pnp -Arguments @('/add-driver', $infHit.FullName, '/install')
+                try {
+                    $code = Invoke-Executable -FilePath $pnp `
+                        -Arguments @('/add-driver', $infHit.FullName, '/install')
+                } catch {
+                    Write-Err "pnputil failed for '$name': $($_.Exception.Message)"
+                    return
+                }
             } else {
-                Write-Warn "Declared INF '$($Driver.inf_file)' not found, scanning folder..."
+                Write-Warn "Declared INF '$($Driver.inf_file)' not found -- scanning folder."
             }
         }
 
         if ($null -eq $code) {
-            $code = Invoke-Executable -FilePath $pnp -Arguments @('/add-driver', $extractTo, '/subdirs', '/install')
+            try {
+                $code = Invoke-Executable -FilePath $pnp `
+                    -Arguments @('/add-driver', $extractTo, '/subdirs', '/install')
+            } catch {
+                Write-Err "pnputil failed for '$name': $($_.Exception.Message)"
+                return
+            }
         }
 
         if ($code -eq 0) {
@@ -670,7 +1037,6 @@ function Show-LdcSearchMenu {
 
         if ($results.Count -eq 0) { Write-Warn "No results for '$term'."; continue }
 
-        # --- Results table ---
         Write-Section "  SEARCH RESULTS  ($($results.Count) found)  " 'Cyan'
         Write-Host ('  {0,-4} {1,-36} {2,-14} {3,-10} {4}' -f
             '#', 'Name', 'Provider', 'Category', 'Version') -ForegroundColor Cyan
@@ -720,6 +1086,15 @@ function Invoke-LdcMode {
         return
     }
 
+    # Check 7z availability once and report
+    $sz = Get-SevenZipPath
+    if ($sz) {
+        Write-OK "7z binary found: $sz"
+    } else {
+        Write-Warn '7z binary not found -- 7z multi-volume drivers will use byte-concat fallback.'
+        Write-Warn 'Install 7-Zip from https://7-zip.org for full 7z support.'
+    }
+
     # Sub-menu
     Write-Section '  LDC INSTALL MODE  ' 'Cyan'
     Write-Host '  [1]  AUTO    Detect hardware, match and install drivers' -ForegroundColor White
@@ -751,8 +1126,10 @@ function Invoke-LdcMode {
             $n   = if ($m.Driver.name)    { $m.Driver.name }    else { $m.Driver.id }
             $v   = if ($m.Driver.version) { "v$($m.Driver.version)" } else { '' }
             $c   = if ($m.Driver.category){ $m.Driver.category } else { '' }
+            $pts = if ($m.Driver.zip_parts -and [int]$m.Driver.zip_parts -gt 1) {
+                       "[$($m.Driver.zip_parts) parts]" } else { '' }
             $col = if ($m.MatchType -eq 'HWID') { 'Green' } else { 'Yellow' }
-            Write-Host "  $tag  $n  $v  ($c)" -ForegroundColor $col
+            Write-Host "  $tag  $n  $v  ($c) $pts" -ForegroundColor $col
         }
         Write-Divider
 
@@ -767,9 +1144,11 @@ function Invoke-LdcMode {
 
         Write-Section "  SELECTED  ($($toInstall.Count) driver(s))  " 'Cyan'
         foreach ($d in $toInstall) {
-            $n = if ($d.name) { $d.name } else { $d.id }
-            $v = if ($d.version) { "v$($d.version)" } else { '' }
-            Write-Host "  (+) $n  $v" -ForegroundColor Green
+            $n   = if ($d.name) { $d.name } else { $d.id }
+            $v   = if ($d.version) { "v$($d.version)" } else { '' }
+            $pts = if ($d.zip_parts -and [int]$d.zip_parts -gt 1) {
+                       "[$($d.zip_parts) parts]" } else { '' }
+            Write-Host "  (+) $n  $v  $pts" -ForegroundColor Green
         }
         Write-Divider
         if (-not (Confirm-Action "Proceed with $($toInstall.Count) driver(s)")) {
@@ -867,13 +1246,18 @@ function Invoke-LocalInfInstall {
         if (-not (Test-Path -LiteralPath $path)) { Write-Warn "Not found: $path"; continue }
 
         $item = Get-Item -LiteralPath $path
-        if ($item.PSIsContainer) {
-            Write-Info "Scanning folder: $path"
-            $code = Invoke-Executable -FilePath $pnp -Arguments @('/add-driver', $path, '/subdirs', '/install')
-        } else {
-            if (-not $path.ToLower().EndsWith('.inf')) { Write-Warn "Skipping non-INF: $path"; continue }
-            Write-Info "Installing: $path"
-            $code = Invoke-Executable -FilePath $pnp -Arguments @('/add-driver', $path, '/install')
+        try {
+            if ($item.PSIsContainer) {
+                Write-Info "Scanning folder: $path"
+                $code = Invoke-Executable -FilePath $pnp -Arguments @('/add-driver', $path, '/subdirs', '/install')
+            } else {
+                if (-not $path.ToLower().EndsWith('.inf')) { Write-Warn "Skipping non-INF: $path"; continue }
+                Write-Info "Installing: $path"
+                $code = Invoke-Executable -FilePath $pnp -Arguments @('/add-driver', $path, '/install')
+            }
+        } catch {
+            Write-Err "pnputil failed for '$path': $($_.Exception.Message)"
+            continue
         }
 
         if     ($code -eq 0)    { Write-OK "Installed: $([System.IO.Path]::GetFileName($path))"; $script:ChangesMade = $true }
@@ -899,7 +1283,6 @@ function Send-Telemetry {
                         Select-Object  -Unique
         } catch {}
 
-        # Collect installed driver snapshot (name|version|vendor|class)
         $dLines = @()
         try {
             $signed = Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue |
@@ -939,7 +1322,6 @@ function Remove-TempDir {
     }
 }
 
-# Register exit-time cleanup
 $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
     if ($script:TempRoot -and (Test-Path -LiteralPath $script:TempRoot -ErrorAction SilentlyContinue)) {
         Remove-Item -Path $script:TempRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -952,7 +1334,6 @@ $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
 function Show-MainMenu {
     Write-Banner
 
-    # System info block
     $osCaption  = ''
     $osBuild    = ''
     $arch       = if ([System.Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
@@ -1029,7 +1410,6 @@ if (-not (Test-IsAdministrator)) {
             exit 1
         }
     } else {
-        # irm | iex mode -- cannot auto-elevate, instruct user
         Clear-Host
         Write-Host ''
         Write-Host '  +============================================================+' -ForegroundColor Red
