@@ -32,6 +32,15 @@
     Cleanup     : Temp files removed on exit or mid-session abort
 
 .CHANGELOG
+    v3.2.0 - Robust detection + Y-default confirmations
+             * Get-PnpDevice -PresentOnly:$false enumerates ALL devices
+               including ghost / non-present (USB dongles, hidden, etc.)
+             * Win32_PnPSignedDriver cross-reference: detect installed version
+               and skip drivers that are already up-to-date
+             * Matched-driver table shows [PRESENT]/[GHOST], [MISSING]/
+               [UP-TO-DATE vX]/[UPDATE from vX] badges per driver
+             * Confirm-Action defaults to Y on Enter (prompts show [Y/n])
+             * Only drivers that NeedsUpdate are installed in AUTO mode
     v3.1.0 - 7z binary repo fallback
              * Try downloading 7za.exe directly from repo if not found locally
              * Try downloading 7zextra.zip from repo, extract 7za.exe if direct download fails
@@ -63,7 +72,7 @@ param(
 #  GLOBAL STATE
 # ================================================================
 $ErrorActionPreference   = 'Stop'
-$script:ScriptVersion    = '3.1.0'
+$script:ScriptVersion    = '3.2.0'
 $script:ScriptName       = 'AutoDriverDeploy'
 $script:ScriptAuthor     = 'rhshourav'
 $script:RebootRequired   = $false
@@ -204,8 +213,10 @@ function Read-MenuChoice {
 
 function Confirm-Action {
     param([string]$Prompt)
-    Write-Host "  $Prompt [Y/N]: " -ForegroundColor Yellow -NoNewline
-    return ((Read-Host).Trim().ToUpper() -eq 'Y')
+    Write-Host "  $Prompt [Y/n]: " -ForegroundColor Yellow -NoNewline
+    $inp = (Read-Host).Trim()
+    if ($inp.Length -eq 0) { return $true }   # Enter = Y (default)
+    return ($inp.ToUpper() -ne 'N')
 }
 
 function Wait-AnyKey {
@@ -803,17 +814,100 @@ function Get-LdcManifests {
 #  LDC -- HARDWARE DETECTION & MATCHING
 # ================================================================
 function Get-LocalHardwareIDs {
-    $list = [System.Collections.ArrayList]@()
+    $list            = [System.Collections.ArrayList]@()
+    $installedDriver = @{}   # HWID.ToUpper() -> DriverVersion
+
+    # ── Pre-build installed-driver lookup from Win32_PnPSignedDriver ─────────
+    try {
+        $signed = Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue |
+                  Where-Object { $_.HardwareID -and $_.DriverVersion }
+        foreach ($d in $signed) {
+            foreach ($hwid in @($d.HardwareID)) {
+                $key = $hwid.ToUpper()
+                if ($key -and -not $installedDriver.ContainsKey($key)) {
+                    $installedDriver[$key] = $d.DriverVersion
+                }
+            }
+        }
+    } catch {}
+
+    # Helper: return first matching installed driver version for a device's HWIDs
+    function script:Get-InstalledVer([string[]]$HWIDs, [string[]]$CompatIDs) {
+        foreach ($id in ($HWIDs + $CompatIDs)) {
+            if (-not $id) { continue }
+            $v = $installedDriver[$id.ToUpper()]
+            if ($v) { return $v }
+        }
+        return $null
+    }
+
+    # ── Primary path: Get-PnpDevice (PS 5.1+, Win10+) ───────────────────────
+    #    -PresentOnly:$false captures ALL devices: connected, disconnected, ghost
+    $pnpDevices = @()
+    try {
+        $pnpDevices = @(Get-PnpDevice -PresentOnly:$false -ErrorAction SilentlyContinue |
+                        Where-Object { $_.HardwareID -and @($_.HardwareID).Count -gt 0 })
+    } catch {}
+
+    if ($pnpDevices.Count -gt 0) {
+        foreach ($dev in $pnpDevices) {
+            $hwids   = @($dev.HardwareID   | Where-Object { $_ })
+            $compats = @($dev.CompatibleID | Where-Object { $_ })
+            if ($hwids.Count -eq 0) { continue }
+
+            # IsPresent: device is physically connected/active
+            # Status 'Unknown' = ghost / not currently connected
+            $isPresent = $true
+            if ($dev.PSObject.Properties['Present']) {
+                $isPresent = [bool]$dev.Present
+            } elseif ($dev.Status -eq 'Unknown' -or $dev.Status -eq 'UNKNOWN') {
+                $isPresent = $false
+            }
+
+            $pnpClass = if ($dev.Class) { $dev.Class.ToLower() } else { '' }
+            $instVer  = script:Get-InstalledVer -HWIDs $hwids -CompatIDs $compats
+
+            [void]$list.Add([PSCustomObject]@{
+                Name                   = if ($dev.FriendlyName) { $dev.FriendlyName }
+                                         elseif ($dev.Name)     { $dev.Name }
+                                         else                   { 'Unknown Device' }
+                HardwareIDs            = $hwids
+                CompatIDs              = $compats
+                PNPClass               = $pnpClass
+                IsPresent              = $isPresent
+                Status                 = if ($dev.Status) { $dev.Status } else { 'Unknown' }
+                InstalledDriverVersion = $instVer
+            })
+        }
+        Write-Log "Get-PnpDevice enumerated $($list.Count) device(s) (all, including non-present)." 'INFO'
+        return @($list)
+    }
+
+    # ── Fallback path: Win32_PnPEntity via CIM ───────────────────────────────
+    #    ConfigManagerErrorCode 24 = not present, 45 = not connected, 47 = being removed
+    Write-Log 'Get-PnpDevice unavailable -- falling back to Win32_PnPEntity.' 'WARN'
     try {
         $raw = Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue |
                Where-Object { $_.HardwareID -and @($_.HardwareID).Count -gt 0 }
 
         foreach ($dev in $raw) {
+            $hwids   = @($dev.HardwareID  | Where-Object { $_ })
+            $compats = if ($dev.CompatibleID) { @($dev.CompatibleID | Where-Object { $_ }) } else { @() }
+            if ($hwids.Count -eq 0) { continue }
+
+            $errCode   = try { [int]$dev.ConfigManagerErrorCode } catch { 0 }
+            $isPresent = $errCode -notin @(24, 45, 47)
+            $pnpClass  = if ($dev.PNPClass) { $dev.PNPClass.ToLower() } else { '' }
+            $instVer   = script:Get-InstalledVer -HWIDs $hwids -CompatIDs $compats
+
             [void]$list.Add([PSCustomObject]@{
-                Name        = if ($dev.Name) { $dev.Name } else { 'Unknown Device' }
-                HardwareIDs = @($dev.HardwareID)
-                CompatIDs   = if ($dev.CompatibleID) { @($dev.CompatibleID) } else { @() }
-                PNPClass    = if ($dev.PNPClass) { $dev.PNPClass.ToLower() } else { '' }
+                Name                   = if ($dev.Name) { $dev.Name } else { 'Unknown Device' }
+                HardwareIDs            = $hwids
+                CompatIDs              = $compats
+                PNPClass               = $pnpClass
+                IsPresent              = $isPresent
+                Status                 = if ($dev.Status) { $dev.Status } else { 'Unknown' }
+                InstalledDriverVersion = $instVer
             })
         }
     } catch {
@@ -871,10 +965,32 @@ function Find-LdcMatches {
         }
 
         if ($matchType) {
+            # Determine device presence and installed driver status
+            $devIsPresent  = if ($matchDevice -and $matchDevice.PSObject.Properties['IsPresent']) {
+                                 [bool]$matchDevice.IsPresent } else { $true }
+            $instVer       = if ($matchDevice -and $matchDevice.PSObject.Properties['InstalledDriverVersion']) {
+                                 $matchDevice.InstalledDriverVersion } else { $null }
+
+            # NeedsUpdate: driver not installed, or manifest version is newer
+            $needsUpdate   = $true
+            if ($instVer -and $driver.version) {
+                try {
+                    $instParsed = [System.Version]$instVer
+                    $manifParsed= [System.Version]$driver.version
+                    if ($instParsed -ge $manifParsed) { $needsUpdate = $false }
+                } catch { $needsUpdate = $true }
+            } elseif ($instVer -and -not $driver.version) {
+                # Driver installed but manifest has no version -- assume up-to-date
+                $needsUpdate = $false
+            }
+
             [void]$matched.Add([PSCustomObject]@{
-                Driver     = $driver
-                MatchType  = $matchType
-                DeviceName = if ($matchDevice) { $matchDevice.Name } else { '' }
+                Driver                 = $driver
+                MatchType              = $matchType
+                DeviceName             = if ($matchDevice) { $matchDevice.Name } else { '' }
+                IsPresent              = $devIsPresent
+                InstalledDriverVersion = $instVer
+                NeedsUpdate            = $needsUpdate
             })
         }
     }
@@ -1182,9 +1298,11 @@ function Invoke-LdcMode {
     $toInstall = @()
 
     if ($mode -eq '1') {
-        Write-Info 'Enumerating installed PnP devices...'
+        Write-Info 'Enumerating ALL PnP devices (present + non-present / ghost)...'
         $localDevices = Get-LocalHardwareIDs
-        Write-OK "Found $($localDevices.Count) PnP device(s)."
+        $presentCount = @($localDevices | Where-Object { $_.IsPresent }).Count
+        $ghostCount   = $localDevices.Count - $presentCount
+        Write-OK "Found $($localDevices.Count) PnP device(s)  ($presentCount present, $ghostCount non-present/ghost)."
 
         Write-Info 'Matching against LDC manifest (HWID first, category fallback)...'
         $matches = Find-LdcMatches -ManifestDrivers $allDrivers -LocalDevices $localDevices
@@ -1194,23 +1312,52 @@ function Invoke-LdcMode {
             return
         }
 
-        Write-Section "  MATCHED DRIVERS  ($($matches.Count) found)  " 'Green'
+        # Split into actionable (needs update) and already-current
+        $needsInstall = @($matches | Where-Object { $_.NeedsUpdate })
+        $alreadyOK    = @($matches | Where-Object { -not $_.NeedsUpdate })
+
+        Write-Section "  MATCHED DRIVERS  ($($matches.Count) found -- $($needsInstall.Count) to install, $($alreadyOK.Count) up-to-date)  " 'Green'
+
         foreach ($m in $matches) {
-            $tag = if ($m.MatchType -eq 'HWID') { '[HWID]' } else { '[CAT] ' }
-            $n   = if ($m.Driver.name)    { $m.Driver.name }    else { $m.Driver.id }
-            $v   = if ($m.Driver.version) { "v$($m.Driver.version)" } else { '' }
-            $c   = if ($m.Driver.category){ $m.Driver.category } else { '' }
-            $pts = if ($m.Driver.zip_parts -and [int]$m.Driver.zip_parts -gt 1) {
-                       "[$($m.Driver.zip_parts) parts]" } else { '' }
-            $col = if ($m.MatchType -eq 'HWID') { 'Green' } else { 'Yellow' }
-            Write-Host "  $tag  $n  $v  ($c) $pts" -ForegroundColor $col
+            $tag      = if ($m.MatchType -eq 'HWID') { '[HWID]' } else { '[CAT] ' }
+            $n        = if ($m.Driver.name)     { $m.Driver.name }    else { $m.Driver.id }
+            $v        = if ($m.Driver.version)  { "v$($m.Driver.version)" } else { '' }
+            $c        = if ($m.Driver.category) { $m.Driver.category } else { '' }
+            $pts      = if ($m.Driver.zip_parts -and [int]$m.Driver.zip_parts -gt 1) {
+                            "[$($m.Driver.zip_parts) parts]" } else { '' }
+
+            # Presence badge
+            $presTag  = if ($m.IsPresent) { '[PRESENT]' } else { '[GHOST]  ' }
+
+            # Install status badge
+            $instTag  = if ($m.InstalledDriverVersion) {
+                            if ($m.NeedsUpdate) { "[UPDATE from v$($m.InstalledDriverVersion)]" }
+                            else                { "[UP-TO-DATE v$($m.InstalledDriverVersion)]" }
+                        } else { '[MISSING]' }
+
+            # Color: green=present+needs install, yellow=ghost, darkgray=already current
+            $col = if (-not $m.NeedsUpdate)    { 'DarkGray' }
+                   elseif (-not $m.IsPresent)  { 'Yellow' }
+                   else                        { 'Green' }
+
+            Write-Host "  $tag  $presTag  $instTag  $n  $v  ($c) $pts" -ForegroundColor $col
+        }
+
+        if ($alreadyOK.Count -gt 0) {
+            Write-Host ''
+            Write-Host "  (DarkGray = already up-to-date, Yellow = ghost/non-present device)" -ForegroundColor DarkGray
         }
         Write-Divider
 
-        if (-not (Confirm-Action "Install all $($matches.Count) matched driver(s)")) {
+        if ($needsInstall.Count -eq 0) {
+            Write-OK 'All matched drivers are already up-to-date. Nothing to install.'
+            return
+        }
+
+        if (-not (Confirm-Action "Install $($needsInstall.Count) driver(s) that need updating")) {
             Write-Info 'Auto-install cancelled.'; return
         }
-        $toInstall = @($matches | ForEach-Object { $_.Driver })
+        $toInstall = @($needsInstall | ForEach-Object { $_.Driver })
 
     } elseif ($mode -eq '2') {
         $toInstall = Show-LdcSearchMenu -AllDrivers $allDrivers
