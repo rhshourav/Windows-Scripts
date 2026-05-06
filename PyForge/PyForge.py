@@ -162,10 +162,14 @@ function Test-Requirements {
         exit 1
     }
 
-    # OS check
+    # OS check  (PS 5.1 safe — $IsWindows does not exist in WinPS)
     Show-Bar 30 'Checking OS...'
     Finish-Bar 'OS verified'
-    if ($IsWindows -or $env:OS -eq 'Windows_NT') {
+    $osIsWindows = ($env:OS -eq 'Windows_NT') -or
+                   ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+                       [System.Runtime.InteropServices.OSPlatform]::Windows) 2>$null) -or
+                   ($PSVersionTable.PSEdition -ne 'Core' -and $PSVersionTable.Platform -eq $null)
+    if ($osIsWindows) {
         OK "OS: Windows (compilation + signing available)"
         $script:IS_WINDOWS = $true
     } else {
