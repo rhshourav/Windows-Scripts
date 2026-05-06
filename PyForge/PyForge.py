@@ -29,7 +29,8 @@ $ORIGINAL_DIR    = Get-Location
 # ─────────────────────────────────────────────────────────────
 #  COLOUR HELPERS
 # ─────────────────────────────────────────────────────────────
-function C ($Text, $Color='White', $NoNewline=$false) {
+function C {
+    param([string]$Text, [string]$Color='White', [switch]$NoNewline)
     if ($NoNewline) { Write-Host $Text -ForegroundColor $Color -NoNewline }
     else            { Write-Host $Text -ForegroundColor $Color }
 }
