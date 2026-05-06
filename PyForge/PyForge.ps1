@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    PyForge v1.0.0 - Universal Python to EXE Compiler
+    PyForge v2.2.0 - Universal Python to EXE Compiler
 .DESCRIPTION
     Compiles any Python script into a standalone Windows EXE.
     Supports PyInstaller & Nuitka engines, icon branding,
@@ -21,7 +21,7 @@ $ErrorActionPreference = 'Stop'
 # ─────────────────────────────────────────────────────────────
 #  GLOBALS
 # ─────────────────────────────────────────────────────────────
-$PYFORGE_VERSION = '1.0.0'
+$PYFORGE_VERSION = '2.2.0'
 $PYFORGE_AUTHOR  = 'rhshourav'
 $BUILD_TEMP      = Join-Path $env:TEMP "PyForge_$(Get-Random)"
 $ORIGINAL_DIR    = Get-Location
@@ -207,7 +207,7 @@ function Get-BuildConfig {
     Blank
 
     # Version
-    $script:CFG_VERSION = Ask 'Version string' '1.0.0'
+    $script:CFG_VERSION = Ask 'Version string' '2.2.0'
     OK "Version: $($script:CFG_VERSION)"
     Blank
 
