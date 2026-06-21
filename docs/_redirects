@@ -1,0 +1,3 @@
+# Serve the PowerShell script at the root URL
+# irm win.pages.dev → serves windowsScripts.ps1 as plain text
+/    /windowsScripts.ps1    200
