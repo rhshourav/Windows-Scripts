@@ -17,7 +17,7 @@
 ### One-liner — Run from anywhere
 
 ```powershell
-irm wsrun.pages.dev | iex
+irm itrun.pages.dev | iex
 ```
 
 > Runs the latest interactive menu directly. No install. No setup. Just paste and go.
