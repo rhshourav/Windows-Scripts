@@ -1,11 +1,11 @@
-name: Deploy to Cloudflare Pages
+name: Deploy Cloudflare Pages
 
 on:
   push:
-    branches: [main]
+    branches: [main[
     paths:
-      - 'windowsScripts.ps1'
-      - 'docs/**'
+      - 'windowsScripts.ps1''
+      - '/**'
   workflow_dispatch:
 
 concurrency:
@@ -13,8 +13,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  find-and-deploy:
-    name: Find Available Name & Deploy
+  deploy:
+    name: Deploy
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -25,96 +25,28 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Stage script into deploy folder
-        run: cp windowsScripts.ps1 docs/windowsScripts.ps1
+        run: cp windowsScripts.ps1 /windowsScripts.ps1
 
-      - name: Find available project name
-        id: find
-        env:
-          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          CANDIDATES=("wsrun" "itrun" "psrun" "winscript")
-          CHOSEN=""
-
-          for NAME in "${CANDIDATES[@]}"; do
-            echo "🔍 Checking '$NAME'..."
-            RESPONSE=$(curl -s -X GET \
-              "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/pages/projects/${NAME}" \
-              -H "Authorization: Bearer ${CF_API_TOKEN}" \
-              -H "Content-Type: application/json")
-
-            SUCCESS=$(echo $RESPONSE | jq -r '.success')
-
-            if [ "$SUCCESS" = "true" ]; then
-              echo "   ❌ '$NAME' is taken — skipping."
-            else
-              echo "   ✅ '$NAME' is available!"
-              CHOSEN=$NAME
-              break
-            fi
-          done
-
-          if [ -z "$CHOSEN" ]; then
-            echo ""
-            echo "❌ All candidate names are taken. Add more candidates to the list."
-            exit 1
-          fi
-
-          echo "chosen=$CHOSEN" >> $GITHUB_OUTPUT
+      - name: Install Wrangler
+        run: npm install -g wrangler
 
       - name: Create Pages project
-        uses: cloudflare/wrangler-action@v3
         continue-on-error: true
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages project create ${{ steps.find.outputs.chosen }} --production-branch main
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: wrangler pages project create windex --production-branch main
 
       - name: Deploy to Cloudflare Pages
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy docs --project-name=${{ steps.find.outputs.chosen }} --branch=main
-
-      - name: Delete unused candidate projects
         env:
-          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CHOSEN: ${{ steps.find.outputs.chosen }}
-        run: |
-          CANDIDATES=("wsrun" "itrun" "psrun" "winscript")
-
-          echo "🧹 Cleaning up unused candidate projects..."
-          for NAME in "${CANDIDATES[@]}"; do
-            if [ "$NAME" = "$CHOSEN" ]; then
-              echo "   ⏭️  Keeping '$NAME' (deployed)"
-              continue
-            fi
-
-            RESPONSE=$(curl -s -X GET \
-              "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/pages/projects/${NAME}" \
-              -H "Authorization: Bearer ${CF_API_TOKEN}" \
-              -H "Content-Type: application/json")
-
-            SUCCESS=$(echo $RESPONSE | jq -r '.success')
-
-            if [ "$SUCCESS" = "true" ]; then
-              echo "   🗑️  Deleting '$NAME'..."
-              curl -s -X DELETE \
-                "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/pages/projects/${NAME}" \
-                -H "Authorization: Bearer ${CF_API_TOKEN}" \
-                -H "Content-Type: application/json" | jq -r '.success'
-            else
-              echo "   ✅ '$NAME' doesn't exist — nothing to delete."
-            fi
-          done
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: wrangler pages deploy page --project-name=itrun --branch=main
 
       - name: Print live URL
         run: |
           echo ""
           echo "🚀 Deployed successfully!"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "  Live URL : https://${{ steps.find.outputs.chosen }}.pages.dev"
-          echo "  Run cmd  : irm ${{ steps.find.outputs.chosen }}.pages.dev | iex"
+          echo "  Live URL : https://itrun.pages.dev"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
