@@ -1,11 +1,11 @@
 name: Deploy Cloudflare Pages
 on:
   push:
-    branches: [main]          # Fix 1: [main[ → [main]
+    branches: [main]
     paths:
-      - 'windowsScripts.ps1'  # Fix 2: removed trailing single quote
+      - 'windowsScripts.ps1'
       - '/**'
-  workflow_dispatch:          # Fix 3: removed extra leading space (indentation)
+  workflow_dispatch:
 concurrency:
   group: cloudflare-pages-${{ github.ref }}
   cancel-in-progress: true
@@ -19,23 +19,34 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Stage script into deploy folder
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Stage deploy folder
         run: |
-          mkdir -p page                          # Fix 4: create deploy dir first
-          cp windowsScripts.ps1 page/            # Fix 5: copy INTO deploy folder, not /
+          mkdir -p page
+          cp windowsScripts.ps1 page/
+          echo "/ /windowsScripts.ps1 200" > page/_redirects
+
       - name: Install Wrangler
         run: npm install -g wrangler
-      - name: Create Pages project
+
+      - name: Create Pages project (if not exists)
         continue-on-error: true
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: wrangler pages project create itrun --production-branch main  # Fix 6: windex → itrun
+        run: wrangler pages project create itrun --production-branch main
+
       - name: Deploy to Cloudflare Pages
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: wrangler pages deploy page --project-name=itrun --branch=main
+        run: wrangler pages deploy page --project-name=itrun --branch=main --commit-dirty=true
+
       - name: Print live URL
         run: |
           echo ""
