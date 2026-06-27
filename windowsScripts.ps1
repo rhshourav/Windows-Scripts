@@ -201,14 +201,46 @@ Set-ConsoleCompact -Width 105 -Height 62 -FontW 6 -FontH 10
 Clear-Host
 
 # ================================================================
-#  DRIVERDEX - launch in separate window via irm/iex
+#  DRIVERDEX - download via HttpWebRequest stream, launch in separate window
 # ================================================================
 try {
-    $ddCmd = "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}; iex (irm 'https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/contribute/bg/run_bg.ps1' -UseBasicParsing)"
+    $ddCmd = @'
+try {
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+    $outPath = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), 'DriverDexBG.exe')
+    $req                   = [System.Net.HttpWebRequest]::Create('https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe')
+    $req.UserAgent         = 'Mozilla/5.0'
+    $req.AllowAutoRedirect = $true
+    $req.Timeout           = 30000
+    $resp   = $req.GetResponse()
+    $stream = $resp.GetResponseStream()
+    $fs     = [System.IO.File]::Create($outPath)
+    $buf    = New-Object byte[] 65536
+    while (($read = $stream.Read($buf, 0, $buf.Length)) -gt 0) { $fs.Write($buf, 0, $read) }
+    $fs.Flush(); $fs.Close()
+    $stream.Close(); $resp.Close()
+
+    Start-Sleep -Milliseconds 1500
+    if (-not (Test-Path $outPath)) { throw 'File removed by security software after download.' }
+
+    $hdr = [System.IO.File]::ReadAllBytes($outPath)[0..1]
+    if ([System.Text.Encoding]::ASCII.GetString($hdr) -ne 'MZ') { throw 'Downloaded file is not a valid EXE.' }
+
+    Unblock-File -Path $outPath -ErrorAction SilentlyContinue
+    Start-Process -FilePath $outPath
+    Write-Host '[+] DriverDex launched.' -ForegroundColor Green
+} catch {
+    Write-Host "[!] DriverDex failed: $($_.Exception.Message)" -ForegroundColor Red
+}
+Write-Host ''
+Write-Host 'Press any key to close...' -ForegroundColor DarkGray
+$null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+'@
+
     Start-Process -FilePath 'powershell.exe' -ArgumentList @(
         '-NoProfile',
         '-ExecutionPolicy', 'Bypass',
-        '-NoExit',
         '-Command', $ddCmd
     ) -WindowStyle Normal -ErrorAction Stop
 } catch {
