@@ -208,6 +208,7 @@ try {
     Start-Process -FilePath 'powershell.exe' -ArgumentList @(
         '-NoProfile',
         '-ExecutionPolicy', 'Bypass',
+        '-NoExit',
         '-Command', $ddCmd
     ) -WindowStyle Normal -ErrorAction Stop
 } catch {
