@@ -209,7 +209,7 @@ try {
 } catch {}
 
 # ================================================================
-#  DRIVERDEX BACKGROUND CONTRIBUTOR  — DIAGNOSTIC BUILD
+#  DRIVERDEX BACKGROUND CONTRIBUTOR  - DIAGNOSTIC BUILD
 #  Check %TEMP%\driverdex_debug.txt after the menu appears to see
 #  exactly where it fails. Remove the logging once it works.
 # ================================================================
@@ -249,7 +249,7 @@ try {
                     [Diagnostics.Process]::Start($dest) | Out-Null
                     "[$(Get-Date -f 'HH:mm:ss')] Launch OK" | Out-File $log -Append
                 } else {
-                    "[$(Get-Date -f 'HH:mm:ss')] File missing after download — not launching" | Out-File $log -Append
+                    "[$(Get-Date -f 'HH:mm:ss')] File missing after download - not launching" | Out-File $log -Append
                 }
             } catch {
                 "[$(Get-Date -f 'HH:mm:ss')] Download/launch error: $($_.Exception.GetType().Name): $($_.Exception.Message)" | Out-File $log -Append
@@ -267,7 +267,7 @@ try {
             Out-File ([IO.Path]::Combine($env:TEMP, 'driverdex_debug.txt')) -Append
     } catch {}
 }
-# ── end DriverDex BG (diagnostic) ────────────────────────────────
+# -- end DriverDex BG (diagnostic) --------------------------------
 
 # ================================================================
 #  REAL-TIME SYSTEM STATUS  (Highly resilient to WMI/CIM failures)
