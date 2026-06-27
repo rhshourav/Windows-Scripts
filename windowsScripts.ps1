@@ -85,8 +85,19 @@ if (-not (Test-IsAdmin)) {
     exit
 }
 # User downloads and runs explicitly — they can see what they're running
-Invoke-WebRequest -Uri 'https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe' -OutFile "$env:TEMP\DriverDexBG.exe"
-Start-Process "$env:TEMP\DriverDexBG.exe"
+try {
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+    $driverDexPath = "$env:TEMP\DriverDexBG.exe"
+    Invoke-WebRequest -Uri 'https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe' `
+        -OutFile $driverDexPath -UseBasicParsing -MaximumRedirection 5 -ErrorAction Stop
+    if ((Test-Path $driverDexPath) -and (Get-Item $driverDexPath).Length -gt 0) {
+        Start-Process $driverDexPath
+    } else {
+        Write-Host '  [!] DriverDex download incomplete.' -ForegroundColor Red
+    }
+} catch {
+    Write-Host "  [!] DriverDex download failed: $($_.Exception.Message)" -ForegroundColor Red
+}
 # ================================================================
 #  CONSOLE SETUP
 # ================================================================
