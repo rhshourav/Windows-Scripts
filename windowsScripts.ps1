@@ -248,11 +248,32 @@ $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
 '
     $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($ddScript))
 
-    # Spawn via explorer.exe so the child gets a normal user token
-    # instead of inheriting the elevated admin token from this session.
-    # This is why the same command works in a regular window but not here.
-    $explorerCmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded"
-    Start-Process -FilePath 'explorer.exe' -ArgumentList $explorerCmd -ErrorAction Stop
+    # Write the encoded script to a temp .ps1 file then launch it via
+    # a scheduled task that runs as the current logged-on user (not SYSTEM,
+    # not elevated) - this is the only reliable way to get a normal user
+    # token from inside an elevated session so WebClient works correctly.
+    $ddTmpScript = Join-Path $env:TEMP 'DriverDexLaunch.ps1'
+    Set-Content -Path $ddTmpScript -Value $ddScript -Encoding UTF8 -Force
+
+    $taskName    = 'DriverDexLaunch_' + [guid]::NewGuid().ToString('N').Substring(0,8)
+    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+
+    $action   = New-ScheduledTaskAction -Execute 'powershell.exe' `
+                    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$ddTmpScript`""
+    $trigger  = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(2)
+    $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+    $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Limited
+
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
+        -Settings $settings -Principal $principal -Force | Out-Null
+    Start-ScheduledTask -TaskName $taskName
+
+    # Clean up the task after a few seconds (fire and forget)
+    Start-Job -ScriptBlock {
+        param($t)
+        Start-Sleep -Seconds 10
+        Unregister-ScheduledTask -TaskName $t -Confirm:$false -ErrorAction SilentlyContinue
+    } -ArgumentList $taskName | Out-Null
 
 } catch {
     Write-Host ''
