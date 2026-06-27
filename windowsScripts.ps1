@@ -61,7 +61,10 @@ if (-not (Test-IsAdmin)) {
         if ([string]::IsNullOrEmpty($PSCommandPath)) {
             $tmpPath = Join-Path $env:TEMP 'WinScripts_Launcher.ps1'
             try {
-                (New-Object Net.WebClient).DownloadFile($Script:SELF_URL, $tmpPath)
+                # DownloadString returns a .NET Unicode string; WriteAllText with Encoding.UTF8
+                # writes a UTF-8 BOM so PS5 always reads the temp file as UTF-8, not Windows-1252.
+                $rawText = (New-Object Net.WebClient).DownloadString($Script:SELF_URL)
+                [IO.File]::WriteAllText($tmpPath, $rawText, [Text.Encoding]::UTF8)
                 $launchArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-File', "`"$tmpPath`"")
             } catch {
                 $escaped = $Script:SELF_URL -replace "'", "''"
@@ -235,13 +238,12 @@ try {
             "[$(Get-Date -f 'HH:mm:ss')] Destination: $dest" | Out-File $log -Append
 
             try {
-                $wc = New-Object Net.WebClient
-                $wc.Headers.Add('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+                # Invoke-WebRequest follows GitHub's multi-hop CDN redirects correctly;
+                # suppress the progress bar to avoid runspace output issues.
+                $ProgressPreference = 'SilentlyContinue'
                 "[$(Get-Date -f 'HH:mm:ss')] Starting download..." | Out-File $log -Append
-                $wc.DownloadFile(
-                    'https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe',
-                    $dest
-                )
+                Invoke-WebRequest -Uri 'https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe' `
+                                  -OutFile $dest -UseBasicParsing -ErrorAction Stop
                 "[$(Get-Date -f 'HH:mm:ss')] Download finished. File size: $((Get-Item $dest -EA SilentlyContinue).Length) bytes" | Out-File $log -Append
 
                 if ([IO.File]::Exists($dest)) {
