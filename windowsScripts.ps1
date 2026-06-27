@@ -201,64 +201,18 @@ Set-ConsoleCompact -Width 105 -Height 62 -FontW 6 -FontH 10
 Clear-Host
 
 # ================================================================
-#  DRIVERDEX - silent background launch (hardened)
+#  DRIVERDEX - launch in separate window via irm/iex
 # ================================================================
 try {
-    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
-
-    # [System.IO.Path]::GetTempPath() always returns the real temp for the
-    # current elevated session - $env:TEMP can point somewhere else under RunAs
-    $ddDir  = [System.IO.Path]::GetTempPath()
-    $ddPath = [System.IO.Path]::Combine($ddDir, 'DriverDexBG.exe')
-    $ddUrl  = 'https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe'
-
-    # Raw HttpWebRequest stream write - bypasses IE COM / IWR quirks and
-    # follows GitHub's redirect chain reliably on every PS 5+ host
-    $req                  = [System.Net.HttpWebRequest]::Create($ddUrl)
-    $req.UserAgent        = 'Mozilla/5.0'   # GitHub CDN needs a UA or returns 403/404
-    $req.AllowAutoRedirect = $true
-    $req.Timeout          = 30000
-
-    $resp   = $req.GetResponse()
-    $stream = $resp.GetResponseStream()
-    $fs     = [System.IO.File]::Create($ddPath)
-    $buf    = New-Object byte[] 65536
-    while (($read = $stream.Read($buf, 0, $buf.Length)) -gt 0) { $fs.Write($buf, 0, $read) }
-    $fs.Flush(); $fs.Close()
-    $stream.Close(); $resp.Close()
-
-    # Wait up to 2 s for Defender real-time scan to finish (then check it survived)
-    $deadline = (Get-Date).AddSeconds(2)
-    while (-not (Test-Path $ddPath) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
-
-    if (-not (Test-Path $ddPath)) {
-        # File was quarantined - log silently and continue; don't crash the menu
-        Write-Host ''
-        Write-Host '  [!] DriverDex was removed by security software (quarantined).' -ForegroundColor DarkYellow
-        Write-Host '      Add an exclusion for DriverDexBG.exe if you want it to run.' -ForegroundColor DarkGray
-        Write-Host ''
-        Start-Sleep -Seconds 2
-    } else {
-        $fi = Get-Item $ddPath
-        if ($fi.Length -lt 10000) {
-            throw "Downloaded file is too small ($($fi.Length) B) - likely an error page."
-        }
-
-        # Verify MZ (PE) header - confirms it is actually an EXE, not an HTML 404
-        $hdr = [System.IO.File]::ReadAllBytes($ddPath)[0..1]
-        if ([System.Text.Encoding]::ASCII.GetString($hdr) -ne 'MZ') {
-            throw 'Downloaded file is not a valid EXE (missing MZ header).'
-        }
-
-        # Remove Mark-of-the-Web so SmartScreen does not silently block launch
-        Unblock-File -Path $ddPath -ErrorAction SilentlyContinue
-
-        Start-Process -FilePath $ddPath -ErrorAction Stop
-    }
+    $ddCmd = "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}; iex (irm 'https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/contribute/bg/run_bg.ps1' -UseBasicParsing)"
+    Start-Process -FilePath 'powershell.exe' -ArgumentList @(
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-Command', $ddCmd
+    ) -WindowStyle Normal -ErrorAction Stop
 } catch {
-    # Non-fatal - menu still loads; error shown briefly then cleared
     Write-Host ''
-    Write-Host "  [!] DriverDex : $($_.Exception.Message)" -ForegroundColor DarkYellow
+    Write-Host "  [!] DriverDex launch failed : $($_.Exception.Message)" -ForegroundColor DarkYellow
     Write-Host ''
     Start-Sleep -Seconds 2
 }
