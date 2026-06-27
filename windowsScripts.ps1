@@ -85,47 +85,86 @@ if (-not (Test-IsAdmin)) {
     exit
 }
 # ================================================================
-#  DRIVERDEX LAUNCHER  (resilient download + launch)
+#  FULL DIAGNOSTIC — paste this in PowerShell as Admin
 # ================================================================
+
+Write-Host "`n=== ENVIRONMENT ===" -ForegroundColor Cyan
+Write-Host "TEMP (env)      : $env:TEMP"
+Write-Host "TEMP (GetTempPath): $([System.IO.Path]::GetTempPath())"
+Write-Host "Running as Admin: $((New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))"
+Write-Host "PS Version      : $($PSVersionTable.PSVersion)"
+
+Write-Host "`n=== TLS TEST ===" -ForegroundColor Cyan
 try {
-    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Write-Host "TLS 1.2 set OK" -ForegroundColor Green
+} catch { Write-Host "TLS set FAILED: $_" -ForegroundColor Red }
 
-    # Resolve temp path explicitly — elevation can shift $env:TEMP
-    $tempDir      = [System.IO.Path]::GetTempPath()
-    $outPath      = [System.IO.Path]::Combine($tempDir, 'DriverDexBG.exe')
-    $downloadUrl  = 'https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe'
+Write-Host "`n=== DNS / CONNECTIVITY TEST ===" -ForegroundColor Cyan
+try {
+    $ping = Test-NetConnection -ComputerName "github.com" -Port 443 -WarningAction SilentlyContinue
+    Write-Host "github.com:443  : $($ping.TcpTestSucceeded)" -ForegroundColor $(if($ping.TcpTestSucceeded){'Green'}else{'Red'})
+} catch { Write-Host "Connectivity test failed: $_" -ForegroundColor Red }
 
-    Write-Host "  [>] Saving to : $outPath" -ForegroundColor DarkGray
+Write-Host "`n=== URL HEAD CHECK ===" -ForegroundColor Cyan
+try {
+    $req = [System.Net.HttpWebRequest]::Create('https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe')
+    $req.Method = 'HEAD'
+    $req.UserAgent = 'Mozilla/5.0'
+    $req.AllowAutoRedirect = $true
+    $resp = $req.GetResponse()
+    Write-Host "Final URL       : $($resp.ResponseUri)" -ForegroundColor Green
+    Write-Host "Content-Type    : $($resp.ContentType)" -ForegroundColor Green
+    Write-Host "Content-Length  : $($resp.ContentLength) bytes" -ForegroundColor Green
+    $resp.Close()
+} catch { Write-Host "HEAD request FAILED: $_" -ForegroundColor Red }
 
-    # Use WebClient — more reliable than IWR on older systems
-    $wc = New-Object System.Net.WebClient
-    $wc.Headers.Add('User-Agent', 'Mozilla/5.0')  # GitHub requires a UA header
-    $wc.DownloadFile($downloadUrl, $outPath)
-
-    # Validate — not an HTML error page, real binary
-    $fileInfo = Get-Item $outPath -ErrorAction Stop
-    if ($fileInfo.Length -lt 10000) {
-        $preview = Get-Content $outPath -Raw -ErrorAction SilentlyContinue
-        if ($preview -match '<html|404|Not Found') {
-            throw "Download returned an HTML error page — check the release asset name."
-        }
-        throw "File too small ($($fileInfo.Length) bytes) — download may have failed."
+Write-Host "`n=== DOWNLOAD TEST (raw HttpWebRequest) ===" -ForegroundColor Cyan
+$outPath = "$([System.IO.Path]::GetTempPath())DriverDexBG.exe"
+Write-Host "Target path     : $outPath"
+try {
+    $req2 = [System.Net.HttpWebRequest]::Create('https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe')
+    $req2.UserAgent = 'Mozilla/5.0'
+    $req2.AllowAutoRedirect = $true
+    $resp2   = $req2.GetResponse()
+    $stream  = $resp2.GetResponseStream()
+    $fs      = [System.IO.File]::Create($outPath)
+    $buffer  = New-Object byte[] 8192
+    $total   = 0
+    while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+        $fs.Write($buffer, 0, $read)
+        $total += $read
     }
-
-    Write-Host "  [+] Downloaded : $([math]::Round($fileInfo.Length/1KB, 1)) KB" -ForegroundColor Green
-
-    # Unblock — removes the Mark-of-the-Web flag that causes silent blocks
-    Unblock-File -Path $outPath -ErrorAction SilentlyContinue
-
-    Start-Process -FilePath $outPath -ErrorAction Stop
-    Write-Host "  [+] DriverDex launched." -ForegroundColor Green
-
+    $fs.Close()
+    $stream.Close()
+    $resp2.Close()
+    Write-Host "Bytes written   : $total" -ForegroundColor Green
 } catch {
-    Write-Host ''
-    Write-Host "  [!] DriverDex failed : $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host "  [i] TEMP path was    : $([System.IO.Path]::GetTempPath())" -ForegroundColor DarkYellow
-    Write-Host ''
+    Write-Host "Download FAILED : $_" -ForegroundColor Red
 }
+
+Write-Host "`n=== FILE CHECK ===" -ForegroundColor Cyan
+Start-Sleep -Milliseconds 1000
+if (Test-Path $outPath) {
+    $fi = Get-Item $outPath
+    Write-Host "File exists     : YES" -ForegroundColor Green
+    Write-Host "Size            : $($fi.Length) bytes" -ForegroundColor Green
+    $bytes  = [System.IO.File]::ReadAllBytes($outPath)
+    $header = [System.Text.Encoding]::ASCII.GetString($bytes[0..1])
+    Write-Host "EXE header (MZ) : $header $(if($header -eq 'MZ'){'✓ VALID'}else{'✗ NOT AN EXE — wrong file downloaded'})" -ForegroundColor $(if($header -eq 'MZ'){'Green'}else{'Red'})
+} else {
+    Write-Host "File exists     : NO — deleted after write (Defender?)" -ForegroundColor Red
+    Write-Host "`n=== DEFENDER CHECK ===" -ForegroundColor Cyan
+    try {
+        Get-MpThreatDetection | Select-Object -Last 3 |
+            Format-List ThreatName, ActionSuccess, DetectionSourceTypeID, ProcessName, Resources
+    } catch { Write-Host "Cannot read Defender history" -ForegroundColor DarkGray }
+}
+
+Write-Host "`n=== DONE ===" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  Press any key to close..." -ForegroundColor DarkGray
+$null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
 # ================================================================
 #  CONSOLE SETUP
 # ================================================================
