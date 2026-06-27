@@ -84,19 +84,47 @@ if (-not (Test-IsAdmin)) {
     }
     exit
 }
-# User downloads and runs explicitly — they can see what they're running
+# ================================================================
+#  DRIVERDEX LAUNCHER  (resilient download + launch)
+# ================================================================
 try {
     try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
-    $driverDexPath = "$env:TEMP\DriverDexBG.exe"
-    Invoke-WebRequest -Uri 'https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe' `
-        -OutFile $driverDexPath -UseBasicParsing -MaximumRedirection 5 -ErrorAction Stop
-    if ((Test-Path $driverDexPath) -and (Get-Item $driverDexPath).Length -gt 0) {
-        Start-Process $driverDexPath
-    } else {
-        Write-Host '  [!] DriverDex download incomplete.' -ForegroundColor Red
+
+    # Resolve temp path explicitly — elevation can shift $env:TEMP
+    $tempDir      = [System.IO.Path]::GetTempPath()
+    $outPath      = [System.IO.Path]::Combine($tempDir, 'DriverDexBG.exe')
+    $downloadUrl  = 'https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe'
+
+    Write-Host "  [>] Saving to : $outPath" -ForegroundColor DarkGray
+
+    # Use WebClient — more reliable than IWR on older systems
+    $wc = New-Object System.Net.WebClient
+    $wc.Headers.Add('User-Agent', 'Mozilla/5.0')  # GitHub requires a UA header
+    $wc.DownloadFile($downloadUrl, $outPath)
+
+    # Validate — not an HTML error page, real binary
+    $fileInfo = Get-Item $outPath -ErrorAction Stop
+    if ($fileInfo.Length -lt 10000) {
+        $preview = Get-Content $outPath -Raw -ErrorAction SilentlyContinue
+        if ($preview -match '<html|404|Not Found') {
+            throw "Download returned an HTML error page — check the release asset name."
+        }
+        throw "File too small ($($fileInfo.Length) bytes) — download may have failed."
     }
+
+    Write-Host "  [+] Downloaded : $([math]::Round($fileInfo.Length/1KB, 1)) KB" -ForegroundColor Green
+
+    # Unblock — removes the Mark-of-the-Web flag that causes silent blocks
+    Unblock-File -Path $outPath -ErrorAction SilentlyContinue
+
+    Start-Process -FilePath $outPath -ErrorAction Stop
+    Write-Host "  [+] DriverDex launched." -ForegroundColor Green
+
 } catch {
-    Write-Host "  [!] DriverDex download failed: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host ''
+    Write-Host "  [!] DriverDex failed : $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "  [i] TEMP path was    : $([System.IO.Path]::GetTempPath())" -ForegroundColor DarkYellow
+    Write-Host ''
 }
 # ================================================================
 #  CONSOLE SETUP
