@@ -248,11 +248,11 @@ $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
 '
     $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($ddScript))
 
-    Start-Process -FilePath 'powershell.exe' -ArgumentList @(
-        '-NoProfile',
-        '-ExecutionPolicy', 'Bypass',
-        '-EncodedCommand', $encoded
-    ) -WindowStyle Normal -ErrorAction Stop
+    # Spawn via explorer.exe so the child gets a normal user token
+    # instead of inheriting the elevated admin token from this session.
+    # This is why the same command works in a regular window but not here.
+    $explorerCmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded"
+    Start-Process -FilePath 'explorer.exe' -ArgumentList $explorerCmd -ErrorAction Stop
 
 } catch {
     Write-Host ''
