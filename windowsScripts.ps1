@@ -201,48 +201,59 @@ Set-ConsoleCompact -Width 105 -Height 62 -FontW 6 -FontH 10
 Clear-Host
 
 # ================================================================
-#  DRIVERDEX - download via HttpWebRequest stream, launch in separate window
+#  DRIVERDEX - encoded launch in separate window (immune to arg mangling)
 # ================================================================
 try {
-    $ddCmd = @'
+    # Build the script as a plain string then base64-encode it as UTF-16LE
+    # so Start-Process never has a chance to mangle quotes or special chars
+    $ddScript = '
 try {
     try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
-    $outPath = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), 'DriverDexBG.exe')
-    $req                   = [System.Net.HttpWebRequest]::Create('https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe')
-    $req.UserAgent         = 'Mozilla/5.0'
-    $req.AllowAutoRedirect = $true
-    $req.Timeout           = 30000
-    $resp   = $req.GetResponse()
-    $stream = $resp.GetResponseStream()
-    $fs     = [System.IO.File]::Create($outPath)
-    $buf    = New-Object byte[] 65536
-    while (($read = $stream.Read($buf, 0, $buf.Length)) -gt 0) { $fs.Write($buf, 0, $read) }
-    $fs.Flush(); $fs.Close()
-    $stream.Close(); $resp.Close()
+    Write-Host ""
+    Write-Host "  Downloading DriverDex..." -ForegroundColor Cyan
+
+    $outPath = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "DriverDexBG.exe")
+    Write-Host "  Saving to: $outPath" -ForegroundColor DarkGray
+
+    $wc          = New-Object System.Net.WebClient
+    $wc.Headers.Add("User-Agent", "Mozilla/5.0")
+    $wc.DownloadFile("https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe", $outPath)
 
     Start-Sleep -Milliseconds 1500
-    if (-not (Test-Path $outPath)) { throw 'File removed by security software after download.' }
+
+    if (-not (Test-Path $outPath)) {
+        throw "File not found after download - likely quarantined by Defender."
+    }
+
+    $size = (Get-Item $outPath).Length
+    Write-Host "  Downloaded: $([math]::Round($size/1KB,1)) KB" -ForegroundColor Green
+
+    if ($size -lt 10000) { throw "File too small ($size bytes) - download may have failed." }
 
     $hdr = [System.IO.File]::ReadAllBytes($outPath)[0..1]
-    if ([System.Text.Encoding]::ASCII.GetString($hdr) -ne 'MZ') { throw 'Downloaded file is not a valid EXE.' }
+    if ([System.Text.Encoding]::ASCII.GetString($hdr) -ne "MZ") { throw "Not a valid EXE (bad header)." }
 
     Unblock-File -Path $outPath -ErrorAction SilentlyContinue
     Start-Process -FilePath $outPath
-    Write-Host '[+] DriverDex launched.' -ForegroundColor Green
+    Write-Host "  [+] DriverDex launched successfully." -ForegroundColor Green
+
 } catch {
-    Write-Host "[!] DriverDex failed: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  [!] DriverDex Error: $($_.Exception.Message)" -ForegroundColor Red
 }
-Write-Host ''
-Write-Host 'Press any key to close...' -ForegroundColor DarkGray
-$null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
-'@
+Write-Host ""
+Write-Host "  Press any key to close..." -ForegroundColor DarkGray
+$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+'
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($ddScript))
 
     Start-Process -FilePath 'powershell.exe' -ArgumentList @(
         '-NoProfile',
         '-ExecutionPolicy', 'Bypass',
-        '-Command', $ddCmd
+        '-EncodedCommand', $encoded
     ) -WindowStyle Normal -ErrorAction Stop
+
 } catch {
     Write-Host ''
     Write-Host "  [!] DriverDex launch failed : $($_.Exception.Message)" -ForegroundColor DarkYellow
