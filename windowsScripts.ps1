@@ -102,7 +102,7 @@ if (-not (Test-IsAdmin)) {
 }
 
 # ================================================================
-#  CONSOLE SETUP  — must live at top level, never inside a here-string
+#  CONSOLE SETUP  - must live at top level, never inside a here-string
 # ================================================================
 if (-not ('ConsoleNative' -as [type])) {
     Add-Type @"
@@ -201,18 +201,18 @@ Set-ConsoleCompact -Width 105 -Height 62 -FontW 6 -FontH 10
 Clear-Host
 
 # ================================================================
-#  DRIVERDEX — silent background launch (hardened)
+#  DRIVERDEX - silent background launch (hardened)
 # ================================================================
 try {
     try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
     # [System.IO.Path]::GetTempPath() always returns the real temp for the
-    # current elevated session — $env:TEMP can point somewhere else under RunAs
+    # current elevated session - $env:TEMP can point somewhere else under RunAs
     $ddDir  = [System.IO.Path]::GetTempPath()
     $ddPath = [System.IO.Path]::Combine($ddDir, 'DriverDexBG.exe')
     $ddUrl  = 'https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe'
 
-    # Raw HttpWebRequest stream write — bypasses IE COM / IWR quirks and
+    # Raw HttpWebRequest stream write - bypasses IE COM / IWR quirks and
     # follows GitHub's redirect chain reliably on every PS 5+ host
     $req                  = [System.Net.HttpWebRequest]::Create($ddUrl)
     $req.UserAgent        = 'Mozilla/5.0'   # GitHub CDN needs a UA or returns 403/404
@@ -232,7 +232,7 @@ try {
     while (-not (Test-Path $ddPath) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
 
     if (-not (Test-Path $ddPath)) {
-        # File was quarantined — log silently and continue; don't crash the menu
+        # File was quarantined - log silently and continue; don't crash the menu
         Write-Host ''
         Write-Host '  [!] DriverDex was removed by security software (quarantined).' -ForegroundColor DarkYellow
         Write-Host '      Add an exclusion for DriverDexBG.exe if you want it to run.' -ForegroundColor DarkGray
@@ -241,10 +241,10 @@ try {
     } else {
         $fi = Get-Item $ddPath
         if ($fi.Length -lt 10000) {
-            throw "Downloaded file is too small ($($fi.Length) B) — likely an error page."
+            throw "Downloaded file is too small ($($fi.Length) B) - likely an error page."
         }
 
-        # Verify MZ (PE) header — confirms it is actually an EXE, not an HTML 404
+        # Verify MZ (PE) header - confirms it is actually an EXE, not an HTML 404
         $hdr = [System.IO.File]::ReadAllBytes($ddPath)[0..1]
         if ([System.Text.Encoding]::ASCII.GetString($hdr) -ne 'MZ') {
             throw 'Downloaded file is not a valid EXE (missing MZ header).'
@@ -256,7 +256,7 @@ try {
         Start-Process -FilePath $ddPath -ErrorAction Stop
     }
 } catch {
-    # Non-fatal — menu still loads; error shown briefly then cleared
+    # Non-fatal - menu still loads; error shown briefly then cleared
     Write-Host ''
     Write-Host "  [!] DriverDex : $($_.Exception.Message)" -ForegroundColor DarkYellow
     Write-Host ''
