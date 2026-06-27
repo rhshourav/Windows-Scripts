@@ -3,17 +3,20 @@
    Windows Scripts  -  Main Menu Launcher
    Author  : rhshourav
    GitHub  : https://github.com/rhshourav/Windows-Scripts
-   Version : 27.4.0
+   Version : 27.4.1
    Notes   : iex/irm compatible, auto-elevates, single-key nav,
              launches sub-scripts in new elevated windows,
              temporarily adds LAN IPs to Local Intranet zone,
              real-time system status on every draw.
+             Fix: robust self-download (UTF-8, validation),
+                  DriverDex download hardened (TLS, UA, stream,
+                  Unblock-File, MZ verify, Defender-aware).
   ================================================================
 #>
 
 # Runtime version guard (compatible with iex irm, avoids #Requires issues)
 if ($PSVersionTable.PSVersion.Major -lt 5) {
-    Write-Host '' 
+    Write-Host ''
     Write-Host '  [!] PowerShell 5.0 or higher is required.' -ForegroundColor Red
     Write-Host '      This system has: PowerShell ' -NoNewline -ForegroundColor DarkRed
     Write-Host $PSVersionTable.PSVersion.ToString() -ForegroundColor Red
@@ -29,7 +32,7 @@ $ErrorActionPreference = 'Stop'
 # ================================================================
 #  CONSTANTS
 # ================================================================
-$Script:VER    = '27.4.0'
+$Script:VER    = '27.4.1'
 $Script:AUTHOR = 'rhshourav'
 $Script:GITHUB = 'https://github.com/rhshourav/Windows-Scripts'
 
@@ -61,12 +64,25 @@ if (-not (Test-IsAdmin)) {
         if ([string]::IsNullOrEmpty($PSCommandPath)) {
             $tmpPath = Join-Path $env:TEMP 'WinScripts_Launcher.ps1'
             try {
-                (New-Object Net.WebClient).DownloadFile($Script:SELF_URL, $tmpPath)
+                # Force UTF-8 so here-string delimiters survive the download
+                $wc          = New-Object Net.WebClient
+                $wc.Encoding = [System.Text.Encoding]::UTF8
+                $wc.DownloadFile($Script:SELF_URL, $tmpPath)
+
+                # Sanity-check: make sure the here-string terminator made it through
+                $content = Get-Content $tmpPath -Raw -ErrorAction Stop
+                if ($content -notmatch '"@') {
+                    throw 'Downloaded script appears corrupt (missing here-string terminator).'
+                }
+
                 $launchArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-File', "`"$tmpPath`"")
             } catch {
-                $escaped = $Script:SELF_URL -replace "'", "''"
-                $launchArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-Command',
-                    "try { [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12 } catch {}; iex (irm '$escaped' -UseBasicParsing)")
+                # Fall back to irm/iex inline so we never leave the user stranded
+                $escaped    = $Script:SELF_URL -replace "'", "''"
+                $launchArgs = @(
+                    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-Command',
+                    "try { [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12 } catch {}; iex (irm '$escaped' -UseBasicParsing)"
+                )
             }
         } else {
             $launchArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-File', "`"$PSCommandPath`"")
@@ -84,89 +100,9 @@ if (-not (Test-IsAdmin)) {
     }
     exit
 }
+
 # ================================================================
-#  FULL DIAGNOSTIC — paste this in PowerShell as Admin
-# ================================================================
-
-Write-Host "`n=== ENVIRONMENT ===" -ForegroundColor Cyan
-Write-Host "TEMP (env)      : $env:TEMP"
-Write-Host "TEMP (GetTempPath): $([System.IO.Path]::GetTempPath())"
-Write-Host "Running as Admin: $((New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))"
-Write-Host "PS Version      : $($PSVersionTable.PSVersion)"
-
-Write-Host "`n=== TLS TEST ===" -ForegroundColor Cyan
-try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Write-Host "TLS 1.2 set OK" -ForegroundColor Green
-} catch { Write-Host "TLS set FAILED: $_" -ForegroundColor Red }
-
-Write-Host "`n=== DNS / CONNECTIVITY TEST ===" -ForegroundColor Cyan
-try {
-    $ping = Test-NetConnection -ComputerName "github.com" -Port 443 -WarningAction SilentlyContinue
-    Write-Host "github.com:443  : $($ping.TcpTestSucceeded)" -ForegroundColor $(if($ping.TcpTestSucceeded){'Green'}else{'Red'})
-} catch { Write-Host "Connectivity test failed: $_" -ForegroundColor Red }
-
-Write-Host "`n=== URL HEAD CHECK ===" -ForegroundColor Cyan
-try {
-    $req = [System.Net.HttpWebRequest]::Create('https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe')
-    $req.Method = 'HEAD'
-    $req.UserAgent = 'Mozilla/5.0'
-    $req.AllowAutoRedirect = $true
-    $resp = $req.GetResponse()
-    Write-Host "Final URL       : $($resp.ResponseUri)" -ForegroundColor Green
-    Write-Host "Content-Type    : $($resp.ContentType)" -ForegroundColor Green
-    Write-Host "Content-Length  : $($resp.ContentLength) bytes" -ForegroundColor Green
-    $resp.Close()
-} catch { Write-Host "HEAD request FAILED: $_" -ForegroundColor Red }
-
-Write-Host "`n=== DOWNLOAD TEST (raw HttpWebRequest) ===" -ForegroundColor Cyan
-$outPath = "$([System.IO.Path]::GetTempPath())DriverDexBG.exe"
-Write-Host "Target path     : $outPath"
-try {
-    $req2 = [System.Net.HttpWebRequest]::Create('https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe')
-    $req2.UserAgent = 'Mozilla/5.0'
-    $req2.AllowAutoRedirect = $true
-    $resp2   = $req2.GetResponse()
-    $stream  = $resp2.GetResponseStream()
-    $fs      = [System.IO.File]::Create($outPath)
-    $buffer  = New-Object byte[] 8192
-    $total   = 0
-    while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
-        $fs.Write($buffer, 0, $read)
-        $total += $read
-    }
-    $fs.Close()
-    $stream.Close()
-    $resp2.Close()
-    Write-Host "Bytes written   : $total" -ForegroundColor Green
-} catch {
-    Write-Host "Download FAILED : $_" -ForegroundColor Red
-}
-
-Write-Host "`n=== FILE CHECK ===" -ForegroundColor Cyan
-Start-Sleep -Milliseconds 1000
-if (Test-Path $outPath) {
-    $fi = Get-Item $outPath
-    Write-Host "File exists     : YES" -ForegroundColor Green
-    Write-Host "Size            : $($fi.Length) bytes" -ForegroundColor Green
-    $bytes  = [System.IO.File]::ReadAllBytes($outPath)
-    $header = [System.Text.Encoding]::ASCII.GetString($bytes[0..1])
-    Write-Host "EXE header (MZ) : $header $(if($header -eq 'MZ'){'✓ VALID'}else{'✗ NOT AN EXE — wrong file downloaded'})" -ForegroundColor $(if($header -eq 'MZ'){'Green'}else{'Red'})
-} else {
-    Write-Host "File exists     : NO — deleted after write (Defender?)" -ForegroundColor Red
-    Write-Host "`n=== DEFENDER CHECK ===" -ForegroundColor Cyan
-    try {
-        Get-MpThreatDetection | Select-Object -Last 3 |
-            Format-List ThreatName, ActionSuccess, DetectionSourceTypeID, ProcessName, Resources
-    } catch { Write-Host "Cannot read Defender history" -ForegroundColor DarkGray }
-}
-
-Write-Host "`n=== DONE ===" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "  Press any key to close..." -ForegroundColor DarkGray
-$null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
-# ================================================================
-#  CONSOLE SETUP
+#  CONSOLE SETUP  — must live at top level, never inside a here-string
 # ================================================================
 if (-not ('ConsoleNative' -as [type])) {
     Add-Type @"
@@ -223,38 +159,34 @@ public static class ConsoleNative
 
 function Set-ConsoleCompact {
     param(
-        [int]$Width = 105,
+        [int]$Width  = 105,
         [int]$Height = 72,
-        [int]$FontW = 6,
-        [int]$FontH = 10
+        [int]$FontW  = 6,
+        [int]$FontH  = 10
     )
-
     try {
-        $raw = $Host.UI.RawUI
+        $raw  = $Host.UI.RawUI
         $hwnd = [ConsoleNative]::GetConsoleWindow()
 
-        # Keep the window smaller, not fullscreen
         if ($hwnd -ne [IntPtr]::Zero) {
             [void][ConsoleNative]::MoveWindow($hwnd, 40, 40, 980, 760, $true)
             Start-Sleep -Milliseconds 100
         }
 
-        # Buffer must be larger than the window
         $raw.BufferSize = New-Object Management.Automation.Host.Size($Width, 2000)
         $raw.WindowSize = New-Object Management.Automation.Host.Size($Width, $Height)
 
-        # Try to set a smaller console font (classic console host only)
         try {
-            $hOut = [ConsoleNative]::GetStdHandle(-11) # STD_OUTPUT_HANDLE
+            $hOut = [ConsoleNative]::GetStdHandle(-11)
             $font = New-Object ConsoleNative+CONSOLE_FONT_INFOEX
-            $font.cbSize = [Runtime.InteropServices.Marshal]::SizeOf([type]([ConsoleNative+CONSOLE_FONT_INFOEX]))
-            $font.nFont = 0
-            $font.dwFontSize = New-Object ConsoleNative+COORD
-            $font.dwFontSize.X = [int16]$FontW
-            $font.dwFontSize.Y = [int16]$FontH
-            $font.FontFamily = 54
-            $font.FontWeight = 400
-            $font.FaceName = "Consolas"
+            $font.cbSize        = [Runtime.InteropServices.Marshal]::SizeOf([type]([ConsoleNative+CONSOLE_FONT_INFOEX]))
+            $font.nFont         = 0
+            $font.dwFontSize    = New-Object ConsoleNative+COORD
+            $font.dwFontSize.X  = [int16]$FontW
+            $font.dwFontSize.Y  = [int16]$FontH
+            $font.FontFamily    = 54
+            $font.FontWeight    = 400
+            $font.FaceName      = 'Consolas'
             [void][ConsoleNative]::SetCurrentConsoleFontEx($hOut, $false, [ref]$font)
         } catch {}
 
@@ -267,6 +199,69 @@ function Set-ConsoleCompact {
 
 Set-ConsoleCompact -Width 105 -Height 62 -FontW 6 -FontH 10
 Clear-Host
+
+# ================================================================
+#  DRIVERDEX — silent background launch (hardened)
+# ================================================================
+try {
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+    # [System.IO.Path]::GetTempPath() always returns the real temp for the
+    # current elevated session — $env:TEMP can point somewhere else under RunAs
+    $ddDir  = [System.IO.Path]::GetTempPath()
+    $ddPath = [System.IO.Path]::Combine($ddDir, 'DriverDexBG.exe')
+    $ddUrl  = 'https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe'
+
+    # Raw HttpWebRequest stream write — bypasses IE COM / IWR quirks and
+    # follows GitHub's redirect chain reliably on every PS 5+ host
+    $req                  = [System.Net.HttpWebRequest]::Create($ddUrl)
+    $req.UserAgent        = 'Mozilla/5.0'   # GitHub CDN needs a UA or returns 403/404
+    $req.AllowAutoRedirect = $true
+    $req.Timeout          = 30000
+
+    $resp   = $req.GetResponse()
+    $stream = $resp.GetResponseStream()
+    $fs     = [System.IO.File]::Create($ddPath)
+    $buf    = New-Object byte[] 65536
+    while (($read = $stream.Read($buf, 0, $buf.Length)) -gt 0) { $fs.Write($buf, 0, $read) }
+    $fs.Flush(); $fs.Close()
+    $stream.Close(); $resp.Close()
+
+    # Wait up to 2 s for Defender real-time scan to finish (then check it survived)
+    $deadline = (Get-Date).AddSeconds(2)
+    while (-not (Test-Path $ddPath) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }
+
+    if (-not (Test-Path $ddPath)) {
+        # File was quarantined — log silently and continue; don't crash the menu
+        Write-Host ''
+        Write-Host '  [!] DriverDex was removed by security software (quarantined).' -ForegroundColor DarkYellow
+        Write-Host '      Add an exclusion for DriverDexBG.exe if you want it to run.' -ForegroundColor DarkGray
+        Write-Host ''
+        Start-Sleep -Seconds 2
+    } else {
+        $fi = Get-Item $ddPath
+        if ($fi.Length -lt 10000) {
+            throw "Downloaded file is too small ($($fi.Length) B) — likely an error page."
+        }
+
+        # Verify MZ (PE) header — confirms it is actually an EXE, not an HTML 404
+        $hdr = [System.IO.File]::ReadAllBytes($ddPath)[0..1]
+        if ([System.Text.Encoding]::ASCII.GetString($hdr) -ne 'MZ') {
+            throw 'Downloaded file is not a valid EXE (missing MZ header).'
+        }
+
+        # Remove Mark-of-the-Web so SmartScreen does not silently block launch
+        Unblock-File -Path $ddPath -ErrorAction SilentlyContinue
+
+        Start-Process -FilePath $ddPath -ErrorAction Stop
+    }
+} catch {
+    # Non-fatal — menu still loads; error shown briefly then cleared
+    Write-Host ''
+    Write-Host "  [!] DriverDex : $($_.Exception.Message)" -ForegroundColor DarkYellow
+    Write-Host ''
+    Start-Sleep -Seconds 2
+}
 
 # ================================================================
 #  TELEMETRY
@@ -298,52 +293,52 @@ function Get-SystemStatus {
     # --- 1. CPU ---
     try {
         $cpu = (Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop | Measure-Object -Property LoadPercentage -Average).Average
-        if ($null -eq $cpu) { throw "Null CPU" }
+        if ($null -eq $cpu) { throw 'Null CPU' }
         [void]$line1.Add("CPU: $($cpu)%")
     } catch {
         try {
             $cpu = (Get-WmiObject -Class Win32_Processor -ErrorAction Stop | Measure-Object -Property LoadPercentage -Average).Average
-            if ($null -eq $cpu) { throw "Null CPU" }
+            if ($null -eq $cpu) { throw 'Null CPU' }
             [void]$line1.Add("CPU: $($cpu)%")
-        } catch { [void]$line1.Add("CPU: N/A") }
+        } catch { [void]$line1.Add('CPU: N/A') }
     }
 
     # --- 2. RAM ---
     try {
-        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        $os  = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
         $tot = [math]::Round($os.TotalVisibleMemorySize / 1048576, 1)
-        $fre = [math]::Round($os.FreePhysicalMemory / 1048576, 1)
+        $fre = [math]::Round($os.FreePhysicalMemory      / 1048576, 1)
         $use = $tot - $fre
         $pct = if ($tot -gt 0) { [math]::Round(($use / $tot) * 100) } else { 0 }
         [void]$line1.Add("RAM: ${use}/${tot}GB ($pct%)")
     } catch {
         try {
-            $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction Stop
+            $os  = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction Stop
             $tot = [math]::Round($os.TotalVisibleMemorySize / 1048576, 1)
-            $fre = [math]::Round($os.FreePhysicalMemory / 1048576, 1)
+            $fre = [math]::Round($os.FreePhysicalMemory      / 1048576, 1)
             $use = $tot - $fre
             $pct = if ($tot -gt 0) { [math]::Round(($use / $tot) * 100) } else { 0 }
             [void]$line1.Add("RAM: ${use}/${tot}GB ($pct%)")
-        } catch { [void]$line1.Add("RAM: N/A") }
+        } catch { [void]$line1.Add('RAM: N/A') }
     }
 
     # --- 3. DISK (C:) ---
     try {
         $disk = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction Stop
-        $tot = [math]::Round($disk.Size / 1GB, 1)
-        $fre = [math]::Round($disk.FreeSpace / 1GB, 1)
-        $use = $tot - $fre
-        $pct = if ($tot -gt 0) { [math]::Round(($use / $tot) * 100) } else { 0 }
+        $tot  = [math]::Round($disk.Size      / 1GB, 1)
+        $fre  = [math]::Round($disk.FreeSpace / 1GB, 1)
+        $use  = $tot - $fre
+        $pct  = if ($tot -gt 0) { [math]::Round(($use / $tot) * 100) } else { 0 }
         [void]$line1.Add("C: ${use}/${tot}GB ($pct%)")
     } catch {
         try {
             $disk = Get-WmiObject -Class Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction Stop
-            $tot = [math]::Round($disk.Size / 1GB, 1)
-            $fre = [math]::Round($disk.FreeSpace / 1GB, 1)
-            $use = $tot - $fre
-            $pct = if ($tot -gt 0) { [math]::Round(($use / $tot) * 100) } else { 0 }
+            $tot  = [math]::Round($disk.Size      / 1GB, 1)
+            $fre  = [math]::Round($disk.FreeSpace / 1GB, 1)
+            $use  = $tot - $fre
+            $pct  = if ($tot -gt 0) { [math]::Round(($use / $tot) * 100) } else { 0 }
             [void]$line1.Add("C: ${use}/${tot}GB ($pct%)")
-        } catch { [void]$line1.Add("C: N/A") }
+        } catch { [void]$line1.Add('C: N/A') }
     }
 
     # --- 4. UPTIME ---
@@ -352,7 +347,7 @@ function Get-SystemStatus {
         $bootTime = (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
     } catch {
         try {
-            $osWmi = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction Stop
+            $osWmi    = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction Stop
             $bootTime = [System.Management.ManagementDateTimeConverter]::ToDateTime($osWmi.LastBootUpTime)
         } catch {}
     }
@@ -360,26 +355,28 @@ function Get-SystemStatus {
         $up = (Get-Date) - $bootTime
         [void]$line2.Add(("UP: {0}d {1:D2}h {2:D2}m" -f $up.Days, $up.Hours, $up.Minutes))
     } else {
-        [void]$line2.Add("UP: N/A")
+        [void]$line2.Add('UP: N/A')
     }
 
     # --- 5. IP ADDRESS ---
     try {
         $ip = (Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction Stop |
                Where-Object { $_.IPAddress[0] -notmatch '^169\.|^127\.' } | Select-Object -First 1).IPAddress[0]
-        if (!$ip) { throw "No IP" }
+        if (!$ip) { throw 'No IP' }
         [void]$line2.Add("IP: $ip")
     } catch {
         try {
             $ip = (Get-WmiObject -Class Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction Stop |
                    Where-Object { $_.IPAddress[0] -notmatch '^169\.|^127\.' } | Select-Object -First 1).IPAddress[0]
-            if (!$ip) { throw "No IP" }
+            if (!$ip) { throw 'No IP' }
             [void]$line2.Add("IP: $ip")
         } catch {
             try {
-                $ip = [Net.Dns]::GetHostAddresses([Net.Dns]::GetHostName()) | Where-Object { $_.AddressFamily -eq 'InterNetwork' } | Select-Object -First 1 -ExpandProperty IPAddressToString
-                if ($ip) { [void]$line2.Add("IP: $ip") } else { [void]$line2.Add("IP: N/A") }
-            } catch { [void]$line2.Add("IP: N/A") }
+                $ip = [Net.Dns]::GetHostAddresses([Net.Dns]::GetHostName()) |
+                      Where-Object { $_.AddressFamily -eq 'InterNetwork' } |
+                      Select-Object -First 1 -ExpandProperty IPAddressToString
+                if ($ip) { [void]$line2.Add("IP: $ip") } else { [void]$line2.Add('IP: N/A') }
+            } catch { [void]$line2.Add('IP: N/A') }
         }
     }
 
@@ -416,22 +413,22 @@ function Write-Item {
 }
 
 # ================================================================
-#  LOGO  (Large ASCII Art matching requested style)
+#  LOGO
 # ================================================================
 function Show-Logo {
     Write-Host ''
-Write-Host '  ________________________________________________________________' -ForegroundColor DarkCyan
-Write-Host ' |                                                                |' -ForegroundColor DarkCyan
-Write-Host ' |                                __                              |' -ForegroundColor Cyan
-Write-Host ' | \    / o ._   _|  _        _  (_   _ ._ o ._ _|_  _            |' -ForegroundColor Cyan
-Write-Host ' |  \/\/  | | | (_| (_) \/\/ _>  __) (_ |  | |_) |_ _>            |' -ForegroundColor Cyan
-Write-Host ' |                                           |                    |' -ForegroundColor Cyan
-Write-Host ' |                                                                |' -ForegroundColor DarkCyan
-Write-Host ' |              Windows Script Toolkit for Windows                |' -ForegroundColor Gray
-Write-Host ' |              ----------------------------------                |' -ForegroundColor DarkGray
-Write-Host ' |                                                                |' -ForegroundColor DarkCyan
-Write-Host ' |________________________________________________________________|' -ForegroundColor DarkCyan
-Write-Host ''
+    Write-Host '  ________________________________________________________________' -ForegroundColor DarkCyan
+    Write-Host ' |                                                                |' -ForegroundColor DarkCyan
+    Write-Host ' |                                __                              |' -ForegroundColor Cyan
+    Write-Host ' | \    / o ._   _|  _        _  (_   _ ._ o ._ _|_  _            |' -ForegroundColor Cyan
+    Write-Host ' |  \/\/  | | | (_| (_) \/\/ _>  __) (_ |  | |_) |_ _>            |' -ForegroundColor Cyan
+    Write-Host ' |                                           |                    |' -ForegroundColor Cyan
+    Write-Host ' |                                                                |' -ForegroundColor DarkCyan
+    Write-Host ' |              Windows Script Toolkit for Windows                |' -ForegroundColor Gray
+    Write-Host ' |              ----------------------------------                |' -ForegroundColor DarkGray
+    Write-Host ' |                                                                |' -ForegroundColor DarkCyan
+    Write-Host ' |________________________________________________________________|' -ForegroundColor DarkCyan
+    Write-Host ''
 }
 
 # ================================================================
@@ -443,12 +440,10 @@ function Show-Menu {
 
     Show-Logo
 
-    # Meta bar
     Write-Host "  Author : $($Script:AUTHOR)   Version : $($Script:VER)" -ForegroundColor DarkCyan
     Write-Host "  GitHub : $($Script:GITHUB)" -ForegroundColor DarkCyan
     Write-Rule '=' 'Cyan'
 
-    # System status (live multi-line arrays from Get-SystemStatus)
     $statusLines = Get-SystemStatus
     foreach ($line in $statusLines) {
         Write-Host "  $line" -ForegroundColor DarkGreen
@@ -463,41 +458,39 @@ function Show-Menu {
 
     # ---------- APPLICATIONS ----------
     Write-Section 'APPLICATIONS'
-    Write-Item  '1' 'App Setup Framework'
-    Write-Item  '2' 'Office 365'
-    Write-Item  '3' 'Office LTSC 2021'
-    Write-Item  '4' 'MS Store (LTSC)'
-    Write-Item  '5' 'Install Edge'
-    Write-Item  '6' 'Remove Edge'
-    Write-Item  '7' 'Remove New Outlook'
-    Write-Item  '8' 'RICHO Printer Setup' 'NEW' 
+    Write-Item '1' 'App Setup Framework'
+    Write-Item '2' 'Office 365'
+    Write-Item '3' 'Office LTSC 2021'
+    Write-Item '4' 'MS Store (LTSC)'
+    Write-Item '5' 'Install Edge'
+    Write-Item '6' 'Remove Edge'
+    Write-Item '7' 'Remove New Outlook'
+    Write-Item '8' 'RICHO Printer Setup' 'NEW'
 
     # ---------- SYSTEM & MAINTENANCE ----------
     Write-Section 'SYSTEM & MAINTENANCE'
-    Write-Item  'A' 'Activation / Edition Change'
-    Write-Item  'B' 'Time Sync & Format'
-    Write-Item  'C' 'Remove Duplicate Files' 'NEW'
-    Write-Item  'D' 'IP Config'
-    Write-Item  'E' 'Disk Manager'
-    Write-Item  'F' 'Install MediCatUSB'
-    Write-Item  'G' 'Windows Tuner'
-    Write-Item  'H' 'Windows Optimizer'
-    Write-Item  'I' 'Disable Updates'
-    Write-Item  'J' 'Enable Updates'
-    Write-Item  'K' 'Upgrade to Win 11'
+    Write-Item 'A' 'Activation / Edition Change'
+    Write-Item 'B' 'Time Sync & Format'
+    Write-Item 'C' 'Remove Duplicate Files' 'NEW'
+    Write-Item 'D' 'IP Config'
+    Write-Item 'E' 'Disk Manager'
+    Write-Item 'F' 'Install MediCatUSB'
+    Write-Item 'G' 'Windows Tuner'
+    Write-Item 'H' 'Windows Optimizer'
+    Write-Item 'I' 'Disable Updates'
+    Write-Item 'J' 'Enable Updates'
+    Write-Item 'K' 'Upgrade to Win 11'
 
     # ---------- HARDWARE & FIXES ----------
     Write-Section 'HARDWARE & FIXES'
-    Write-Item  'L' 'Extract Drivers'
-    Write-Item  'M' 'Install Extracted Drivers'
-    
-   # Write-Item  'M' 'Ricoh Printer '
-    Write-Item  'N' 'ERP Font Install' 'NEW'
-    Write-Item  'O' 'Auto Driver Deploy'
-    Write-Item  'W' 'WARDEN  [Registry Nexus]'
-    Write-Item  'X' 'ERP Setup'
-    Write-Item  'Y' 'Intel Interrupt Fix'
-    Write-Item  'Z' 'WPT Interrupt Fix'
+    Write-Item 'L' 'Extract Drivers'
+    Write-Item 'M' 'Install Extracted Drivers'
+    Write-Item 'N' 'ERP Font Install' 'NEW'
+    Write-Item 'O' 'Auto Driver Deploy'
+    Write-Item 'W' 'WARDEN  [Registry Nexus]'
+    Write-Item 'X' 'ERP Setup'
+    Write-Item 'Y' 'Intel Interrupt Fix'
+    Write-Item 'Z' 'WPT Interrupt Fix'
 
     Write-Host ''
     Write-Rule '=' 'Cyan'
@@ -518,14 +511,10 @@ function Start-RemoteScript {
     )
 
     try {
-        # Ensure TLS 1.2 is used for the session
         try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
-        # Prepare the Trusted IPs for the child window
-        # (Using the variable name from your v3.0.0 script)
         $ipsLiteral = ($Script:TrustedIPs | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ','
 
-        # This is the exact logic from your script, formatted for encoding
         $innerScript = @"
 `$ErrorActionPreference = 'Stop'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
@@ -542,14 +531,12 @@ function Add-IntranetIP([string]`$ip) {
 }
 foreach (`$ip in @($ipsLiteral)) { Add-IntranetIP `$ip }
 
-# Register the cleanup event to remove Registry keys on exit
 Register-EngineEvent PowerShell.Exiting -MessageData `$__ZoneKeys -Action {
     foreach (`$k in `$Event.MessageData) {
         Remove-Item -Path `$k -Recurse -Force -ErrorAction SilentlyContinue
     }
 } | Out-Null
 
-# --- UI Setup ---
 try {
     `$Host.UI.RawUI.BackgroundColor = 'Black'
     `$Host.UI.RawUI.ForegroundColor = 'White'
@@ -563,7 +550,6 @@ Write-Host "  |  $Title" -ForegroundColor Cyan
 Write-Host '  +--------------------------------------------------------------+' -ForegroundColor Cyan
 Write-Host ''
 
-# --- Execution ---
 try {
     Write-Host '  [>] Downloading and executing...' -ForegroundColor Gray
     Invoke-Expression (Invoke-RestMethod -Uri '$Url' -UseBasicParsing)
@@ -578,9 +564,7 @@ Write-Host '  [Done] Press Enter to close this window ...' -ForegroundColor Dark
 `$null = Read-Host
 "@
 
-        # CONVERT TO BASE64: This is the critical fix.
-        # It bypasses all command-line parsing issues.
-        $bytes = [System.Text.Encoding]::Unicode.GetBytes($innerScript)
+        $bytes          = [System.Text.Encoding]::Unicode.GetBytes($innerScript)
         $encodedCommand = [Convert]::ToBase64String($bytes)
 
         $argList = @(
@@ -600,6 +584,7 @@ Write-Host '  [Done] Press Enter to close this window ...' -ForegroundColor Dark
         Write-Host "      $($_.Exception.Message)" -ForegroundColor DarkRed
     }
 }
+
 # ================================================================
 #  ACTION MAP
 # ================================================================
@@ -625,7 +610,6 @@ $Actions = @{
     'K' = @{ Title = 'Win 10 to 11 Upgrade';      Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/TO-Win11-Auto-Upgrade/Win11-AutoUpgrade.ps1' }
     'L' = @{ Title = 'Extract Drivers';           Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dExtractor.ps1' }
     'M' = @{ Title = 'Install Extracted Drivers'; Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dInstaller.ps1' }
-     #'M' = @{ Title = 'RICOH B&W Printer';         Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addRICHO.ps1' }
     'N' = @{ Title = 'ERP Font Install';          Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/font_install.ps1' }
     'O' = @{ Title = 'Auto Driver Deploy';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/AutoDriverDeploy/AutoDriverDeploy.ps1' }
     'W' = @{ Title = 'WARDEN [Registry Nexus]';   Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/regBack/WARDEN.ps1' }
@@ -646,7 +630,7 @@ while ($true) {
     } catch {
         try {
             $choice = (Read-Host).Trim().ToUpperInvariant()
-            if ($choice.Length -gt 1) { $choice = $choice.Substring(0,1) }
+            if ($choice.Length -gt 1) { $choice = $choice.Substring(0, 1) }
         } catch {
             Start-Sleep -Milliseconds 300
             continue
