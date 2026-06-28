@@ -103,36 +103,52 @@ function Write-Err {
 function Write-Header {
     <#
     .SYNOPSIS Renders the DriverDex branded header using box-drawing characters.
+             Box width is computed from the widest art row so content never overflows.
     #>
-    $w = 66
-    $top = '╔' + ('═' * ($w - 2)) + '╗'
-    $bot = '╚' + ('═' * ($w - 2)) + '╝'
-    $pad = { param($s, $n) $s + (' ' * [Math]::Max(0, $n - $s.Length)) }
+
+    # Inner width = 74 → terminal line = 2(indent) + 1(╔) + 74 + 1(╗) = 78 chars
+    # Safe on any 80-column console.
+    $inner = 74
+
+    # Pad a string to exactly $inner chars (truncates if somehow over, never overflows)
+    function _Pad { param([string]$s) $s.PadRight($inner).Substring(0, $inner) }
+
+    $top = '╔' + ('═' * $inner) + '╗'
+    $bot = '╚' + ('═' * $inner) + '╝'
+    $blank = '║' + (' ' * $inner) + '║'
 
     Write-Host ""
-    Write-Host "  $top"  -ForegroundColor DarkCyan
-    Write-Host "  ║$(' ' * ($w - 2))║"  -ForegroundColor DarkCyan
-    # ASCII art lines (Cyan for logo)
-    foreach ($row in @(
+    Write-Host "  $top"    -ForegroundColor DarkCyan
+    Write-Host "  $blank"  -ForegroundColor DarkCyan
+
+    # ── ASCII art logo — each row is ≤71 chars, padded to 74 ──────────────
+    $artRows = @(
         ' ██████╗ ██████╗ ██╗██╗   ██╗███████╗██████╗ ██████╗ ███████╗██╗  ██╗ ',
         ' ██╔══██╗██╔══██╗██║╚██╗ ██╔╝██╔════╝██╔══██╗██╔══██╗██╔════╝╚██╗██╔╝ ',
         ' ██║  ██║██████╔╝██║ ╚████╔╝ █████╗  ██████╔╝██║  ██║█████╗   ╚███╔╝  ',
         ' ██║  ██║██╔══██╗██║  ╚██╔╝  ██╔══╝  ██╔══██╗██║  ██║██╔══╝   ██╔██╗  ',
         ' ██████╔╝██║  ██║██║   ██║   ███████╗██║  ██║██████╔╝███████╗██╔╝ ██╗  ',
         ' ╚═════╝ ╚═╝  ╚═╝╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═╝ '
-    )) {
-        $padded = & $pad $row ($w - 2)
-        Write-Host "  ║$padded║" -ForegroundColor Cyan
+    )
+    foreach ($row in $artRows) {
+        Write-Host "  ║$(_Pad $row)║" -ForegroundColor Cyan
     }
-    Write-Host "  ║$(' ' * ($w - 2))║"  -ForegroundColor DarkCyan
-    $meta1 = & $pad "  Automatic Driver Detector & Installer  v$Script:VERSION" ($w - 2)
-    Write-Host "  ║$meta1║"  -ForegroundColor White
-    $meta2 = & $pad "  Tagline: Hardware confidence, one script away." ($w - 2)
-    Write-Host "  ║$meta2║"  -ForegroundColor DarkGray
-    $meta3 = & $pad "  https://github.com/rhshourav/driverdex" ($w - 2)
-    Write-Host "  ║$meta3║"  -ForegroundColor DarkGray
-    Write-Host "  ║$(' ' * ($w - 2))║"  -ForegroundColor DarkCyan
-    Write-Host "  $bot"  -ForegroundColor DarkCyan
+
+    # ── Metadata rows ──────────────────────────────────────────────────────
+    Write-Host "  $blank" -ForegroundColor DarkCyan
+
+    # Separator line inside box
+    $sepLine = '  ' + ('─' * ($inner - 4))
+    Write-Host "  ║$(_Pad $sepLine)║" -ForegroundColor DarkGray
+
+    $v      = "  Automatic Driver Detector & Installer  v$Script:VERSION"
+    $tag    = "  Hardware confidence, one script away."
+    $url    = "  https://github.com/rhshourav/driverdex"
+    Write-Host "  ║$(_Pad $v)║"   -ForegroundColor White
+    Write-Host "  ║$(_Pad $tag)║" -ForegroundColor DarkGray
+    Write-Host "  ║$(_Pad $url)║" -ForegroundColor DarkGray
+    Write-Host "  $blank"         -ForegroundColor DarkCyan
+    Write-Host "  $bot"           -ForegroundColor DarkCyan
     Write-Host ""
 }
 
@@ -397,6 +413,161 @@ function Get-ProblemDevices {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  LOCAL DRIVER INTELLIGENCE
+#  Everything needed to answer two questions BEFORE the table is ever drawn:
+#    1) For each DB match, is it already installed — and at what version?
+#    2) What's installed locally that the DB has never heard of?
+#  This is what lets the table show NEW / UPDATE / INSTALLED / NEWER instead
+#  of dumping every match and sorting it out mid-install.
+# ═══════════════════════════════════════════════════════════════════════════════
+function Compare-DriverVersion {
+    <#
+    .SYNOPSIS Numerically compares two dotted version strings, part by part.
+    Returns -1 if A is older than B, 0 if equal, 1 if A is newer than B.
+    Non-numeric parts compare as 0; this is "good enough" for driver versions,
+    which are virtually always dotted-numeric (e.g. 27.20.100.9664).
+    #>
+    param([string]$A, [string]$B)
+    if ([string]::IsNullOrWhiteSpace($A) -and [string]::IsNullOrWhiteSpace($B)) { return 0 }
+    if ([string]::IsNullOrWhiteSpace($A)) { return -1 }
+    if ([string]::IsNullOrWhiteSpace($B)) { return 1 }
+    if ($A -eq $B) { return 0 }
+
+    $aParts = $A -split '[.\-]'
+    $bParts = $B -split '[.\-]'
+    $len    = [Math]::Max($aParts.Count, $bParts.Count)
+
+    for ($i = 0; $i -lt $len; $i++) {
+        $av = 0; $bv = 0
+        if ($i -lt $aParts.Count) { [void][int]::TryParse($aParts[$i], [ref]$av) }
+        if ($i -lt $bParts.Count) { [void][int]::TryParse($bParts[$i], [ref]$bv) }
+        if ($av -ne $bv) { return [Math]::Sign($av - $bv) }
+    }
+    return [string]::Compare($A, $B)   # tie-break for otherwise-equal numeric parts
+}
+
+function Get-InstalledDriverSnapshot {
+    <#
+    .SYNOPSIS Indexes every locally-installed signed driver by hardware ID.
+    Returns a hashtable: key = uppercased HardWareID, value = {Provider,
+    Version, DeviceName, DriverDate}. Built ONCE up front so every later
+    "is this installed?" check is an O(1) lookup instead of a fresh WMI query.
+    #>
+    Write-Step "Indexing locally installed drivers..."
+    $snapshot = @{}
+    try {
+        $signed = $null
+        try {
+            $signed = Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction Stop
+        } catch {
+            $signed = Get-WmiObject -Class Win32_PnPSignedDriver -ErrorAction SilentlyContinue
+        }
+        foreach ($s in $signed) {
+            if (-not $s.HardWareID) { continue }
+            $key   = $s.HardWareID.ToUpper()
+            $entry = [pscustomobject]@{
+                Provider   = $s.DriverProviderName
+                Version    = $s.DriverVersion
+                DeviceName = $s.DeviceName
+                DriverDate = $s.DriverDate
+            }
+            if (-not $snapshot.ContainsKey($key) -or
+                (Compare-DriverVersion $entry.Version $snapshot[$key].Version) -gt 0) {
+                $snapshot[$key] = $entry
+            }
+        }
+    } catch {
+        Write-Log -Level WARN -Msg "Installed driver snapshot failed: $($_.Exception.Message)"
+    }
+    Write-OK "Indexed $($snapshot.Count) installed driver record(s) by hardware ID."
+    return $snapshot
+}
+
+function Get-UnmatchedLocalDrivers {
+    <#
+    .SYNOPSIS Finds hardware whose installed driver works fine, but whose
+    hardware ID returned ZERO matches from the DriverDex API — i.e. hardware
+    the database has never seen. These are the strongest possible
+    contribution candidates: a working driver only the user currently has.
+    .PARAMETER AllHWIDs       Every hardware ID found on this machine
+    .PARAMETER MatchedDrivers Results from Search-Drivers (have .MatchedHWID)
+    .PARAMETER Snapshot       Result of Get-InstalledDriverSnapshot
+    #>
+    param([string[]]$AllHWIDs, [object[]]$MatchedDrivers, [hashtable]$Snapshot)
+
+    $matchedSet = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($d in $MatchedDrivers) { [void]$matchedSet.Add($d.MatchedHWID) }
+
+    $unknown = [System.Collections.Generic.List[object]]::new()
+    foreach ($hwid in $AllHWIDs) {
+        if ($matchedSet.Contains($hwid)) { continue }
+        $info = $Snapshot[$hwid.ToUpper()]
+        if (-not $info) { continue }   # nothing installed for this ID either — not contributable
+        $unknown.Add([pscustomobject]@{
+            HWID       = $hwid
+            DeviceName = $info.DeviceName
+            Provider   = $info.Provider
+            Version    = $info.Version
+        })
+    }
+    return [array]$unknown
+}
+
+function Get-DriverClassification {
+    <#
+    .SYNOPSIS Single source of truth for how a driver row is labeled, colored,
+    and whether it's selected by default. Combines DB install-status with
+    problem-device and superseded flags so the table and the menu's "SMART"
+    default always agree with each other.
+    #>
+    param([object]$Driver, [string[]]$ProblemHWIDs)
+
+    $isProblem    = $ProblemHWIDs -contains $Driver.MatchedHWID
+    $isSuperseded = [bool]$Driver.SupersededBy
+    $status       = $Driver.InstallStatus
+
+    $label = switch ($status) {
+        'NEW'     { 'NEW' }
+        'UPDATE'  { "UPDATE → v$($Driver.Version)" }
+        'CURRENT' { 'INSTALLED ✔' }
+        'NEWER'   { 'NEWER INSTALLED' }
+        default   { 'NEW' }
+    }
+    $color = switch ($status) {
+        'NEW'     { 'Green' }
+        'UPDATE'  { 'Cyan' }
+        'CURRENT' { 'DarkGray' }
+        'NEWER'   { 'DarkGray' }
+        default   { 'White' }
+    }
+    $code = $status
+
+    if ($isSuperseded) {
+        $code  = 'SUPERSEDED'
+        $label = '[SUPERSEDED]'
+        $color = 'DarkGray'
+    }
+    if ($isProblem) {
+        $code  = 'PROBLEM'
+        $label = "⚠ PROBLEM DEV · $label"
+        $color = 'Yellow'
+    }
+
+    # Recommended-by-default = needs action AND isn't a known-worse pick
+    $recommended = (-not $isSuperseded) -and ($isProblem -or $status -in @('NEW', 'UPDATE'))
+
+    return [pscustomobject]@{
+        StatusCode   = $code
+        Label        = $label
+        Color        = $color
+        Recommended  = $recommended
+        IsProblem    = $isProblem
+        IsSuperseded = $isSuperseded
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  API QUERY
 # ═══════════════════════════════════════════════════════════════════════════════
 function Invoke-ApiWithRetry {
@@ -427,10 +598,14 @@ function Invoke-ApiWithRetry {
 function Search-Drivers {
     <#
     .SYNOPSIS Queries the API for every HWID and returns de-duplicated driver list.
-    .PARAMETER HWIDs       Array of hardware ID strings
-    .PARAMETER SystemArch  'x64' or 'x86'
+    Each result is tagged with InstallStatus (NEW/UPDATE/CURRENT/NEWER) and
+    InstalledVersion by cross-referencing the local driver snapshot — so the
+    table never has to guess, and nothing gets silently skipped mid-install.
+    .PARAMETER HWIDs             Array of hardware ID strings
+    .PARAMETER SystemArch        'x64' or 'x86'
+    .PARAMETER InstalledSnapshot Result of Get-InstalledDriverSnapshot
     #>
-    param([string[]]$HWIDs, [string]$SystemArch)
+    param([string[]]$HWIDs, [string]$SystemArch, [hashtable]$InstalledSnapshot = @{})
 
     Write-Step "Querying DriverDex API for $(@($HWIDs).Count) hardware IDs..."
     $results = [System.Collections.Generic.List[object]]::new()
@@ -465,20 +640,35 @@ function Search-Drivers {
             # Determine recommendation flag: arch-matched + non-generic
             $isRecommended = ($mArch -eq $sArch) -and ([int]$match.matched_is_generic -eq 0)
 
+            # ── Cross-reference against what's actually installed locally ──────
+            $localInfo = $InstalledSnapshot[$id.ToUpper()]
+            if (-not $localInfo) {
+                $installStatus    = 'NEW'
+                $installedVersion = $null
+            } else {
+                $cmp = Compare-DriverVersion $localInfo.Version $match.version
+                $installStatus    = if     ($cmp -lt 0) { 'UPDATE' }
+                                     elseif ($cmp -eq 0) { 'CURRENT' }
+                                     else                { 'NEWER' }
+                $installedVersion = $localInfo.Version
+            }
+
             [void]$seen.Add($match.driver_id)
             $results.Add([pscustomobject]@{
-                DriverId        = $match.driver_id
-                DisplayName     = $match.display_name
-                Provider        = $match.provider
-                Category        = $match.category
-                Version         = $match.version
-                Arch            = $match.arch
-                PrimaryUrl      = $match.primary_url
-                ZipParts        = [int]$match.zip_parts
-                MatchedHWID     = $id
-                SupersededBy    = $match.superseded_by
-                IsGeneric       = [int]$match.matched_is_generic
-                IsRecommended   = $isRecommended
+                DriverId         = $match.driver_id
+                DisplayName      = $match.display_name
+                Provider         = $match.provider
+                Category         = $match.category
+                Version          = $match.version
+                Arch             = $match.arch
+                PrimaryUrl       = $match.primary_url
+                ZipParts         = [int]$match.zip_parts
+                MatchedHWID      = $id
+                SupersededBy     = $match.superseded_by
+                IsGeneric        = [int]$match.matched_is_generic
+                IsRecommended    = $isRecommended
+                InstallStatus    = $installStatus
+                InstalledVersion = $installedVersion
             })
         }
     }
@@ -491,8 +681,10 @@ function Search-Drivers {
 # ═══════════════════════════════════════════════════════════════════════════════
 function Show-DriverTable {
     <#
-    .SYNOPSIS Renders a formatted, numbered driver selection table.
-    .PARAMETER Drivers       Array of driver PSObjects
+    .SYNOPSIS Renders a formatted, numbered driver selection table — now with
+    install-status awareness (NEW / UPDATE / INSTALLED / NEWER) so the user
+    can see at a glance exactly what needs action vs. what's already fine.
+    .PARAMETER Drivers       Array of driver PSObjects (classified by Search-Drivers)
     .PARAMETER ProblemHWIDs  Array of HWIDs with ConfigManagerErrorCode > 0
     #>
     param([object[]]$Drivers, [string[]]$ProblemHWIDs)
@@ -504,50 +696,47 @@ function Show-DriverTable {
     Write-Host ""
 
     # Column widths
-    $colN   = 3; $colStar = 2; $colName = 28; $colProv = 16
-    $colCat = 10; $colVer = 14; $colArch = 6; $colStat = 16
+    $colN = 3; $colStar = 2; $colName = 22; $colProv = 13
+    $colCat = 9; $colVer = 13; $colInst = 11; $colStat = 22
 
     # Header
-    $h = "  {0,-$colN} │ {1,-$colStar} │ {2,-$colName} │ {3,-$colProv} │ {4,-$colCat} │ {5,-$colVer} │ {6,-$colArch} │ {7}" `
-         -f '#','','Name','Provider','Category','Version','Arch','Status'
+    $h = "  {0,-$colN} │ {1,-$colStar} │ {2,-$colName} │ {3,-$colProv} │ {4,-$colCat} │ {5,-$colVer} │ {6,-$colInst} │ {7}" `
+         -f '#','','Name','Provider','Category','DB Ver','Installed','Status'
     Write-Host $h -ForegroundColor DarkGray
     $sep = '  {0}─┼─{1}─┼─{2}─┼─{3}─┼─{4}─┼─{5}─┼─{6}─┼─{7}' -f `
            ('─'*$colN),('─'*$colStar),('─'*$colName),('─'*$colProv),`
-           ('─'*$colCat),('─'*$colVer),('─'*$colArch),('─'*$colStat)
+           ('─'*$colCat),('─'*$colVer),('─'*$colInst),('─'*$colStat)
     Write-Host $sep -ForegroundColor DarkGray
 
     $idx = 0
     foreach ($d in $Drivers) {
         $idx++
-        $star    = if ($d.IsRecommended)  { '★' } else { ' ' }
-        $isProblem   = $ProblemHWIDs -contains $d.MatchedHWID
-        $isSuperseded = [bool]$d.SupersededBy
-
-        $status = ''
-        if ($isSuperseded) { $status = '[SUPERSEDED]' }
-        elseif ($isProblem) { $status = '[PROBLEM DEV]' }
+        $star = if ($d.IsRecommended) { '★' } else { ' ' }
+        $cls  = Get-DriverClassification -Driver $d -ProblemHWIDs $ProblemHWIDs
 
         $name = if ($d.DisplayName.Length -gt $colName) { $d.DisplayName.Substring(0,$colName-1)+'…' } else { $d.DisplayName }
         $prov = if ($d.Provider.Length -gt $colProv)    { $d.Provider.Substring(0,$colProv-1)+'…' }    else { $d.Provider }
-        $row  = "  {0,-$colN} │ {1,-$colStar} │ {2,-$colName} │ {3,-$colProv} │ {4,-$colCat} │ {5,-$colVer} │ {6,-$colArch} │ {7}" `
-                -f $idx, $star, $name, $prov, $d.Category, $d.Version, $d.Arch, $status
+        $inst = if ($d.InstalledVersion) { $d.InstalledVersion } else { '—' }
+        if ($inst.Length -gt $colInst) { $inst = $inst.Substring(0,$colInst-1)+'…' }
 
-        if ($isSuperseded) {
-            Write-Host $row -ForegroundColor DarkGray
-        } elseif ($isProblem) {
-            Write-Host $row -ForegroundColor Yellow
-        } elseif ($d.IsRecommended) {
-            Write-Host $row -ForegroundColor White
-        } else {
-            Write-Host $row -ForegroundColor Gray
-        }
+        $row = "  {0,-$colN} │ {1,-$colStar} │ {2,-$colName} │ {3,-$colProv} │ {4,-$colCat} │ {5,-$colVer} │ {6,-$colInst} │ {7}" `
+               -f $idx, $star, $name, $prov, $d.Category, $d.Version, $inst, $cls.Label
+
+        Write-Host $row -ForegroundColor $cls.Color
     }
+
+    Write-Host ""
+    Write-Info "★ = best architecture match     NEW/UPDATE = needs action     INSTALLED/NEWER = already fine"
     Write-Host ""
 }
 
 function Show-DriverMenu {
     <#
     .SYNOPSIS Renders driver table and returns the user-selected subset.
+    Default selection is "SMART": only drivers that actually need action
+    (NEW, UPDATE AVAILABLE, or on a PROBLEM device) are pre-selected.
+    Already-installed and newer-than-DB drivers are left out unless the
+    user explicitly asks for ALL or picks them by number.
     .PARAMETER Drivers       All available driver objects
     .PARAMETER ProblemHWIDs  HWIDs flagged as problem devices
     #>
@@ -555,21 +744,44 @@ function Show-DriverMenu {
 
     Show-DriverTable -Drivers $Drivers -ProblemHWIDs $ProblemHWIDs
 
-    Write-Info "Selection: ALL · PROBLEMS · comma-separated numbers (e.g. 1,3,5) · q to quit"
+    $classified = @($Drivers | ForEach-Object {
+        [pscustomobject]@{
+            Driver = $_
+            Class  = (Get-DriverClassification -Driver $_ -ProblemHWIDs $ProblemHWIDs)
+        }
+    })
+    $smartSet = @($classified | Where-Object { $_.Class.Recommended } | ForEach-Object { $_.Driver })
+
+    if ($smartSet.Count -gt 0) {
+        Write-OK "$($smartSet.Count) of $($Drivers.Count) driver(s) need action — the rest are already up to date."
+    } else {
+        Write-OK "Everything here is already installed and current. Nothing needs action."
+    }
     Write-Host ""
 
-    $raw = Read-Input -Prompt 'Select drivers' -Default 'ALL' `
-        -Validator { param($v) $v -match '^(ALL|PROBLEMS|q|[0-9, ]+)$' } `
-        -ErrMsg    'Enter ALL, PROBLEMS, a list of numbers, or q to quit.'
+    Write-Info "Selection: SMART (recommended, default) · ALL · PROBLEMS · NONE · comma-separated numbers · q to quit"
+    Write-Host ""
 
-    if ($raw -eq 'q') { return @() }
-    if ($raw -eq 'ALL') {
+    $raw = Read-Input -Prompt 'Select drivers' -Default 'SMART' `
+        -Validator { param($v) $v -match '^(SMART|ALL|PROBLEMS|NONE|q|[0-9, ]+)$' } `
+        -ErrMsg    'Enter SMART, ALL, PROBLEMS, NONE, a list of numbers, or q to quit.'
+
+    if ($raw -eq 'q')    { return @() }
+    if ($raw -eq 'NONE') { return @() }
+
+    if ($raw -eq 'SMART') {
+        $sel = $smartSet
+        if (@($sel).Count -eq 0) {
+            Write-Info "Nothing selected. Re-run and choose ALL if you want to force-reinstall anyway."
+            return @()
+        }
+    } elseif ($raw -eq 'ALL') {
         $sel = $Drivers
     } elseif ($raw -eq 'PROBLEMS') {
         $sel = @($Drivers | Where-Object { $ProblemHWIDs -contains $_.MatchedHWID })
         if (-not $sel -or @($sel).Count -eq 0) {
-            Write-Warn "No problem devices in the list. Selecting ALL."
-            $sel = $Drivers
+            Write-Warn "No problem devices in the list. Falling back to SMART selection."
+            $sel = $smartSet
         }
     } else {
         $indices = $raw -split '[,\s]+' | ForEach-Object {
@@ -579,14 +791,26 @@ function Show-DriverMenu {
         $sel = @($indices | ForEach-Object { $Drivers[$_ - 1] })
     }
 
+    if (-not $sel -or @($sel).Count -eq 0) { return @() }
+
     # Echo selection
     $names = ($sel | ForEach-Object { $_.DisplayName }) -join ', '
     Write-OK "Selected: $names"
 
-    # Check for superseded in selection
+    # Warn on superseded picks
     $supersededPicked = @($sel | Where-Object { $_.SupersededBy })
     foreach ($s in $supersededPicked) {
         Write-Warn "'$($s.DisplayName)' is superseded by $($s.SupersededBy) — consider deselecting."
+    }
+
+    # Flag deliberate repairs / downgrades so the user knows exactly what they're getting
+    $alreadyCurrent = @($sel | Where-Object { $_.InstallStatus -eq 'CURRENT' })
+    foreach ($c in $alreadyCurrent) {
+        Write-Info "'$($c.DisplayName)' is already at v$($c.Version) — will be force-reinstalled (repair)."
+    }
+    $downgrades = @($sel | Where-Object { $_.InstallStatus -eq 'NEWER' })
+    foreach ($dn in $downgrades) {
+        Write-Warn "'$($dn.DisplayName)': installed v$($dn.InstalledVersion) is NEWER than the DB's v$($dn.Version) — this would be a downgrade."
     }
 
     # Confirm
@@ -902,12 +1126,16 @@ function Install-DriverPackage {
         New-Item -ItemType Directory -Force -Path $pkgTemp | Out-Null
         $result.Path = $outDir
 
-        # ── Already installed? ─────────────────────────────────────────────
-        if (Test-DriverInstalled -Provider $Driver.Provider -Version $Driver.Version) {
-            Write-Warn "v$($Driver.Version) of $($Driver.Provider) is already installed — skipping."
-            Write-Info "Use prefix 'r' in selection to force reinstall."
-            $result.Skipped = $true
-            return $result
+        # ── Already installed? ──────────────────────────────────────────────
+        # InstallStatus was computed BEFORE the table was shown, so the user
+        # has already seen exactly what this driver's status is. Reaching
+        # this point means they explicitly chose to (re)install it via ALL,
+        # PROBLEMS, or a manual number pick — so we proceed and tell them
+        # what's happening, instead of silently skipping mid-run.
+        if ($Driver.InstallStatus -eq 'CURRENT') {
+            Write-Info "v$($Driver.Version) is already installed — reinstalling as requested (repair)."
+        } elseif ($Driver.InstallStatus -eq 'NEWER') {
+            Write-Warn "Installed v$($Driver.InstalledVersion) is newer than v$($Driver.Version) — proceeding anyway as requested (downgrade)."
         }
 
         # ── Download all parts ─────────────────────────────────────────────
@@ -1121,12 +1349,18 @@ function Invoke-ContributePrompt {
     .SYNOPSIS  Invites the user to contribute their driver data to the DriverDex
                community database. Explains what is collected, what is NOT
                collected, and gives two launch options (TUI / background).
-    .PARAMETER HWIDs    The full list of hardware IDs found on this machine
-    .PARAMETER Reason   'no_drivers' | 'partial' — shapes the message tone
+    .PARAMETER HWIDs                The full list of hardware IDs found on this machine
+    .PARAMETER Reason               'no_drivers' | 'partial' — shapes the message tone
+    .PARAMETER UnmatchedLocalDrivers Devices with a working local driver that the
+                                     DriverDex database has zero record of — these
+                                     get named specifically, because "we don't have
+                                     YOUR Realtek audio driver" is a far stronger,
+                                     more honest ask than a generic appeal.
     #>
     param(
         [string[]]$HWIDs,
-        [string]  $Reason = 'no_drivers'
+        [string]  $Reason = 'no_drivers',
+        [object[]]$UnmatchedLocalDrivers = @()
     )
 
     $w = 66
@@ -1139,6 +1373,8 @@ function Invoke-ContributePrompt {
 
     if ($Reason -eq 'no_drivers') {
         Write-Host (& $mid "  DriverDex has no drivers for your hardware — yet.") -ForegroundColor White
+    } elseif (@($UnmatchedLocalDrivers).Count -gt 0) {
+        Write-Host (& $mid "  $(@($UnmatchedLocalDrivers).Count) working driver(s) on this PC aren't in our database.") -ForegroundColor White
     } else {
         Write-Host (& $mid "  Some of your devices aren't in the DriverDex database yet.") -ForegroundColor White
     }
@@ -1154,6 +1390,27 @@ function Invoke-ContributePrompt {
     Write-Host "  for the next person with the same machine — maybe someone who" -ForegroundColor DarkGray
     Write-Host "  can't figure out why their device doesn't work." -ForegroundColor DarkGray
     Write-Host ""
+
+    if (@($UnmatchedLocalDrivers).Count -gt 0) {
+        Write-Host "  Here's the thing: these drivers already work, right now, on" -ForegroundColor White
+        Write-Host "  YOUR machine. Nobody has to write anything new — we just need" -ForegroundColor DarkGray
+        Write-Host "  a copy of what Windows already installed. As far as DriverDex" -ForegroundColor DarkGray
+        Write-Host "  can tell, you may be the only person who currently has these," -ForegroundColor DarkGray
+        Write-Host "  which makes you the only person who can contribute them." -ForegroundColor DarkGray
+        Write-Host ""
+        Write-Host "  Specifically, these devices have NO entry in DriverDex at all:" -ForegroundColor Cyan
+        $shown = @($UnmatchedLocalDrivers | Select-Object -First 6)
+        foreach ($u in $shown) {
+            $dn = if ($u.DeviceName) { $u.DeviceName } else { $u.HWID }
+            $vr = if ($u.Version)    { "v$($u.Version)" } else { 'version unknown' }
+            Write-Host "    · $dn  ($vr)" -ForegroundColor White
+        }
+        if (@($UnmatchedLocalDrivers).Count -gt 6) {
+            Write-Host "    · ... and $(@($UnmatchedLocalDrivers).Count - 6) more" -ForegroundColor DarkGray
+        }
+        Write-Host ""
+    }
+
     Write-Host "  Contributing takes under a minute and requires no account." -ForegroundColor White
     Write-Host ""
 
@@ -1176,19 +1433,26 @@ function Invoke-ContributePrompt {
     Write-Host ""
 
     # ── Show what would be submitted (preview) ────────────────────────────
-    Write-Host "  Preview — hardware IDs that would be submitted from this machine:" -ForegroundColor White
-    $preview = @($HWIDs | Select-Object -First 6)
-    foreach ($id in $preview) {
-        Write-Host "    · $id" -ForegroundColor DarkGray
+    if (@($UnmatchedLocalDrivers).Count -eq 0) {
+        Write-Host "  Preview — hardware IDs that would be submitted from this machine:" -ForegroundColor White
+        $preview = @($HWIDs | Select-Object -First 6)
+        foreach ($id in $preview) {
+            Write-Host "    · $id" -ForegroundColor DarkGray
+        }
+        if (@($HWIDs).Count -gt 6) {
+            Write-Host "    · ... and $(@($HWIDs).Count - 6) more hardware ID(s)" -ForegroundColor DarkGray
+        }
+        Write-Host ""
     }
-    if (@($HWIDs).Count -gt 6) {
-        Write-Host "    · ... and $(@($HWIDs).Count - 6) more hardware ID(s)" -ForegroundColor DarkGray
-    }
-    Write-Host ""
 
     # ── Ask ────────────────────────────────────────────────────────────────
-    Write-Host "  Your submission directly helps the next person with your" -ForegroundColor White
-    Write-Host "  hardware. It costs you nothing and takes less than 60 seconds." -ForegroundColor White
+    if (@($UnmatchedLocalDrivers).Count -gt 0) {
+        Write-Host "  Your submission fills in a gap only you can fill right now." -ForegroundColor White
+        Write-Host "  It costs you nothing and takes less than 60 seconds." -ForegroundColor White
+    } else {
+        Write-Host "  Your submission directly helps the next person with your" -ForegroundColor White
+        Write-Host "  hardware. It costs you nothing and takes less than 60 seconds." -ForegroundColor White
+    }
     Write-Host ""
 
     $contrib = Read-Input `
@@ -1310,16 +1574,31 @@ function Main {
             return
         }
 
+        # ── Step 3b: Local driver inventory ─────────────────────────────────
+        # Indexed ONCE here so every later "is this installed / what version"
+        # question is a lookup, not a fresh WMI query buried mid-install.
+        $installedSnapshot = Get-InstalledDriverSnapshot
+        Write-Host ""
+
         # ── Step 4: API query ──────────────────────────────────────────────
         Write-Divider
-        $drivers = Search-Drivers -HWIDs $hwids -SystemArch $os.Arch
+        $drivers = Search-Drivers -HWIDs $hwids -SystemArch $os.Arch -InstalledSnapshot $installedSnapshot
         Write-Host ""
+
+        # Devices with a working local driver that the DB has never seen at all —
+        # the strongest, most specific contribution candidates.
+        $unmatchedLocal = Get-UnmatchedLocalDrivers -AllHWIDs $hwids -MatchedDrivers @($drivers) -Snapshot $installedSnapshot
 
         if (@($drivers).Count -eq 0) {
             Write-Warn "No matching drivers found in the DriverDex database for your hardware."
             Write-Host ""
-            Invoke-ContributePrompt -HWIDs $hwids -Reason 'no_drivers'
+            Invoke-ContributePrompt -HWIDs $hwids -Reason 'no_drivers' -UnmatchedLocalDrivers $unmatchedLocal
             return
+        }
+
+        if (@($unmatchedLocal).Count -gt 0) {
+            Write-Accent "  [$(@($unmatchedLocal).Count) locally installed driver(s) have no DriverDex entry yet — more on this at the end]"
+            Write-Host ""
         }
 
         # Category summary
@@ -1383,10 +1662,9 @@ function Main {
         Show-Summary -Results @($results)
 
         # ── Step 9: Contribution prompt ───────────────────────────────────
-        $skippedDrivers = @($results | Where-Object { $_.Skipped })
         $failedDrivers  = @($results | Where-Object { -not $_.Success -and -not $_.Skipped })
-        if ($skippedDrivers.Count -gt 0 -or $failedDrivers.Count -gt 0) {
-            Invoke-ContributePrompt -HWIDs $hwids -Reason 'partial'
+        if ($failedDrivers.Count -gt 0 -or @($unmatchedLocal).Count -gt 0) {
+            Invoke-ContributePrompt -HWIDs $hwids -Reason 'partial' -UnmatchedLocalDrivers $unmatchedLocal
         }
 
         # ── Step 10: Reboot prompt ─────────────────────────────────────────
