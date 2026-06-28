@@ -1156,13 +1156,13 @@ function Install-DriverPackage {
         $partUrls  = @(Get-PartUrls -PrimaryUrl $Driver.PrimaryUrl -ZipParts $Driver.ZipParts)
         $firstPart = $null
 
-        for ($pi = 0; $pi -lt $partUrls.Count; $pi++) {
+        for ($pi = 0; $pi -lt @($partUrls).Count; $pi++) {
             $url      = $partUrls[$pi]
             $fileName = Split-Path $url -Leaf
             $dest     = Join-Path $pkgTemp $fileName
             if ($pi -eq 0) { $firstPart = $dest }
 
-            Write-Sub "[$($pi+1)/$($partUrls.Count)] $fileName"
+            Write-Sub "[$($pi+1)/$(@($partUrls).Count)] $fileName"
             Get-DriverFile -Url $url -Dest $dest -Label $fileName
         }
 
@@ -1202,8 +1202,8 @@ function Install-DriverPackage {
         $infs = @(Get-ChildItem -Path $outDir -Filter '*.inf' -Recurse -ErrorAction SilentlyContinue |
                   Where-Object { $_ -ne $null })
 
-        if ($infs.Count -gt 0 -and $IsAdmin) {
-            Write-Step "Installing $($infs.Count) INF package(s) via pnputil..."
+        if (@($infs).Count -gt 0 -and $IsAdmin) {
+            Write-Step "Installing $(@($infs).Count) INF package(s) via pnputil..."
             # pnputil /add-driver on a glob is not reliable in all PS versions; pass the folder instead
             $pnpArgs = @('/add-driver', "$outDir\*.inf", '/subdirs', '/install')
             $pnpProc = Start-Process -FilePath "$env:SystemRoot\System32\pnputil.exe" `
@@ -1237,7 +1237,7 @@ function Install-DriverPackage {
                 Write-Warn "Cross-check: driver not yet reflected in system — a reboot may be required."
             }
 
-        } elseif ($infs.Count -gt 0 -and -not $IsAdmin) {
+        } elseif (@($infs).Count -gt 0 -and -not $IsAdmin) {
             Write-Warn "INF found but script is not elevated. Open Device Manager and point it at:"
             Write-Host "      $outDir" -ForegroundColor Cyan
             $result.Success = $true   # files are ready, install is manual
@@ -1336,9 +1336,9 @@ function Invoke-RebootPrompt {
     #>
     param([object[]]$Results)
     $needsReboot = @($Results | Where-Object { $_.RebootRequired })
-    if ($needsReboot.Count -eq 0) { return }
+    if (@($needsReboot).Count -eq 0) { return }
 
-    Write-Warn "$($needsReboot.Count) driver(s) require a reboot to activate."
+    Write-Warn "$(@($needsReboot).Count) driver(s) require a reboot to activate."
     Write-Host ""
     $choice = Read-Input -Prompt 'Restart now to apply all drivers?' -Default 'N' `
         -Validator { param($v) $v -match '^[YyNn]$' } -ErrMsg 'Enter Y or N.'
@@ -1603,7 +1603,7 @@ function Invoke-SearchAPI {
     <#
     .SYNOPSIS Queries the DriverDex search endpoint. Falls back to HWID API for
     HWID-style queries (PCI\, USB\, ACPI\, etc.) when search endpoint returns nothing.
-    Returns an array of driver result objects, or empty array on failure.
+    Always returns [object[]] — never $null, never a bare object.
     .PARAMETER Query  User search string
     .PARAMETER Arch   Optional architecture filter (x64 / x86 / any)
     .PARAMETER Category Optional category filter
@@ -1626,7 +1626,7 @@ function Invoke-SearchAPI {
             $resp    = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
             $data    = $resp.Content | ConvertFrom-Json
             if ($data.matches) {
-                foreach ($m in $data.matches) {
+                foreach ($m in @($data.matches)) {
                     if (-not $m.enabled) { continue }
                     $archOk = (-not $Arch) -or ($m.arch -eq $Arch) -or ($m.arch -in @('any','noarch',''))
                     $catOk  = (-not $Category) -or ($m.category -like "*$Category*")
@@ -1649,7 +1649,8 @@ function Invoke-SearchAPI {
         } catch {
             Write-Warn "HWID lookup failed: $($_.Exception.Message)"
         }
-        return [array]$results
+        # Always return object[] — never let PowerShell unwrap a single item
+        return , [object[]]$results.ToArray()
     }
 
     # ── Text search endpoint ────────────────────────────────────────────────
@@ -1662,8 +1663,9 @@ function Invoke-SearchAPI {
         $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
         $data = $resp.Content | ConvertFrom-Json
 
-        $raw = if ($data.results) { $data.results } elseif ($data.matches) { $data.matches } else { $data }
+        $raw = if ($data.results) { @($data.results) } elseif ($data.matches) { @($data.matches) } else { @($data) }
         foreach ($m in $raw) {
+            if ($null -eq $m) { continue }
             if ($m.enabled -eq $false) { continue }
             $results.Add([pscustomobject]@{
                 DriverId    = if ($m.driver_id)    { $m.driver_id }    else { $m.id }
@@ -1679,11 +1681,11 @@ function Invoke-SearchAPI {
             })
         }
     } catch {
-        # Search endpoint not available — try keyword scan via known categories
-        Write-Host "  ◈ Search endpoint unavailable — performing local keyword match..." -ForegroundColor DarkGray
+        # Search endpoint not available — return empty array, caller shows message
+        Write-Host "  ◈ Search endpoint unavailable — no results returned." -ForegroundColor DarkGray
     }
 
-    return [array]$results
+    return , [object[]]$results.ToArray()
 }
 
 function Show-SearchResultsTable {
@@ -1808,12 +1810,12 @@ function Invoke-SearchDownload {
         $partUrls  = @(Get-PartUrls -PrimaryUrl $Item.PrimaryUrl -ZipParts $Item.ZipParts)
         $firstPart = $null
 
-        for ($pi = 0; $pi -lt $partUrls.Count; $pi++) {
+        for ($pi = 0; $pi -lt @($partUrls).Count; $pi++) {
             $url      = $partUrls[$pi]
             $fileName = Split-Path $url -Leaf
             $dest     = Join-Path $pkgTemp $fileName
             if ($pi -eq 0) { $firstPart = $dest }
-            Write-Sub "[$($pi+1)/$($partUrls.Count)] $fileName"
+            Write-Sub "[$($pi+1)/$(@($partUrls).Count)] $fileName"
             Get-DriverFile -Url $url -Dest $dest -Label $fileName
         }
 
@@ -1833,8 +1835,8 @@ function Invoke-SearchDownload {
         if ($InstallMode -eq 'install') {
             $infs = @(Get-ChildItem -Path $outDir -Filter '*.inf' -Recurse -ErrorAction SilentlyContinue |
                       Where-Object { $_ -ne $null })
-            if ($infs.Count -gt 0 -and $IsAdmin) {
-                Write-Step "Installing via pnputil ($($infs.Count) INF)..."
+            if (@($infs).Count -gt 0 -and $IsAdmin) {
+                Write-Step "Installing via pnputil ($(@($infs).Count) INF)..."
                 $pnp = Start-Process "$env:SystemRoot\System32\pnputil.exe" `
                            -ArgumentList @('/add-driver', "$outDir\*.inf", '/subdirs', '/install') `
                            -Wait -PassThru -NoNewWindow
@@ -1843,7 +1845,7 @@ function Invoke-SearchDownload {
                 } else {
                     Write-Warn "pnputil returned exit code $($pnp.ExitCode) — try Device Manager at: $outDir"
                 }
-            } elseif ($infs.Count -gt 0 -and -not $IsAdmin) {
+            } elseif (@($infs).Count -gt 0 -and -not $IsAdmin) {
                 Write-Warn "Not elevated. Point Device Manager to: $outDir"
             } else {
                 $inst = @(Get-ChildItem -Path $outDir -Include 'setup.exe','*.msi' -Recurse `
@@ -1998,9 +2000,9 @@ function Invoke-DriverSearchEngine {
                 # Re-run last search with new filters if available
                 if ($currentQuery) {
                     Write-Step "Re-searching '$currentQuery' with new filters..."
-                    $currentResults = Invoke-SearchAPI -Query $currentQuery -Arch $filterArch -Category $filterCategory
+                    $currentResults = @(Invoke-SearchAPI -Query $currentQuery -Arch $filterArch -Category $filterCategory)
                     $currentPage    = 1
-                    if ($currentResults.Count -gt 0) {
+                    if (@($currentResults).Count -gt 0) {
                         $pageState = Show-SearchResultsTable -Results $currentResults -Page $currentPage -PageSize $pageSize
                     } else {
                         Write-Warn "No results with current filters."
@@ -2010,7 +2012,7 @@ function Invoke-DriverSearchEngine {
             }
 
             '^n(ext)?$' {
-                if ($currentResults.Count -eq 0) { Write-Warn "No search results. Run a search first."; continue }
+                if (@($currentResults).Count -eq 0) { Write-Warn "No search results. Run a search first."; continue }
                 $currentPage++
                 $pageState = Show-SearchResultsTable -Results $currentResults -Page $currentPage -PageSize $pageSize
                 $currentPage = $pageState.Page
@@ -2018,7 +2020,7 @@ function Invoke-DriverSearchEngine {
             }
 
             '^p(rev)?$' {
-                if ($currentResults.Count -eq 0) { Write-Warn "No search results. Run a search first."; continue }
+                if (@($currentResults).Count -eq 0) { Write-Warn "No search results. Run a search first."; continue }
                 $currentPage = [Math]::Max(1, $currentPage - 1)
                 $pageState = Show-SearchResultsTable -Results $currentResults -Page $currentPage -PageSize $pageSize
                 $currentPage = $pageState.Page
@@ -2026,7 +2028,7 @@ function Invoke-DriverSearchEngine {
             }
 
             '^g(\d+)$' {
-                if ($currentResults.Count -eq 0) { Write-Warn "No search results."; continue }
+                if (@($currentResults).Count -eq 0) { Write-Warn "No search results."; continue }
                 $gPage = [int]($Matches[1])
                 $currentPage = $gPage
                 $pageState = Show-SearchResultsTable -Results $currentResults -Page $currentPage -PageSize $pageSize
@@ -2036,7 +2038,7 @@ function Invoke-DriverSearchEngine {
 
             '^det(\d+)$' {
                 $idx = [int]($Matches[1]) - 1
-                if ($idx -ge 0 -and $idx -lt $currentResults.Count) {
+                if ($idx -ge 0 -and $idx -lt @($currentResults).Count) {
                     Get-SearchResultDetail -Item $currentResults[$idx]
                 } else { Write-Warn "Invalid result number." }
                 continue
@@ -2045,21 +2047,21 @@ function Invoke-DriverSearchEngine {
             '^d(\d+)$' {
                 # Download only
                 $idx = [int]($Matches[1]) - 1
-                if ($idx -ge 0 -and $idx -lt $currentResults.Count) {
+                if ($idx -ge 0 -and $idx -lt @($currentResults).Count) {
                     $item = $currentResults[$idx]
                     Get-SearchResultDetail -Item $item
                     Write-Step "Downloading: $($item.DisplayName)"
                     if (-not $extractor) { Write-Warn "Extractor unavailable — download will be raw parts only."; return }
                     Invoke-SearchDownload -Item $item -OutRoot $outRoot -ScratchDir $ScratchDir `
                                          -Extractor $extractor -IsAdmin $IsAdmin -InstallMode 'download'
-                } else { Write-Warn "Invalid result number. Valid range: 1–$($currentResults.Count)" }
+                } else { Write-Warn "Invalid result number. Valid range: 1–$(@($currentResults).Count)" }
                 continue
             }
 
             '^i(\d+)$' {
                 # Download + Install
                 $idx = [int]($Matches[1]) - 1
-                if ($idx -ge 0 -and $idx -lt $currentResults.Count) {
+                if ($idx -ge 0 -and $idx -lt @($currentResults).Count) {
                     $item = $currentResults[$idx]
                     Get-SearchResultDetail -Item $item
                     if (-not $IsAdmin) {
@@ -2072,14 +2074,14 @@ function Invoke-DriverSearchEngine {
                         Invoke-SearchDownload -Item $item -OutRoot $outRoot -ScratchDir $ScratchDir `
                                              -Extractor $extractor -IsAdmin $IsAdmin -InstallMode 'install'
                     }
-                } else { Write-Warn "Invalid result number. Valid range: 1–$($currentResults.Count)" }
+                } else { Write-Warn "Invalid result number. Valid range: 1–$(@($currentResults).Count)" }
                 continue
             }
 
             '^(\d+)$' {
                 # Select by number — show details then ask action
                 $idx = [int]($Matches[1]) - 1
-                if ($idx -ge 0 -and $idx -lt $currentResults.Count) {
+                if ($idx -ge 0 -and $idx -lt @($currentResults).Count) {
                     $item = $currentResults[$idx]
                     Get-SearchResultDetail -Item $item
                     Write-Host "  What would you like to do with '$($item.DisplayName)'?" -ForegroundColor White
@@ -2096,7 +2098,7 @@ function Invoke-DriverSearchEngine {
                         Invoke-SearchDownload -Item $item -OutRoot $outRoot -ScratchDir $ScratchDir `
                                              -Extractor $extractor -IsAdmin $IsAdmin -InstallMode 'install'
                     }
-                } else { Write-Warn "Invalid result number. Valid range: 1–$($currentResults.Count)" }
+                } else { Write-Warn "Invalid result number. Valid range: 1–$(@($currentResults).Count)" }
                 continue
             }
 
@@ -2110,9 +2112,9 @@ function Invoke-DriverSearchEngine {
                 Write-Step "Searching for '$query'..."
                 $Script:SpinIdx = 0
                 Show-Spinner -Label "Querying DriverDex..."
-                $currentResults = Invoke-SearchAPI -Query $query -Arch $filterArch -Category $filterCategory
+                $currentResults = @(Invoke-SearchAPI -Query $query -Arch $filterArch -Category $filterCategory)
                 Clear-SpinnerLine
-                if ($currentResults.Count -gt 0) {
+                if (@($currentResults).Count -gt 0) {
                     $pageState = Show-SearchResultsTable -Results $currentResults -Page $currentPage -PageSize $pageSize
                     $currentPage = $pageState.Page
                     Write-Host ""
@@ -2134,9 +2136,9 @@ function Invoke-DriverSearchEngine {
                 Write-Step "Searching for '$query'..."
                 $Script:SpinIdx = 0
                 Show-Spinner -Label "Querying DriverDex..."
-                $currentResults = Invoke-SearchAPI -Query $query -Arch $filterArch -Category $filterCategory
+                $currentResults = @(Invoke-SearchAPI -Query $query -Arch $filterArch -Category $filterCategory)
                 Clear-SpinnerLine
-                if ($currentResults.Count -gt 0) {
+                if (@($currentResults).Count -gt 0) {
                     $pageState = Show-SearchResultsTable -Results $currentResults -Page $currentPage -PageSize $pageSize
                     $currentPage = $pageState.Page
                     Write-Host ""
