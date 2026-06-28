@@ -778,10 +778,10 @@ function Get-DriverFile {
             if ($attempt -lt $MaxRetries) {
                 $d = $delays[$attempt - 1]
                 Write-Host "  ↻ Retry $attempt/$MaxRetries in ${d}s — $reason" -ForegroundColor DarkYellow
-                Write-Log -Level WARN -Msg "Download retry $attempt for $Url: $reason"
+                Write-Log -Level WARN -Msg "Download retry $attempt for ${Url}: $reason"
                 Start-Sleep -Seconds $d
             } else {
-                Write-Log -Level ERROR -Msg "Download failed after $MaxRetries attempts for $Url: $reason" -Err $_
+                Write-Log -Level ERROR -Msg "Download failed after $MaxRetries attempts for ${Url}: $reason" -Err $_
                 throw "Download failed after $MaxRetries attempts: $reason"
             }
         }
