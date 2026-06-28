@@ -23,6 +23,40 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'   # Suppress PS built-in progress bars
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  SAFE PROPERTY ACCESS  (StrictMode guard for dynamic/JSON-shaped objects)
+# ═══════════════════════════════════════════════════════════════════════════════
+function Get-Prop {
+    <#
+    .SYNOPSIS Reads a property safely under Set-StrictMode -Version Latest.
+             Under strict mode, $obj.Foo THROWS (PropertyNotFoundStrict) if Foo
+             isn't a member of $obj — it does NOT just return $null like in
+             non-strict mode. Every object in this script that ultimately comes
+             from JSON (API responses) or gets built across a few different
+             code paths is at risk of having an inconsistent shape, so any bare
+             ".PropertyName" access on one of those objects is a latent crash.
+             This helper uses reflection-based member lookup instead of the
+             dot operator, so a missing property safely yields $Default
+             instead of a terminating error — while leaving Set-StrictMode's
+             other protections (uninitialized variables, bad method-call
+             syntax) fully intact everywhere else in the script.
+    .PARAMETER Obj      The object to read from (may be $null)
+    .PARAMETER Name     Property name to look up
+    .PARAMETER Default  Value to return if the object is $null or lacks the property
+    #>
+    param(
+        [object]$Obj,
+        [Parameter(Mandatory)][string]$Name,
+        $Default = $null
+    )
+    if ($null -eq $Obj) { return $Default }
+    $member = $Obj.PSObject.Properties[$Name]
+    if ($null -eq $member) { return $Default }
+    $val = $member.Value
+    if ($null -eq $val) { return $Default }
+    return $val
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  CONSTANTS
 # ═══════════════════════════════════════════════════════════════════════════════
 $Script:VERSION       = '2.2.0'
@@ -613,21 +647,62 @@ function Invoke-ApiFast {
     } catch { return $null }
 }
 
+function ConvertTo-NormalizedDriverRecord {
+    <#
+    .SYNOPSIS Converts one raw API match object into the canonical PascalCase
+             [pscustomobject] shape used everywhere downstream. This is the
+             ONLY place that should ever read snake_case API fields — every
+             other function (rendering, install, detail view) must consume
+             objects that already went through here. Centralizing this means
+             a malformed/raw API object can never reach Show-SearchResultsTable
+             or Get-SearchResultDetail and trip Set-StrictMode.
+    .PARAMETER M           Raw match object from the API JSON response
+    .PARAMETER MatchedHWID Optional HWID this record was matched against
+    .PARAMETER Score       Relevance score to tag onto the record
+    #>
+    param(
+        [Parameter(Mandatory)] $M,
+        [string]$MatchedHWID = '',
+        [int]$Score = 50
+    )
+    $dn   = Get-Prop $M 'display_name' (Get-Prop $M 'name' '')
+    $prov = Get-Prop $M 'provider' ''
+    $cat  = Get-Prop $M 'category' ''
+    $id   = Get-Prop $M 'driver_id' (Get-Prop $M 'id' '')
+    $zip  = Get-Prop $M 'zip_parts' 1
+    return [pscustomobject]@{
+        DriverId    = $id
+        DisplayName = if ($dn)            { $dn }             else { "$prov $cat".Trim() }
+        Provider    = $prov
+        Category    = $cat
+        Version     = Get-Prop $M 'version' ''
+        Arch        = Get-Prop $M 'arch' 'any'
+        PrimaryUrl  = Get-Prop $M 'primary_url' ''
+        ZipParts    = [int]$zip
+        MatchedHWID = $MatchedHWID
+        Score       = $Score
+    }
+}
+
 function Build-HwidCache {
     <#
     .SYNOPSIS Scans all local hardware IDs against the HWID API and stores the
              flattened driver list in $Script:HwidCache. Called once per session
-             the first time a keyword search needs a fallback. Progress is written
-             inline so the caller's spinner keeps ticking.
+             the first time a keyword search needs a fallback.
 
-    Strategy: iterate all unique HWIDs, call Invoke-ApiFast (no retries / 8 s
-    timeout), accumulate every enabled driver record into a de-duplicated flat
-    list. Total time is dominated by network RTT * HWID count; with an 8-second
-    cap per call and no backoff the worst-case is ~16 minutes for 120 HWIDs on a
-    dead connection — but in practice on a live API each call returns in <300 ms,
-    so 120 HWIDs takes ~40 seconds.
+    Strategy: query every unique HWID CONCURRENTLY via a runspace pool (works
+    on PowerShell 5.1+, no extra modules required) instead of one-at-a-time.
+    A hard wall-clock budget caps total build time regardless of how many
+    HWIDs are queried or how unresponsive the API is — a dead endpoint can no
+    longer turn this into a multi-minute stall. Whatever finished within the
+    budget is kept; anything still in flight is abandoned.
     #>
-    param([string]$ApiBase)
+    param(
+        [string]$ApiBase,
+        [int]$MaxConcurrency = 16,
+        [int]$PerCallTimeoutSec = 5,
+        [int]$TotalBudgetSec = 12
+    )
 
     # ── Collect unique HWIDs from PnP ────────────────────────────────────────
     $hwids = $null
@@ -650,46 +725,83 @@ function Build-HwidCache {
         return
     }
 
-    $all    = [System.Collections.Generic.List[object]]::new()
-    $seen   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    $total  = $hwids.Count
-    $done   = 0
-    $barW   = 24
+    $all  = [System.Collections.Generic.List[object]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
-    foreach ($hwid in $hwids) {
-        $done++
-        # ── Inline progress bar ───────────────────────────────────────────
-        $fill    = [int](($done / $total) * $barW)
-        $bar     = ('[' + ('█' * $fill) + ('░' * ($barW - $fill)) + ']')
-        $pctStr  = "$done/$total"
-        Write-Host "`r  ◈ Building search index... $bar $pctStr  " -NoNewline -ForegroundColor DarkGray
+    # ── Runspace pool: fire all HWID lookups concurrently ───────────────────
+    $sw  = [System.Diagnostics.Stopwatch]::StartNew()
+    $pool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $MaxConcurrency)
+    $pool.Open()
+    $jobs = [System.Collections.Generic.List[object]]::new()
 
-        $data = Invoke-ApiFast -HWID $hwid -ApiBase $ApiBase
-        if (-not $data -or -not $data.matches) { continue }
-
-        foreach ($m in @($data.matches)) {
-            if (-not $m.enabled)               { continue }
-            if ($seen.Contains($m.driver_id))  { continue }
-            [void]$seen.Add($m.driver_id)
-            $dn   = if ($m.display_name) { $m.display_name } else { '' }
-            $prov = if ($m.provider)     { $m.provider }     else { '' }
-            $cat  = if ($m.category)     { $m.category }     else { '' }
-            $all.Add([pscustomobject]@{
-                DriverId    = if ($m.driver_id)   { $m.driver_id }    else { '' }
-                DisplayName = if ($dn)            { $dn }             else { "$prov $cat".Trim() }
-                Provider    = $prov
-                Category    = $cat
-                Version     = if ($m.version)     { $m.version }      else { '' }
-                Arch        = if ($m.arch)        { $m.arch }         else { 'any' }
-                PrimaryUrl  = if ($m.primary_url) { $m.primary_url }  else { '' }
-                ZipParts    = if ($m.zip_parts)   { [int]$m.zip_parts } else { 1 }
-                MatchedHWID = $hwid
-                Score       = 50
-            })
+    $workerScript = {
+        param($Hwid, $ApiBase, $TimeoutSec)
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+        } catch {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        }
+        try {
+            $url  = "$ApiBase/$([Uri]::EscapeDataString($Hwid))"
+            $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec $TimeoutSec -ErrorAction Stop
+            return [pscustomobject]@{ Hwid = $Hwid; Data = ($resp.Content | ConvertFrom-Json) }
+        } catch {
+            return [pscustomobject]@{ Hwid = $Hwid; Data = $null }
         }
     }
 
+    $total = $hwids.Count
+    foreach ($hwid in $hwids) {
+        $ps = [System.Management.Automation.PowerShell]::Create()
+        $ps.RunspacePool = $pool
+        [void]$ps.AddScript($workerScript).AddArgument($hwid).AddArgument($ApiBase).AddArgument($PerCallTimeoutSec)
+        $jobs.Add([pscustomobject]@{ Pipe = $ps; Handle = $ps.BeginInvoke() })
+    }
+
+    # ── Poll with a hard total-budget ceiling; draw progress as jobs finish ─
+    $barW = 24
+    do {
+        Start-Sleep -Milliseconds 150
+        $finished = @($jobs | Where-Object { $_.Handle.IsCompleted }).Count
+        $fill     = if ($total -gt 0) { [int](($finished / $total) * $barW) } else { $barW }
+        $bar      = ('[' + ('█' * $fill) + ('░' * ($barW - $fill)) + ']')
+        Write-Host "`r  ◈ Building search index... $bar $finished/$total  " -NoNewline -ForegroundColor DarkGray
+    } while (($finished -lt $total) -and ($sw.Elapsed.TotalSeconds -lt $TotalBudgetSec))
+
+    # ── Collect whatever completed in time; stop and abandon the rest ───────
+    $abandoned = @($jobs | Where-Object { -not $_.Handle.IsCompleted }).Count
+    foreach ($job in $jobs) {
+        if ($job.Handle.IsCompleted) {
+            try {
+                $result = $job.Pipe.EndInvoke($job.Handle)
+                $data   = if ($result) { $result[0].Data } else { $null }
+                $matches = Get-Prop $data 'matches'
+                if ($matches) {
+                    foreach ($m in @($matches)) {
+                        $mEnabled = Get-Prop $m 'enabled'
+                        $mId      = Get-Prop $m 'driver_id'
+                        if (-not $mEnabled)              { continue }
+                        if (-not $mId)                   { continue }
+                        if ($seen.Contains($mId))         { continue }
+                        [void]$seen.Add($mId)
+                        $all.Add((ConvertTo-NormalizedDriverRecord -M $m -MatchedHWID $result[0].Hwid -Score 50))
+                    }
+                }
+            } catch { }
+        } else {
+            try { $job.Pipe.Stop() } catch { }
+        }
+        $job.Pipe.Dispose()
+    }
+    $pool.Close()
+    $pool.Dispose()
+
     Write-Host "`r$(' ' * 72)`r" -NoNewline   # erase progress line
+
+    if ($abandoned -gt 0) {
+        Write-Warn "Index build hit its ${TotalBudgetSec}s budget — $abandoned/$total lookup(s) skipped. Results may be partial."
+    }
+
     $Script:HwidCache      = $all.ToArray()
     $Script:HwidCacheBuilt = $true
 }
@@ -721,23 +833,30 @@ function Search-Drivers {
         $bar  = ('█' * $fill) + ('░' * ($barW - $fill))
         Write-Host "`r  » Querying API... [$bar] $count / $total  " -NoNewline -ForegroundColor White
 
-        $apiResult = Invoke-ApiWithRetry -HWID $id
-        if (-not $apiResult -or -not $apiResult.matches -or @($apiResult.matches).Count -eq 0) { continue }
+        $apiResult  = Invoke-ApiWithRetry -HWID $id
+        $apiMatches = Get-Prop $apiResult 'matches'
+        if (-not $apiResult -or -not $apiMatches -or @($apiMatches).Count -eq 0) { continue }
 
-        foreach ($match in $apiResult.matches) {
-            if (-not $match.enabled)               { continue }
-            if ($seen.Contains($match.driver_id))  { continue }
+        foreach ($match in $apiMatches) {
+            $mEnabled  = Get-Prop $match 'enabled'
+            $mDriverId = Get-Prop $match 'driver_id' ''
+            if (-not $mEnabled)                { continue }
+            if ($seen.Contains($mDriverId))    { continue }
 
             # Arch filtering: include exact match, universal, and x86 on x64 (compat)
-            $mArch = if ($match.arch) { $match.arch.ToLower() } else { '' }
-            $sArch = $SystemArch.ToLower()
+            $mArchRaw = Get-Prop $match 'arch'
+            $mArch    = if ($mArchRaw) { $mArchRaw.ToLower() } else { '' }
+            $sArch    = $SystemArch.ToLower()
             $archOk = ($mArch -eq $sArch) -or
                       ($mArch -in @('any','noarch','')) -or
                       ($mArch -eq 'x86' -and $sArch -eq 'x64')
             if (-not $archOk) { continue }
 
             # Determine recommendation flag: arch-matched + non-generic
-            $isRecommended = ($mArch -eq $sArch) -and ([int]$match.matched_is_generic -eq 0)
+            $mIsGenericRaw = Get-Prop $match 'matched_is_generic' 0
+            $isRecommended = ($mArch -eq $sArch) -and ([int]$mIsGenericRaw -eq 0)
+
+            $mVersion = Get-Prop $match 'version' ''
 
             # ── Cross-reference against what's actually installed locally ──────
             $localInfo = $InstalledSnapshot[$id.ToUpper()]
@@ -745,26 +864,31 @@ function Search-Drivers {
                 $installStatus    = 'NEW'
                 $installedVersion = $null
             } else {
-                $cmp = Compare-DriverVersion $localInfo.Version $match.version
+                $cmp = Compare-DriverVersion $localInfo.Version $mVersion
                 $installStatus    = if     ($cmp -lt 0) { 'UPDATE' }
                                      elseif ($cmp -eq 0) { 'CURRENT' }
                                      else                { 'NEWER' }
                 $installedVersion = $localInfo.Version
             }
 
-            [void]$seen.Add($match.driver_id)
+            [void]$seen.Add($mDriverId)
+            $mProvider  = Get-Prop $match 'provider' ''
+            $mCategory  = Get-Prop $match 'category' ''
+            $mDispName  = Get-Prop $match 'display_name'
+            $mPrimUrl   = Get-Prop $match 'primary_url' ''
+            $mZipParts  = Get-Prop $match 'zip_parts' 1
             $results.Add([pscustomobject]@{
-                DriverId         = $match.driver_id
-                DisplayName      = if ($match.display_name) { $match.display_name } else { "$($match.provider) $($match.category)".Trim() }
-                Provider         = if ($match.provider)     { $match.provider }     else { '' }
-                Category         = if ($match.category)     { $match.category }     else { '' }
-                Version          = if ($match.version)      { $match.version }      else { '' }
-                Arch             = if ($match.arch)         { $match.arch }         else { 'any' }
-                PrimaryUrl       = if ($match.primary_url)  { $match.primary_url }  else { '' }
-                ZipParts         = if ($match.zip_parts)    { [int]$match.zip_parts } else { 1 }
+                DriverId         = $mDriverId
+                DisplayName      = if ($mDispName) { $mDispName } else { "$mProvider $mCategory".Trim() }
+                Provider         = $mProvider
+                Category         = $mCategory
+                Version          = $mVersion
+                Arch             = if ($mArchRaw) { $mArchRaw } else { 'any' }
+                PrimaryUrl       = $mPrimUrl
+                ZipParts         = [int]$mZipParts
                 MatchedHWID      = $id
-                SupersededBy     = $match.superseded_by
-                IsGeneric        = if ($match.matched_is_generic) { [int]$match.matched_is_generic } else { 0 }
+                SupersededBy     = Get-Prop $match 'superseded_by'
+                IsGeneric        = [int]$mIsGenericRaw
                 IsRecommended    = $isRecommended
                 InstallStatus    = $installStatus
                 InstalledVersion = $installedVersion
@@ -1732,24 +1856,16 @@ function Invoke-SearchAPI {
             $url     = "$Script:API_BASE/$encoded"
             $resp    = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
             $data    = $resp.Content | ConvertFrom-Json
-            if ($data.matches) {
-                foreach ($m in @($data.matches)) {
-                    if (-not $m.enabled) { continue }
-                    $archOk = (-not $Arch) -or ($m.arch -eq $Arch) -or ($m.arch -in @('any','noarch',''))
-                    $catOk  = (-not $Category) -or ($m.category -like "*$Category*")
+            $matches = Get-Prop $data 'matches'
+            if ($matches) {
+                foreach ($m in @($matches)) {
+                    if (-not (Get-Prop $m 'enabled')) { continue }
+                    $mArch = Get-Prop $m 'arch'
+                    $mCat  = Get-Prop $m 'category' ''
+                    $archOk = (-not $Arch) -or ($mArch -eq $Arch) -or ($mArch -in @('any','noarch',''))
+                    $catOk  = (-not $Category) -or ($mCat -like "*$Category*")
                     if ($archOk -and $catOk) {
-                        $results.Add([pscustomobject]@{
-                            DriverId    = if ($m.driver_id)    { $m.driver_id }    else { '' }
-                            DisplayName = if ($m.display_name) { $m.display_name } else { "$($m.provider) $($m.category)".Trim() }
-                            Provider    = if ($m.provider)     { $m.provider }     else { '' }
-                            Category    = if ($m.category)     { $m.category }     else { '' }
-                            Version     = if ($m.version)      { $m.version }      else { '' }
-                            Arch        = if ($m.arch)         { $m.arch }         else { 'any' }
-                            PrimaryUrl  = if ($m.primary_url)  { $m.primary_url }  else { '' }
-                            ZipParts    = if ($m.zip_parts)    { [int]$m.zip_parts } else { 1 }
-                            MatchedHWID = $Query.ToUpper()
-                            Score       = 100
-                        })
+                        $results.Add((ConvertTo-NormalizedDriverRecord -M $m -MatchedHWID $Query.ToUpper() -Score 100))
                     }
                 }
             }
@@ -1770,22 +1886,20 @@ function Invoke-SearchAPI {
         $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
         $data = $resp.Content | ConvertFrom-Json
 
-        $raw = if ($data.results) { @($data.results) } elseif ($data.matches) { @($data.matches) } else { @($data) }
+        $resultsField = Get-Prop $data 'results'
+        $matchesField = Get-Prop $data 'matches'
+        $raw = if ($resultsField) { @($resultsField) } elseif ($matchesField) { @($matchesField) } else { @($data) }
         foreach ($m in $raw) {
             if ($null -eq $m) { continue }
-            if ($m.enabled -eq $false) { continue }
-            $results.Add([pscustomobject]@{
-                DriverId    = if ($m.driver_id)    { $m.driver_id }    else { $m.id }
-                DisplayName = if ($m.display_name) { $m.display_name } elseif ($m.name) { $m.name } else { "$($m.provider) $($m.category)".Trim() }
-                Provider    = if ($m.provider)     { $m.provider }     else { '' }
-                Category    = if ($m.category)     { $m.category }     else { '' }
-                Version     = if ($m.version)      { $m.version }      else { '' }
-                Arch        = if ($m.arch)         { $m.arch }         else { 'any' }
-                PrimaryUrl  = if ($m.primary_url)  { $m.primary_url }  elseif ($m.url) { $m.url } else { '' }
-                ZipParts    = if ($m.zip_parts)    { [int]$m.zip_parts } else { 1 }
-                MatchedHWID = if ($m.hardware_id)  { $m.hardware_id }  else { '' }
-                Score       = if ($m.score)        { [int]$m.score }   else { 0 }
-            })
+            if ((Get-Prop $m 'enabled' $true) -eq $false) { continue }
+            $hwidTag = Get-Prop $m 'hardware_id' ''
+            $scoreRaw = Get-Prop $m 'score' 0
+            $score   = [int]$scoreRaw
+            $rec     = ConvertTo-NormalizedDriverRecord -M $m -MatchedHWID $hwidTag -Score $score
+            # PrimaryUrl fallback specific to the text-search shape (m.url, not just m.primary_url)
+            $altUrl = Get-Prop $m 'url'
+            if (-not $rec.PrimaryUrl -and $altUrl) { $rec.PrimaryUrl = $altUrl }
+            $results.Add($rec)
         }
     } catch {
         # Search endpoint not available — fall through to cache-based fallback below
@@ -1880,11 +1994,11 @@ function Show-SearchResultsTable {
     $rowNum = $startIdx
     foreach ($item in $pageItems) {
         $rowNum++
-        $rawName = if ($item.DisplayName) { $item.DisplayName } else { '—' }
-        $rawProv = if ($item.Provider)    { $item.Provider }    else { '—' }
-        $rawCat  = if ($item.Category)    { $item.Category }    else { '—' }
-        $rawVer  = if ($item.Version)     { $item.Version }     else { '—' }
-        $rawArch = if ($item.Arch)        { $item.Arch }        else { 'any' }
+        $rawName = Get-Prop $item 'DisplayName' '—'
+        $rawProv = Get-Prop $item 'Provider'    '—'
+        $rawCat  = Get-Prop $item 'Category'    '—'
+        $rawVer  = Get-Prop $item 'Version'     '—'
+        $rawArch = Get-Prop $item 'Arch'        'any'
 
         $name = if ($rawName.Length -gt $cName) { $rawName.Substring(0,$cName-1)+'…' } else { $rawName }
         $prov = if ($rawProv.Length -gt $cProv)  { $rawProv.Substring(0,$cProv-1)+'…'  } else { $rawProv }
@@ -1922,16 +2036,17 @@ function Get-SearchResultDetail {
     $inner = 70
     Write-Host ""
     Write-Host "  ╔══ DRIVER DETAILS $('═' * ($inner - 17))╗" -ForegroundColor DarkCyan
+    $zipParts = Get-Prop $Item 'ZipParts' 1
     $fields = [ordered]@{
-        'Name'        = $Item.DisplayName
-        'Provider'    = $Item.Provider
-        'Category'    = $Item.Category
-        'Version'     = $Item.Version
-        'Arch'        = $Item.Arch
-        'Driver ID'   = $Item.DriverId
-        'Matched HWID'= if ($Item.MatchedHWID) { $Item.MatchedHWID } else { 'N/A (keyword match)' }
-        'Parts'       = "$($Item.ZipParts) archive part(s)"
-        'Download URL'= $Item.PrimaryUrl
+        'Name'        = Get-Prop $Item 'DisplayName'
+        'Provider'    = Get-Prop $Item 'Provider'
+        'Category'    = Get-Prop $Item 'Category'
+        'Version'     = Get-Prop $Item 'Version'
+        'Arch'        = Get-Prop $Item 'Arch'
+        'Driver ID'   = Get-Prop $Item 'DriverId'
+        'Matched HWID'= Get-Prop $Item 'MatchedHWID' 'N/A (keyword match)'
+        'Parts'       = "$zipParts archive part(s)"
+        'Download URL'= Get-Prop $Item 'PrimaryUrl'
     }
     foreach ($kv in $fields.GetEnumerator()) {
         $label = $kv.Key.PadRight(14)
