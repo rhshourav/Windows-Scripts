@@ -218,6 +218,10 @@ function Get-OSInfo {
 function Request-Elevation {
     <#
     .SYNOPSIS Offers to relaunch the script as Administrator if not already elevated.
+    Works whether the script was invoked via a file path or via irm | iex.
+    Strategy: always write the running script to a temp .ps1 file, then
+    Start-Process -Verb RunAs that file so the elevated window has something
+    concrete to execute and stays open for user interaction.
     #>
     if (Test-Administrator) { return }
 
@@ -229,25 +233,45 @@ function Request-Elevation {
     $choice = Read-Input -Prompt 'Relaunch as Administrator?' -Default 'Y' `
         -Validator { param($v) $v -match '^[YyNn]$' } -ErrMsg 'Enter Y or N.'
 
-    if ($choice -match '^[Yy]') {
-        try {
-            $exe  = if ($PSCommandPath) { $PSCommandPath } else { '' }
-            if ($exe) {
-                Start-Process powershell -Verb RunAs `
-                    -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$exe`"" -ErrorAction Stop
-            } else {
-                # Invoked via irm | iex — re-download and run elevated
-                Start-Process powershell -Verb RunAs `
-                    -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"irm $Script:EXTRACTOR_URL | iex`"" `
-                    -ErrorAction Stop
-            }
-            exit 0
-        } catch {
-            Write-Warn "Auto-elevation failed. Continuing without admin — install step will be skipped."
-            Write-Log -Level WARN -Msg "Auto-elevation failed: $($_.Exception.Message)"
-        }
-    } else {
+    if ($choice -notmatch '^[Yy]') {
         Write-Warn "Continuing without elevation — driver install will be skipped (download still works)."
+        return
+    }
+
+    try {
+        # Determine the script source path
+        $scriptPath = $PSCommandPath   # non-empty when run as a .ps1 file
+
+        if (-not $scriptPath) {
+            # Invoked via irm | iex — $PSCommandPath is empty.
+            # Download the script to a temp file so the elevated process has a
+            # real file to execute (avoids the flash-and-close problem).
+            $scriptPath = Join-Path $env:TEMP 'DriverDex-elevated.ps1'
+            $installerUrl = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/driverdex/driverrun.ps1'
+            Write-Step "Saving script for elevated relaunch..."
+            try {
+                Invoke-WebRequest -Uri $installerUrl -OutFile $scriptPath `
+                    -UseBasicParsing -ErrorAction Stop
+                Write-OK "Script saved to temp file."
+            } catch {
+                Write-Warn "Could not save script for relaunch: $($_.Exception.Message)"
+                Write-Warn "Continuing without elevation — driver install will be skipped."
+                Write-Log -Level WARN -Msg "Elevation relaunch download failed: $($_.Exception.Message)"
+                return
+            }
+        }
+
+        Write-Step "Relaunching as Administrator..."
+        Start-Process powershell.exe -Verb RunAs `
+            -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"" `
+            -ErrorAction Stop
+
+        # Original (non-elevated) process exits — elevated window owns the session.
+        exit 0
+
+    } catch {
+        Write-Warn "Auto-elevation failed. Continuing without admin — install step will be skipped."
+        Write-Log -Level WARN -Msg "Auto-elevation failed: $($_.Exception.Message)"
     }
 }
 
