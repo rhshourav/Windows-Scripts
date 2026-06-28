@@ -657,15 +657,15 @@ function Search-Drivers {
             $results.Add([pscustomobject]@{
                 DriverId         = $match.driver_id
                 DisplayName      = if ($match.display_name) { $match.display_name } else { "$($match.provider) $($match.category)".Trim() }
-                Provider         = $match.provider
-                Category         = $match.category
-                Version          = $match.version
-                Arch             = $match.arch
-                PrimaryUrl       = $match.primary_url
-                ZipParts         = [int]$match.zip_parts
+                Provider         = if ($match.provider)     { $match.provider }     else { '' }
+                Category         = if ($match.category)     { $match.category }     else { '' }
+                Version          = if ($match.version)      { $match.version }      else { '' }
+                Arch             = if ($match.arch)         { $match.arch }         else { 'any' }
+                PrimaryUrl       = if ($match.primary_url)  { $match.primary_url }  else { '' }
+                ZipParts         = if ($match.zip_parts)    { [int]$match.zip_parts } else { 1 }
                 MatchedHWID      = $id
                 SupersededBy     = $match.superseded_by
-                IsGeneric        = [int]$match.matched_is_generic
+                IsGeneric        = if ($match.matched_is_generic) { [int]$match.matched_is_generic } else { 0 }
                 IsRecommended    = $isRecommended
                 InstallStatus    = $installStatus
                 InstalledVersion = $installedVersion
@@ -716,8 +716,9 @@ function Show-DriverTable {
         $cls  = Get-DriverClassification -Driver $d -ProblemHWIDs $ProblemHWIDs
 
         $dName = if ($d.DisplayName) { $d.DisplayName } else { '—' }
+        $dProv = if ($d.Provider)    { $d.Provider }    else { '—' }
         $name = if ($dName.Length -gt $colName) { $dName.Substring(0,$colName-1)+'…' } else { $dName }
-        $prov = if ($d.Provider.Length -gt $colProv)    { $d.Provider.Substring(0,$colProv-1)+'…' }    else { $d.Provider }
+        $prov = if ($dProv.Length -gt $colProv) { $dProv.Substring(0,$colProv-1)+'…' } else { $dProv }
         $inst = if ($d.InstalledVersion) { $d.InstalledVersion } else { '—' }
         if ($inst.Length -gt $colInst) { $inst = $inst.Substring(0,$colInst-1)+'…' }
 
@@ -1633,14 +1634,14 @@ function Invoke-SearchAPI {
                     $catOk  = (-not $Category) -or ($m.category -like "*$Category*")
                     if ($archOk -and $catOk) {
                         $results.Add([pscustomobject]@{
-                            DriverId    = $m.driver_id
+                            DriverId    = if ($m.driver_id)    { $m.driver_id }    else { '' }
                             DisplayName = if ($m.display_name) { $m.display_name } else { "$($m.provider) $($m.category)".Trim() }
-                            Provider    = $m.provider
-                            Category    = $m.category
-                            Version     = $m.version
-                            Arch        = $m.arch
-                            PrimaryUrl  = $m.primary_url
-                            ZipParts    = [int]$m.zip_parts
+                            Provider    = if ($m.provider)     { $m.provider }     else { '' }
+                            Category    = if ($m.category)     { $m.category }     else { '' }
+                            Version     = if ($m.version)      { $m.version }      else { '' }
+                            Arch        = if ($m.arch)         { $m.arch }         else { 'any' }
+                            PrimaryUrl  = if ($m.primary_url)  { $m.primary_url }  else { '' }
+                            ZipParts    = if ($m.zip_parts)    { [int]$m.zip_parts } else { 1 }
                             MatchedHWID = $Query.ToUpper()
                             Score       = 100
                         })
@@ -1670,20 +1671,78 @@ function Invoke-SearchAPI {
             if ($m.enabled -eq $false) { continue }
             $results.Add([pscustomobject]@{
                 DriverId    = if ($m.driver_id)    { $m.driver_id }    else { $m.id }
-                DisplayName = if ($m.display_name) { $m.display_name } else { $m.name }
+                DisplayName = if ($m.display_name) { $m.display_name } elseif ($m.name) { $m.name } else { "$($m.provider) $($m.category)".Trim() }
                 Provider    = if ($m.provider)     { $m.provider }     else { '' }
                 Category    = if ($m.category)     { $m.category }     else { '' }
                 Version     = if ($m.version)      { $m.version }      else { '' }
                 Arch        = if ($m.arch)         { $m.arch }         else { 'any' }
-                PrimaryUrl  = if ($m.primary_url)  { $m.primary_url }  else { $m.url }
+                PrimaryUrl  = if ($m.primary_url)  { $m.primary_url }  elseif ($m.url) { $m.url } else { '' }
                 ZipParts    = if ($m.zip_parts)    { [int]$m.zip_parts } else { 1 }
                 MatchedHWID = if ($m.hardware_id)  { $m.hardware_id }  else { '' }
                 Score       = if ($m.score)        { [int]$m.score }   else { 0 }
             })
         }
     } catch {
-        # Search endpoint not available — return empty array, caller shows message
-        Write-Host "  ◈ Search endpoint unavailable — no results returned." -ForegroundColor DarkGray
+        # Search endpoint not available — silently fall through to HWID scan fallback below
+        Write-Host "  ◈ Search endpoint unavailable — scanning local hardware IDs..." -ForegroundColor DarkGray
+    }
+
+    # ── HWID scan fallback: if search endpoint returned nothing, query every
+    #    local HWID and keyword-filter the display_name / provider / category ─
+    if ($results.Count -eq 0) {
+        $lcQuery = $Query.ToLower()
+        $hwids   = $null
+        try {
+            $hwids = Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop |
+                     Where-Object { $_.HardwareID -and @($_.HardwareID).Count -gt 0 } |
+                     ForEach-Object { $_.HardwareID } | Sort-Object -Unique
+        } catch {
+            try {
+                $hwids = Get-WmiObject -Class Win32_PnPEntity -ErrorAction SilentlyContinue |
+                         Where-Object { $_.HardwareID } |
+                         ForEach-Object { $_.HardwareID } | Sort-Object -Unique
+            } catch { $hwids = @() }
+        }
+        $seen2 = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $scanned = 0
+        foreach ($hwid in @($hwids)) {
+            $scanned++
+            if ($scanned % 30 -eq 0) {
+                Write-Host "`r  ◈ Scanning HWIDs... $scanned checked, $($results.Count) match(es) so far  " `
+                           -NoNewline -ForegroundColor DarkGray
+            }
+            $apiResult = Invoke-ApiWithRetry -HWID $hwid
+            if (-not $apiResult -or -not $apiResult.matches) { continue }
+            foreach ($m in @($apiResult.matches)) {
+                if (-not $m.enabled)          { continue }
+                if ($seen2.Contains($m.driver_id)) { continue }
+                $archOk = (-not $Arch) -or ($m.arch -eq $Arch) -or ($m.arch -in @('any','noarch',''))
+                $catOk  = (-not $Category) -or ($m.category -like "*$Category*")
+                if (-not $archOk -or -not $catOk) { continue }
+                # Keyword match against name / provider / category
+                $dn   = if ($m.display_name) { $m.display_name } else { '' }
+                $prov = if ($m.provider)     { $m.provider }     else { '' }
+                $cat  = if ($m.category)     { $m.category }     else { '' }
+                $hit  = ($dn   -like "*$Query*") -or
+                        ($prov -like "*$Query*") -or
+                        ($cat  -like "*$Query*")
+                if (-not $hit) { continue }
+                [void]$seen2.Add($m.driver_id)
+                $results.Add([pscustomobject]@{
+                    DriverId    = if ($m.driver_id)    { $m.driver_id }    else { '' }
+                    DisplayName = if ($dn)             { $dn }             else { "$prov $cat".Trim() }
+                    Provider    = $prov
+                    Category    = $cat
+                    Version     = if ($m.version)      { $m.version }      else { '' }
+                    Arch        = if ($m.arch)         { $m.arch }         else { 'any' }
+                    PrimaryUrl  = if ($m.primary_url)  { $m.primary_url }  else { '' }
+                    ZipParts    = if ($m.zip_parts)    { [int]$m.zip_parts } else { 1 }
+                    MatchedHWID = $hwid
+                    Score       = 50
+                })
+            }
+        }
+        Write-Host "`r$(' ' * 72)`r" -NoNewline   # clear progress line
     }
 
     return , [object[]]$results.ToArray()
@@ -1692,31 +1751,43 @@ function Invoke-SearchAPI {
 function Show-SearchResultsTable {
     <#
     .SYNOPSIS Renders a paginated, indexed results table for the search engine.
+             All string columns are null-guarded before any .Length/.Substring call.
     .PARAMETER Results     Array of search result objects
     .PARAMETER Page        Current page (1-based)
     .PARAMETER PageSize    Results per page (default 10)
     #>
     param([object[]]$Results, [int]$Page = 1, [int]$PageSize = 10)
 
-    $total     = @($Results).Count
-    $totalPages= [Math]::Ceiling($total / $PageSize)
-    if ($Page -lt 1) { $Page = 1 }
+    $total      = @($Results).Count
+    if ($total -eq 0) {
+        Write-Warn "No results to display."
+        return [pscustomobject]@{ Page = 1; TotalPages = 0; StartIdx = 0 }
+    }
+
+    $totalPages = [Math]::Ceiling($total / $PageSize)
+    if ($Page -lt 1)           { $Page = 1 }
     if ($Page -gt $totalPages) { $Page = $totalPages }
 
     $startIdx  = ($Page - 1) * $PageSize
     $endIdx    = [Math]::Min($startIdx + $PageSize - 1, $total - 1)
     $pageItems = @($Results[$startIdx..$endIdx])
+    $showFrom  = $startIdx + 1
+    $showTo    = $endIdx   + 1
 
-    # ── Header ─────────────────────────────────────────────────────────────
+    # ── Column widths ───────────────────────────────────────────────────────
+    $cN = 3; $cName = 26; $cProv = 16; $cCat = 11; $cVer = 14; $cArch = 5
+
+    # ── Box header ─────────────────────────────────────────────────────────
+    $boxW  = 79   # total inner width of box
+    $left  = "  SEARCH RESULTS   $showFrom–$showTo of $total   Page $Page / $totalPages"
+    $pad   = [Math]::Max(0, $boxW - $left.Length - 1)
     Write-Host ""
-    Write-Host "  ┌─────────────────────────────────────────────────────────────────────────────┐" -ForegroundColor DarkCyan
-    Write-Host "  │  SEARCH RESULTS   $total result(s) found   Page $Page / $totalPages$((' ' * 30).Substring(0, [Math]::Max(0, 30 - "$total result(s) found   Page $Page / $totalPages".Length)))│" -ForegroundColor Cyan
-    Write-Host "  └─────────────────────────────────────────────────────────────────────────────┘" -ForegroundColor DarkCyan
+    Write-Host "  ┌$('─' * $boxW)┐" -ForegroundColor DarkCyan
+    Write-Host "  │$left$(' ' * $pad)│" -ForegroundColor Cyan
+    Write-Host "  └$('─' * $boxW)┘" -ForegroundColor DarkCyan
     Write-Host ""
 
-    # Column widths
-    $cN  = 3; $cName = 26; $cProv = 16; $cCat = 11; $cVer = 14; $cArch = 5
-
+    # ── Column header ───────────────────────────────────────────────────────
     $hdr = "  {0,-$cN} │ {1,-$cName} │ {2,-$cProv} │ {3,-$cCat} │ {4,-$cVer} │ {5,-$cArch}" `
            -f '#', 'Driver Name', 'Provider', 'Category', 'Version', 'Arch'
     Write-Host $hdr -ForegroundColor DarkGray
@@ -1724,25 +1795,38 @@ function Show-SearchResultsTable {
            -f ('─'*$cN),('─'*$cName),('─'*$cProv),('─'*$cCat),('─'*$cVer),('─'*$cArch)
     Write-Host $sep -ForegroundColor DarkGray
 
+    # ── Rows (null-guarded) ─────────────────────────────────────────────────
     $rowNum = $startIdx
     foreach ($item in $pageItems) {
         $rowNum++
-        $iName = if ($item.DisplayName) { $item.DisplayName } else { '—' }
-        $name = if ($iName.Length -gt $cName) { $iName.Substring(0,$cName-1)+'…' } else { $iName }
-        $prov = if ($item.Provider.Length   -gt $cProv)  { $item.Provider.Substring(0,$cProv-1)+'…'   } else { $item.Provider }
-        $cat  = if ($item.Category.Length   -gt $cCat)   { $item.Category.Substring(0,$cCat-1)+'…'    } else { $item.Category }
-        $ver  = if ($item.Version -and $item.Version.Length -gt $cVer) { $item.Version.Substring(0,$cVer-1)+'…' } else { if ($item.Version) { $item.Version } else { '—' } }
-        $arch = if ($item.Arch) { $item.Arch } else { 'any' }
+        $rawName = if ($item.DisplayName) { $item.DisplayName } else { '—' }
+        $rawProv = if ($item.Provider)    { $item.Provider }    else { '—' }
+        $rawCat  = if ($item.Category)    { $item.Category }    else { '—' }
+        $rawVer  = if ($item.Version)     { $item.Version }     else { '—' }
+        $rawArch = if ($item.Arch)        { $item.Arch }        else { 'any' }
+
+        $name = if ($rawName.Length -gt $cName) { $rawName.Substring(0,$cName-1)+'…' } else { $rawName }
+        $prov = if ($rawProv.Length -gt $cProv)  { $rawProv.Substring(0,$cProv-1)+'…'  } else { $rawProv }
+        $cat  = if ($rawCat.Length  -gt $cCat)   { $rawCat.Substring(0,$cCat-1)+'…'    } else { $rawCat  }
+        $ver  = if ($rawVer.Length  -gt $cVer)   { $rawVer.Substring(0,$cVer-1)+'…'    } else { $rawVer  }
 
         $row = "  {0,-$cN} │ {1,-$cName} │ {2,-$cProv} │ {3,-$cCat} │ {4,-$cVer} │ {5,-$cArch}" `
-               -f $rowNum, $name, $prov, $cat, $ver, $arch
+               -f $rowNum, $name, $prov, $cat, $ver, $rawArch
         Write-Host $row -ForegroundColor White
     }
 
+    # ── Pagination nav bar ──────────────────────────────────────────────────
     Write-Host ""
     if ($totalPages -gt 1) {
-        Write-Host "  Page $Page of $totalPages  ·  n=next  p=prev  g<N>=go to page" -ForegroundColor DarkGray
+        $prevStr = if ($Page -gt 1)           { "[p] ◄ Prev  " } else { "             " }
+        $nextStr = if ($Page -lt $totalPages) { "  Next ► [n]" } else { "            " }
+        $pageStr = "  Page $Page / $totalPages"
+        $jumpStr = "  · g<N> jump · n/p page"
+        Write-Host "  $prevStr$pageStr$nextStr" -ForegroundColor DarkCyan
+        Write-Host "  $jumpStr" -ForegroundColor DarkGray
     }
+    Write-Host "  d<N>=download  i<N>=install  det<N>=details  q=menu" -ForegroundColor DarkGray
+    Write-Host ""
 
     return [pscustomobject]@{ Page = $Page; TotalPages = $totalPages; StartIdx = $startIdx }
 }
