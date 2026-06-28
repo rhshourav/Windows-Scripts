@@ -1,485 +1,938 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    DriverDex — Automatic Hardware Driver Detector & Installer
+    DriverDex — Automatic Hardware Driver Detector & Installer  v2.1.0
     Run via: irm https://your-url/DriverDex-Installer.ps1 | iex
 
 .DESCRIPTION
-    Scans all hardware devices, queries the DriverDex API for matching drivers,
-    lets you review & select which to install, then downloads, verifies (SHA256),
-    extracts, and installs them — all in one script.
+    Scans all PnP hardware devices, queries the DriverDex REST API for matching
+    drivers, lets the user review and select packages, then downloads (with
+    real-time progress + SHA-256 verification), extracts, and installs via
+    pnputil — all in a single self-contained file. Git LFS pointers are
+    resolved transparently. Multi-part archives are reassembled automatically.
 
 .NOTES
-    Compatible with: Windows 7 SP1, 8.1, 10, 11 (x86 & x64)
-    Requires: PowerShell 5.1+
-    Elevation: Recommended (auto-elevates if possible)
-    Author: DriverDex — https://github.com/rhshourav/driverdex
+    Compatible : Windows 7 SP1 · 8.1 · 10 · 11  (x86 & x64)
+    Requires   : PowerShell 5.1+
+    Elevation  : Recommended (auto-elevates on request)
+    Author     : DriverDex — https://github.com/rhshourav/driverdex
 #>
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$ProgressPreference    = 'SilentlyContinue'   # Speeds up Invoke-WebRequest dramatically
+$ProgressPreference    = 'SilentlyContinue'   # Suppress PS built-in progress bars
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
 #  CONSTANTS
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+$Script:VERSION       = '2.1.0'
 $Script:API_BASE      = 'https://driverdex-check.driverdex.workers.dev/api/hwid'
 $Script:LFS_BATCH_URL = 'https://github.com/rhshourav/driverdex.git/info/lfs/objects/batch'
 $Script:EXTRACTOR_URL = 'https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/extractor/extractor.exe'
-$Script:BANNER_COLOR  = 'Cyan'
-$Script:VERSION       = '2.0.0'
+$Script:GITHUB_HOST   = 'github.com'
+$Script:API_HOST      = 'driverdex-check.driverdex.workers.dev'
+$Script:LOG_PATH      = Join-Path $env:TEMP "DriverDex-$(Get-Date -Format 'yyyyMMdd').log"
+$Script:scratch       = $null   # set in Main, cleaned up on exit
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  COLOUR PALETTE HELPERS  (works on PS 5.1 through 7.x)
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  TLS BOOTSTRAP  (required for Windows 7/8 compatibility)
+# ═══════════════════════════════════════════════════════════════════════════════
+try {
+    [Net.ServicePointManager]::SecurityProtocol =
+        [Net.SecurityProtocolType]::Tls12 -bor
+        [Net.SecurityProtocolType]::Tls13
+} catch {
+    [Net.ServicePointManager]::SecurityProtocol =
+        [Net.SecurityProtocolType]::Tls12
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  LOGGING
+# ═══════════════════════════════════════════════════════════════════════════════
+function Write-Log {
+    <#
+    .SYNOPSIS Appends a timestamped line to the session log file.
+    .PARAMETER Level  Severity label: INFO / WARN / ERROR
+    .PARAMETER Msg    Message text
+    .PARAMETER Err    Optional ErrorRecord for stack-trace capture
+    #>
+    param([string]$Level, [string]$Msg, [System.Management.Automation.ErrorRecord]$Err = $null)
+    $ts   = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $line = "[$ts] [$Level] $Msg"
+    try { Add-Content -LiteralPath $Script:LOG_PATH -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue } catch {}
+    if ($Err) {
+        try { Add-Content -LiteralPath $Script:LOG_PATH -Value $Err.ScriptStackTrace -Encoding UTF8 -ErrorAction SilentlyContinue } catch {}
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SEMANTIC OUTPUT HELPERS  (ALL console output routes through these)
+# ═══════════════════════════════════════════════════════════════════════════════
+function Write-Step    { param([string]$Msg) Write-Host "  » $Msg"       -ForegroundColor White }
+function Write-OK      { param([string]$Msg) Write-Host "  ✔ $Msg"       -ForegroundColor Green }
+function Write-Warn    { param([string]$Msg) Write-Host "  ⚠ $Msg"       -ForegroundColor Yellow; Write-Log -Level WARN  -Msg $Msg }
+function Write-Info    { param([string]$Msg) Write-Host "    $Msg"        -ForegroundColor DarkGray }
+function Write-Sub     { param([string]$Msg) Write-Host "    ↓ $Msg"     -ForegroundColor Cyan }
+function Write-Accent  { param([string]$Msg) Write-Host "  $Msg"         -ForegroundColor Magenta }
+function Write-Divider { Write-Host "  $('─' * 60)"                       -ForegroundColor DarkGray }
+
+function Write-Err {
+    <#
+    .SYNOPSIS Renders a structured error message. Never exposes raw exceptions.
+    .PARAMETER What   Plain-English description of what failed
+    .PARAMETER Reason Technical detail (no raw exception text)
+    .PARAMETER Fix    Actionable next step for the user
+    .PARAMETER Err    Optional ErrorRecord for log capture
+    #>
+    param(
+        [string]$What,
+        [string]$Reason = '',
+        [string]$Fix    = '',
+        [System.Management.Automation.ErrorRecord]$Err = $null
+    )
+    Write-Host "  ✘ $What"                               -ForegroundColor Red
+    if ($Reason) { Write-Host "    Reason : $Reason"    -ForegroundColor DarkGray }
+    if ($Fix)    { Write-Host "    Fix    : $Fix"        -ForegroundColor DarkGray }
+    Write-Host   "    Log    : $Script:LOG_PATH"         -ForegroundColor DarkGray
+    Write-Log -Level ERROR -Msg "$What | $Reason" -Err $Err
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ASCII BANNER
+# ═══════════════════════════════════════════════════════════════════════════════
 function Write-Header {
-    $w = 64
-    $line = '═' * $w
+    <#
+    .SYNOPSIS Renders the DriverDex branded header using box-drawing characters.
+    #>
+    $w = 66
+    $top = '╔' + ('═' * ($w - 2)) + '╗'
+    $bot = '╚' + ('═' * ($w - 2)) + '╝'
+    $pad = { param($s, $n) $s + (' ' * [Math]::Max(0, $n - $s.Length)) }
+
     Write-Host ""
-    Write-Host "  $line"  -ForegroundColor DarkCyan
-    Write-Host "  ║$((' ' * ($w - 2)))║"  -ForegroundColor DarkCyan
-    Write-Host "  ║   ██████╗ ██████╗ ██╗██╗   ██╗███████╗██████╗ ███████╗██╗  ██╗   ║" -ForegroundColor Cyan
-    Write-Host "  ║   ██╔══██╗██╔══██╗██║██║   ██║██╔════╝██╔══██╗██╔════╝╚██╗██╔╝   ║" -ForegroundColor Cyan
-    Write-Host "  ║   ██║  ██║██████╔╝██║╚██╗ ██╔╝█████╗  ██████╔╝█████╗   ╚███╔╝    ║" -ForegroundColor Cyan
-    Write-Host "  ║   ██║  ██║██╔══██╗██║ ╚████╔╝ ██╔══╝  ██╔══██╗██╔══╝   ██╔██╗    ║" -ForegroundColor Cyan
-    Write-Host "  ║   ██████╔╝██║  ██║██║  ╚██╔╝  ███████╗██║  ██║███████╗██╔╝ ██╗   ║" -ForegroundColor Cyan
-    Write-Host "  ║   ╚═════╝ ╚═╝  ╚═╝╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝  ║" -ForegroundColor Cyan
-    Write-Host "  ║$((' ' * ($w - 2)))║"  -ForegroundColor DarkCyan
-    Write-Host "  ║   Automatic Driver Detector & Installer  v$Script:VERSION$((' ' * (29 - $Script:VERSION.Length)))║" -ForegroundColor White
-    Write-Host "  ║   https://github.com/rhshourav/driverdex$((' ' * 20))║" -ForegroundColor DarkGray
-    Write-Host "  ║$((' ' * ($w - 2)))║"  -ForegroundColor DarkCyan
-    Write-Host "  $line"  -ForegroundColor DarkCyan
+    Write-Host "  $top"  -ForegroundColor DarkCyan
+    Write-Host "  ║$(' ' * ($w - 2))║"  -ForegroundColor DarkCyan
+    # ASCII art lines (Cyan for logo)
+    foreach ($row in @(
+        ' ██████╗ ██████╗ ██╗██╗   ██╗███████╗██████╗ ██████╗ ███████╗██╗  ██╗ ',
+        ' ██╔══██╗██╔══██╗██║╚██╗ ██╔╝██╔════╝██╔══██╗██╔══██╗██╔════╝╚██╗██╔╝ ',
+        ' ██║  ██║██████╔╝██║ ╚████╔╝ █████╗  ██████╔╝██║  ██║█████╗   ╚███╔╝  ',
+        ' ██║  ██║██╔══██╗██║  ╚██╔╝  ██╔══╝  ██╔══██╗██║  ██║██╔══╝   ██╔██╗  ',
+        ' ██████╔╝██║  ██║██║   ██║   ███████╗██║  ██║██████╔╝███████╗██╔╝ ██╗  ',
+        ' ╚═════╝ ╚═╝  ╚═╝╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═╝ '
+    )) {
+        $padded = & $pad $row ($w - 2)
+        Write-Host "  ║$padded║" -ForegroundColor Cyan
+    }
+    Write-Host "  ║$(' ' * ($w - 2))║"  -ForegroundColor DarkCyan
+    $meta1 = & $pad "  Automatic Driver Detector & Installer  v$Script:VERSION" ($w - 2)
+    Write-Host "  ║$meta1║"  -ForegroundColor White
+    $meta2 = & $pad "  Tagline: Hardware confidence, one script away." ($w - 2)
+    Write-Host "  ║$meta2║"  -ForegroundColor DarkGray
+    $meta3 = & $pad "  https://github.com/rhshourav/driverdex" ($w - 2)
+    Write-Host "  ║$meta3║"  -ForegroundColor DarkGray
+    Write-Host "  ║$(' ' * ($w - 2))║"  -ForegroundColor DarkCyan
+    Write-Host "  $bot"  -ForegroundColor DarkCyan
     Write-Host ""
 }
 
-function Write-Step   { param([string]$Msg) Write-Host "  » $Msg" -ForegroundColor White }
-function Write-OK     { param([string]$Msg) Write-Host "  ✔ $Msg" -ForegroundColor Green }
-function Write-Warn   { param([string]$Msg) Write-Host "  ⚠ $Msg" -ForegroundColor Yellow }
-function Write-Err    { param([string]$Msg) Write-Host "  ✘ $Msg" -ForegroundColor Red }
-function Write-Info   { param([string]$Msg) Write-Host "    $Msg" -ForegroundColor DarkGray }
-function Write-Divider { Write-Host "  $('─' * 60)" -ForegroundColor DarkGray }
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SPINNER  (animated single-line wait indicator)
+# ═══════════════════════════════════════════════════════════════════════════════
+$Script:SpinnerFrames = [char[]]@(0x280B, 0x2819, 0x2839, 0x2838, 0x283C,
+                                   0x2834, 0x2826, 0x2827, 0x2807, 0x280F)
+$Script:SpinIdx = 0
 
-# ─────────────────────────────────────────────────────────────────────────────
+function Show-Spinner {
+    <#
+    .SYNOPSIS Renders one spinner frame on the current line (no newline).
+    .PARAMETER Label  Text to show beside the spinner
+    #>
+    param([string]$Label)
+    $f = $Script:SpinnerFrames[$Script:SpinIdx % $Script:SpinnerFrames.Count]
+    $Script:SpinIdx++
+    Write-Host "`r  $f $Label   " -NoNewline -ForegroundColor Cyan
+}
+
+function Clear-SpinnerLine {
+    Write-Host "`r$(' ' * 72)`r" -NoNewline
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  VALIDATED INPUT  (single function for ALL user prompts)
+# ═══════════════════════════════════════════════════════════════════════════════
+function Read-Input {
+    <#
+    .SYNOPSIS Unified prompt with default value and optional validator.
+    .PARAMETER Prompt    Display text
+    .PARAMETER Default   Value used when user presses Enter with no input
+    .PARAMETER Validator ScriptBlock returning $true/$false; receives typed value
+    .PARAMETER ErrMsg    Inline error shown on validation failure
+    #>
+    param(
+        [string]$Prompt,
+        [string]$Default   = '',
+        [scriptblock]$Validator = $null,
+        [string]$ErrMsg    = 'Invalid input. Please try again.'
+    )
+    $attempts = 0
+    while ($attempts -lt 3) {
+        Write-Host "  ▸ $Prompt " -ForegroundColor White -NoNewline
+        if ($Default) { Write-Host "[default: $Default] " -ForegroundColor DarkGray -NoNewline }
+        Write-Host "> " -ForegroundColor DarkCyan -NoNewline
+        $val = $Host.UI.ReadLine()
+        if ([string]::IsNullOrWhiteSpace($val)) { $val = $Default }
+        $val = $val.Trim()
+        if (-not $Validator -or (& $Validator $val)) { return $val }
+        Write-Host "  ✘ $ErrMsg" -ForegroundColor Red
+        $attempts++
+    }
+    Write-Warn "Using default: $Default"
+    return $Default
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  ELEVATION & OS DETECTION
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
 function Test-Administrator {
+    <#.SYNOPSIS Returns $true if the current process is elevated.#>
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
-    ([Security.Principal.WindowsPrincipal]$id).IsInRole(
+    return ([Security.Principal.WindowsPrincipal]$id).IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
 function Get-OSInfo {
-    $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction SilentlyContinue
-    if (-not $os) {
-        # Fallback for older PS / WMI
-        $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
-    }
-    $arch = if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
+    <#.SYNOPSIS Returns a PSObject with OS caption, build, arch, and PS version.#>
+    $os = $null
+    try   { $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop }
+    catch { try { $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue } catch {} }
     [pscustomobject]@{
-        Caption   = if ($os) { $os.Caption }         else { 'Unknown Windows' }
-        Build     = if ($os) { $os.BuildNumber }     else { '0' }
-        Version   = if ($os) { $os.Version }         else { '0.0' }
-        Arch      = $arch
+        Caption   = if ($os) { $os.Caption }     else { 'Unknown Windows' }
+        Build     = if ($os) { $os.BuildNumber } else { '0' }
+        Version   = if ($os) { $os.Version }     else { '0.0' }
+        Arch      = if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
         PSVersion = $PSVersionTable.PSVersion.ToString()
     }
 }
 
 function Request-Elevation {
+    <#
+    .SYNOPSIS Offers to relaunch the script as Administrator if not already elevated.
+    #>
     if (Test-Administrator) { return }
+
     Write-Warn 'Not running as Administrator.'
-    Write-Warn 'Driver installation (pnputil) requires elevation.'
+    Write-Info 'Steps requiring elevation: driver install via pnputil.'
+    Write-Info 'Without elevation: files are saved but drivers will NOT be installed.'
     Write-Host ""
-    $choice = Read-HostDefault "Attempt to relaunch as Administrator? [Y/n]" 'Y'
+
+    $choice = Read-Input -Prompt 'Relaunch as Administrator?' -Default 'Y' `
+        -Validator { param($v) $v -match '^[YyNn]$' } -ErrMsg 'Enter Y or N.'
+
     if ($choice -match '^[Yy]') {
         try {
-            $psArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
-            Start-Process powershell -Verb RunAs -ArgumentList $psArgs -ErrorAction Stop
+            $exe  = if ($PSCommandPath) { $PSCommandPath } else { '' }
+            if ($exe) {
+                Start-Process powershell -Verb RunAs `
+                    -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$exe`"" -ErrorAction Stop
+            } else {
+                # Invoked via irm | iex — re-download and run elevated
+                Start-Process powershell -Verb RunAs `
+                    -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"irm $Script:EXTRACTOR_URL | iex`"" `
+                    -ErrorAction Stop
+            }
             exit 0
         } catch {
             Write-Warn "Auto-elevation failed. Continuing without admin — install step will be skipped."
+            Write-Log -Level WARN -Msg "Auto-elevation failed: $($_.Exception.Message)"
         }
     } else {
-        Write-Warn "Continuing without elevation — driver install will be skipped."
+        Write-Warn "Continuing without elevation — driver install will be skipped (download still works)."
     }
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  SMART Read-Host WITH DEFAULT VALUE
-# ─────────────────────────────────────────────────────────────────────────────
-function Read-HostDefault {
-    param(
-        [string]$Prompt,
-        [string]$Default
-    )
-    $display = if ($Default) { "$Prompt (default: $Default)" } else { $Prompt }
-    Write-Host "  $display" -ForegroundColor White -NoNewline
-    Write-Host " > " -ForegroundColor DarkCyan -NoNewline
-    $input = $Host.UI.ReadLine()
-    if ([string]::IsNullOrWhiteSpace($input)) { return $Default }
-    return $input.Trim()
+# ═══════════════════════════════════════════════════════════════════════════════
+#  NETWORK CHECK
+# ═══════════════════════════════════════════════════════════════════════════════
+function Test-NetworkConnectivity {
+    <#
+    .SYNOPSIS DNS-resolves known hosts to verify internet access before API calls.
+    Returns $true if both resolve successfully.
+    #>
+    $Script:SpinIdx = 0
+    $ok = $true
+    foreach ($host_ in @($Script:GITHUB_HOST, $Script:API_HOST)) {
+        Show-Spinner -Label "Checking connectivity to $host_..."
+        try {
+            [System.Net.Dns]::GetHostEntry($host_) | Out-Null
+        } catch {
+            Clear-SpinnerLine
+            Write-Err -What "No internet detected — cannot reach $host_." `
+                      -Reason "DNS resolution failed for $host_." `
+                      -Fix    "Check your network connection and re-run the script."
+            $ok = $false
+            break
+        }
+    }
+    Clear-SpinnerLine
+    if ($ok) { Write-OK "Network connectivity confirmed." }
+    return $ok
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
 #  HARDWARE ENUMERATION
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
 function Get-AllHardwareIDs {
-    Write-Step "Enumerating hardware devices..."
+    <#
+    .SYNOPSIS Collects every unique hardware ID from PnP devices.
+    Returns a string[] of de-duplicated, upper-cased HWID strings.
+    #>
+    Write-Step "Scanning hardware..."
     $hwids = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::OrdinalIgnoreCase)
 
-    # Method 1: Win32_PnPEntity (broadest, works PS5.1+)
+    # Primary: CIM Win32_PnPEntity (PS 5.1+)
+    $devices = $null
     try {
         $devices = Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop |
                    Where-Object { $_.HardwareID -and $_.HardwareID.Count -gt 0 }
+    } catch {
+        Write-Warn "CIM query failed — falling back to WMI (Windows 7 mode)..."
+        Write-Log -Level WARN -Msg "CIM fallback: $($_.Exception.Message)"
+        try {
+            $devices = Get-WmiObject -Class Win32_PnPEntity -ErrorAction SilentlyContinue |
+                       Where-Object { $_.HardwareID }
+        } catch {
+            Write-Log -Level ERROR -Msg "WMI also failed: $($_.Exception.Message)" -Err $_
+        }
+    }
+
+    if ($devices) {
+        $i = 0
         foreach ($dev in $devices) {
+            $i++
+            if ($i % 50 -eq 0) {
+                Write-Host "`r    Scanning... $($hwids.Count) IDs found so far" -NoNewline -ForegroundColor DarkGray
+            }
             foreach ($id in $dev.HardwareID) {
                 if ($id -match '^(PCI|USB|ACPI|HDAUDIO|HID|ROOT|SCSI|DISPLAY|IDE|STORAGE)\\') {
                     [void]$hwids.Add($id.ToUpper())
                 }
             }
         }
-        Write-Info "WMI/CIM: found $($hwids.Count) unique hardware IDs"
-    } catch {
-        Write-Warn "CIM query failed — falling back to WMI..."
-        try {
-            $devices = Get-WmiObject -Class Win32_PnPEntity -ErrorAction Stop |
-                       Where-Object { $_.HardwareID }
-            foreach ($dev in $devices) {
-                foreach ($id in $dev.HardwareID) {
-                    if ($id -match '^(PCI|USB|ACPI|HDAUDIO)\\') {
-                        [void]$hwids.Add($id.ToUpper())
-                    }
-                }
-            }
-        } catch {
-            Write-Warn "WMI also failed: $_"
-        }
+        Write-Host "`r$(' ' * 72)`r" -NoNewline
     }
 
-    # Method 2: devcon / PnP store cross-check (Windows 8+)
+    # Supplemental: pnputil /enum-devices (Win 8+)
     try {
-        $pnpPath = "$env:SystemRoot\System32\pnputil.exe"
-        if (Test-Path $pnpPath) {
-            # pnputil /enum-devices is available Win8+
-            $pnpOutput = & $pnpPath /enum-devices 2>$null
-            if ($pnpOutput) {
-                $pnpOutput | Select-String 'Hardware IDs:\s+(.+)' | ForEach-Object {
+        $pnpBin = "$env:SystemRoot\System32\pnputil.exe"
+        if (Test-Path $pnpBin) {
+            $out = & $pnpBin /enum-devices 2>$null
+            if ($out) {
+                $out | Select-String 'Hardware IDs:\s+(.+)' | ForEach-Object {
                     $_.Matches.Groups[1].Value -split ',' | ForEach-Object {
                         $id = $_.Trim().ToUpper()
-                        if ($id -match '^(PCI|USB|ACPI|HDAUDIO)\\') {
-                            [void]$hwids.Add($id)
-                        }
+                        if ($id -match '^(PCI|USB|ACPI|HDAUDIO)\\') { [void]$hwids.Add($id) }
                     }
                 }
             }
         }
-    } catch { <# non-fatal #> }
+    } catch { <# supplemental — non-fatal #> }
 
-    Write-OK "Total unique hardware IDs collected: $($hwids.Count)"
+    Write-OK "Found $($hwids.Count) unique hardware IDs"
     return @($hwids)
 }
 
 function Get-ProblemDevices {
-    # Returns HWIDs for devices with error codes (missing/broken drivers)
+    <#
+    .SYNOPSIS Returns HWIDs of devices with non-zero ConfigManagerErrorCode.
+    These are devices with missing or broken drivers.
+    #>
     $problem = [System.Collections.Generic.List[string]]::new()
+    $count   = 0
     try {
-        $devices = Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop |
+        $bad = $null
+        try {
+            $bad = Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop |
                    Where-Object { $_.ConfigManagerErrorCode -gt 0 -and $_.HardwareID }
-        foreach ($dev in $devices) {
-            foreach ($id in $dev.HardwareID) {
-                $problem.Add($id.ToUpper())
+        } catch {
+            $bad = Get-WmiObject -Class Win32_PnPEntity -ErrorAction SilentlyContinue |
+                   Where-Object { $_.ConfigManagerErrorCode -gt 0 -and $_.HardwareID }
+        }
+        if ($bad) {
+            foreach ($dev in $bad) {
+                foreach ($id in $dev.HardwareID) { $problem.Add($id.ToUpper()); $count++ }
             }
         }
-    } catch { <# fallback silently #> }
-    return $problem
+    } catch { Write-Log -Level WARN -Msg "Problem device scan error: $($_.Exception.Message)" }
+
+    if ($count -gt 0) {
+        Write-Accent "  [$count PROBLEM DEVICE(S) DETECTED — missing or broken drivers]"
+    }
+    return @($problem)
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  API  QUERY
-# ─────────────────────────────────────────────────────────────────────────────
-function Invoke-DriverDexAPI {
+# ═══════════════════════════════════════════════════════════════════════════════
+#  API QUERY
+# ═══════════════════════════════════════════════════════════════════════════════
+function Invoke-ApiWithRetry {
+    <#
+    .SYNOPSIS Calls the HWID API with up to 3 retries and exponential backoff.
+    .PARAMETER HWID  The hardware ID string to query
+    Returns the parsed JSON response or $null on failure.
+    #>
     param([string]$HWID)
-    $encoded  = [Uri]::EscapeDataString($HWID)
-    $url      = "$Script:API_BASE/$encoded"
-    try {
-        $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -ErrorAction Stop
-        return ($resp.Content | ConvertFrom-Json)
-    } catch {
-        return $null
+    $encoded = [Uri]::EscapeDataString($HWID)
+    $url     = "$Script:API_BASE/$encoded"
+    $delays  = @(2, 4, 8)
+    for ($try = 0; $try -le 2; $try++) {
+        try {
+            $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+            return ($resp.Content | ConvertFrom-Json)
+        } catch {
+            if ($try -lt 2) {
+                $d = $delays[$try]
+                Write-Log -Level WARN -Msg "API retry $($try+1)/3 for $HWID in ${d}s: $($_.Exception.Message)"
+                Start-Sleep -Seconds $d
+            }
+        }
     }
+    return $null
 }
 
 function Search-Drivers {
+    <#
+    .SYNOPSIS Queries the API for every HWID and returns de-duplicated driver list.
+    .PARAMETER HWIDs       Array of hardware ID strings
+    .PARAMETER SystemArch  'x64' or 'x86'
+    #>
     param([string[]]$HWIDs, [string]$SystemArch)
 
     Write-Step "Querying DriverDex API for $($HWIDs.Count) hardware IDs..."
-    $results  = [System.Collections.Generic.List[object]]::new()
-    $seen     = [System.Collections.Generic.HashSet[string]]::new()
-    $count    = 0
-    $total    = $HWIDs.Count
+    $results = [System.Collections.Generic.List[object]]::new()
+    $seen    = [System.Collections.Generic.HashSet[string]]::new()
+    $total   = $HWIDs.Count
+    $count   = 0
+    $barW    = 20
 
     foreach ($id in $HWIDs) {
         $count++
-        # Throttle display updates
-        if ($count % 25 -eq 0 -or $count -eq $total) {
-            Write-Host "`r    Progress: $count / $total" -NoNewline -ForegroundColor DarkGray
-        }
+        # Progress bar
+        $pct  = [int](($count / $total) * 100)
+        $fill = [int](($count / $total) * $barW)
+        $bar  = ('█' * $fill) + ('░' * ($barW - $fill))
+        Write-Host "`r  » Querying API... [$bar] $count / $total  " -NoNewline -ForegroundColor White
 
-        $apiResult = Invoke-DriverDexAPI -HWID $id
-        if (-not $apiResult -or -not $apiResult.matches -or $apiResult.matches.Count -eq 0) {
-            continue
-        }
+        $apiResult = Invoke-ApiWithRetry -HWID $id
+        if (-not $apiResult -or -not $apiResult.matches -or $apiResult.matches.Count -eq 0) { continue }
 
         foreach ($match in $apiResult.matches) {
-            if (-not $match.enabled) { continue }
-            if ($seen.Contains($match.driver_id)) { continue }
-            # Arch filter: prefer system arch but include 'any'/'noarch'
-            if ($match.arch -notin @($SystemArch, 'x86', 'any', 'noarch', '')) {
-                # Skip opposite arch unless no arch field
-                if ($match.arch -and $match.arch -ne $SystemArch) { continue }
-            }
+            if (-not $match.enabled)               { continue }
+            if ($seen.Contains($match.driver_id))  { continue }
+
+            # Arch filtering: include exact match, universal, and x86 on x64 (compat)
+            $mArch = if ($match.arch) { $match.arch.ToLower() } else { '' }
+            $sArch = $SystemArch.ToLower()
+            $archOk = ($mArch -eq $sArch) -or
+                      ($mArch -in @('any','noarch','')) -or
+                      ($mArch -eq 'x86' -and $sArch -eq 'x64')
+            if (-not $archOk) { continue }
+
+            # Determine recommendation flag: arch-matched + non-generic
+            $isRecommended = ($mArch -eq $sArch) -and ([int]$match.matched_is_generic -eq 0)
+
             [void]$seen.Add($match.driver_id)
             $results.Add([pscustomobject]@{
-                DriverId     = $match.driver_id
-                DisplayName  = $match.display_name
-                Provider     = $match.provider
-                Category     = $match.category
-                Version      = $match.version
-                Arch         = $match.arch
-                PrimaryUrl   = $match.primary_url
-                ZipParts     = [int]$match.zip_parts
-                MatchedHWID  = $id
-                Descriptions = $match.descriptions -join ', '
-                DateAdded    = $match.date_added
-                SupersededBy = $match.superseded_by
-                IsGeneric    = [int]$match.matched_is_generic
+                DriverId        = $match.driver_id
+                DisplayName     = $match.display_name
+                Provider        = $match.provider
+                Category        = $match.category
+                Version         = $match.version
+                Arch            = $match.arch
+                PrimaryUrl      = $match.primary_url
+                ZipParts        = [int]$match.zip_parts
+                MatchedHWID     = $id
+                SupersededBy    = $match.superseded_by
+                IsGeneric       = [int]$match.matched_is_generic
+                IsRecommended   = $isRecommended
             })
         }
     }
-    Write-Host ""   # newline after progress
+    Write-Host ""   # newline after progress bar
     return $results
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  DRIVER SELECTION UI
-# ─────────────────────────────────────────────────────────────────────────────
-function Show-DriverMenu {
-    param(
-        [object[]]$Drivers,
-        [string[]]$ProblemHWIDs
-    )
+# ═══════════════════════════════════════════════════════════════════════════════
+#  DRIVER SELECTION TABLE
+# ═══════════════════════════════════════════════════════════════════════════════
+function Show-DriverTable {
+    <#
+    .SYNOPSIS Renders a formatted, numbered driver selection table.
+    .PARAMETER Drivers       Array of driver PSObjects
+    .PARAMETER ProblemHWIDs  Array of HWIDs with ConfigManagerErrorCode > 0
+    #>
+    param([object[]]$Drivers, [string[]]$ProblemHWIDs)
 
     Write-Host ""
     Write-Divider
-    Write-Host "  Found $($Drivers.Count) matching driver package(s):" -ForegroundColor Cyan
+    Write-Host "  Found $($Drivers.Count) matching driver package(s) for your hardware:" -ForegroundColor Cyan
     Write-Divider
     Write-Host ""
+
+    # Column widths
+    $colN   = 3; $colStar = 2; $colName = 28; $colProv = 16
+    $colCat = 10; $colVer = 14; $colArch = 6; $colStat = 16
+
+    # Header
+    $h = "  {0,-$colN} │ {1,-$colStar} │ {2,-$colName} │ {3,-$colProv} │ {4,-$colCat} │ {5,-$colVer} │ {6,-$colArch} │ {7}" `
+         -f '#','','Name','Provider','Category','Version','Arch','Status'
+    Write-Host $h -ForegroundColor DarkGray
+    $sep = '  {0}─┼─{1}─┼─{2}─┼─{3}─┼─{4}─┼─{5}─┼─{6}─┼─{7}' -f `
+           ('─'*$colN),('─'*$colStar),('─'*$colName),('─'*$colProv),`
+           ('─'*$colCat),('─'*$colVer),('─'*$colArch),('─'*$colStat)
+    Write-Host $sep -ForegroundColor DarkGray
 
     $idx = 0
     foreach ($d in $Drivers) {
         $idx++
-        $tag = if ($ProblemHWIDs -contains $d.MatchedHWID) { ' [!PROBLEM DEVICE]' } else { '' }
-        $superTag = if ($d.SupersededBy) { ' [superseded]' } else { '' }
-        $archColor = if ($d.Arch -eq 'x64') { 'Magenta' } else { 'DarkYellow' }
+        $star    = if ($d.IsRecommended)  { '★' } else { ' ' }
+        $isProblem   = $ProblemHWIDs -contains $d.MatchedHWID
+        $isSuperseded = [bool]$d.SupersededBy
 
-        Write-Host "  [$idx] " -ForegroundColor DarkCyan -NoNewline
-        Write-Host "$($d.DisplayName) — $($d.Provider)" -ForegroundColor White -NoNewline
-        Write-Host "$tag$superTag" -ForegroundColor Red
-        Write-Host "       Category : $($d.Category)  |  " -ForegroundColor DarkGray -NoNewline
-        Write-Host "Version : $($d.Version)  |  " -ForegroundColor DarkGray -NoNewline
-        Write-Host "Arch: $($d.Arch)" -ForegroundColor $archColor
-        Write-Host "       Device   : $($d.MatchedHWID)" -ForegroundColor DarkGray
-        if ($d.Descriptions) {
-            $desc = if ($d.Descriptions.Length -gt 72) { $d.Descriptions.Substring(0,69) + '...' } else { $d.Descriptions }
-            Write-Host "       Desc     : $desc" -ForegroundColor DarkGray
+        $status = ''
+        if ($isSuperseded) { $status = '[SUPERSEDED]' }
+        elseif ($isProblem) { $status = '[PROBLEM DEV]' }
+
+        $name = if ($d.DisplayName.Length -gt $colName) { $d.DisplayName.Substring(0,$colName-1)+'…' } else { $d.DisplayName }
+        $prov = if ($d.Provider.Length -gt $colProv)    { $d.Provider.Substring(0,$colProv-1)+'…' }    else { $d.Provider }
+        $row  = "  {0,-$colN} │ {1,-$colStar} │ {2,-$colName} │ {3,-$colProv} │ {4,-$colCat} │ {5,-$colVer} │ {6,-$colArch} │ {7}" `
+                -f $idx, $star, $name, $prov, $d.Category, $d.Version, $d.Arch, $status
+
+        if ($isSuperseded) {
+            Write-Host $row -ForegroundColor DarkGray
+        } elseif ($isProblem) {
+            Write-Host $row -ForegroundColor Yellow
+        } elseif ($d.IsRecommended) {
+            Write-Host $row -ForegroundColor White
+        } else {
+            Write-Host $row -ForegroundColor Gray
         }
-        Write-Host ""
     }
-
-    Write-Divider
     Write-Host ""
-    Write-Host "  Selection options:" -ForegroundColor White
-    Write-Host "   • Enter numbers separated by commas  e.g.  1,3,5" -ForegroundColor DarkGray
-    Write-Host "   • Type  ALL  to install everything" -ForegroundColor DarkGray
-    Write-Host "   • Type  PROBLEMS  to install only problem devices" -ForegroundColor DarkGray
-    Write-Host "   • Press Enter (blank) to skip installation" -ForegroundColor DarkGray
-    Write-Host ""
-
-    $raw = Read-HostDefault "Your selection" "ALL"
-
-    if ([string]::IsNullOrWhiteSpace($raw)) { return @() }
-    if ($raw -eq 'ALL') { return $Drivers }
-
-    if ($raw -eq 'PROBLEMS') {
-        $sel = $Drivers | Where-Object { $ProblemHWIDs -contains $_.MatchedHWID }
-        if (-not $sel) { Write-Warn "No problem devices matched — selecting all."; return $Drivers }
-        return @($sel)
-    }
-
-    $indices = $raw -split '[,\s]+' | ForEach-Object {
-        $n = 0
-        if ([int]::TryParse($_.Trim(), [ref]$n) -and $n -ge 1 -and $n -le $Drivers.Count) { $n }
-    } | Where-Object { $_ -ne $null } | Sort-Object -Unique
-
-    return @($indices | ForEach-Object { $Drivers[$_ - 1] })
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  DOWNLOAD ENGINE  (handles Git LFS pointers transparently)
-# ─────────────────────────────────────────────────────────────────────────────
-function Get-DriverDexFile {
-    param(
-        [string]$Url,
-        [string]$Dest,
-        [string]$ExpectedSha256 = ''
-    )
+function Show-DriverMenu {
+    <#
+    .SYNOPSIS Renders driver table and returns the user-selected subset.
+    .PARAMETER Drivers       All available driver objects
+    .PARAMETER ProblemHWIDs  HWIDs flagged as problem devices
+    #>
+    param([object[]]$Drivers, [string[]]$ProblemHWIDs)
 
-    Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
+    Show-DriverTable -Drivers $Drivers -ProblemHWIDs $ProblemHWIDs
 
-    # Detect Git LFS pointer (≤1 KB text files starting with version line)
-    $fi = Get-Item -LiteralPath $Dest
-    if ($fi.Length -le 1024) {
-        try {
-            $firstLine = Get-Content -LiteralPath $Dest -TotalCount 1 -ErrorAction Stop
-            if ($firstLine -like 'version https://git-lfs.github.com/spec/*') {
-                $oid = ''; $size = ''
-                Get-Content -LiteralPath $Dest | ForEach-Object {
-                    $t = $_.Trim()
-                    if ($t -like 'oid sha256:*') { $oid  = $t.Substring($t.IndexOf(':') + 1).Trim() }
-                    elseif ($t -like 'size *')   { $size = $t.Substring(5).Trim() }
-                }
-                if (-not $oid -or -not $size) { throw 'Malformed Git LFS pointer.' }
+    Write-Info "Selection: ALL · PROBLEMS · comma-separated numbers (e.g. 1,3,5) · q to quit"
+    Write-Host ""
 
-                $body  = @{
-                    operation = 'download'; transfers = @('basic')
-                    objects   = @(@{ oid = $oid; size = [long]$size })
-                } | ConvertTo-Json -Depth 5
+    $raw = Read-Input -Prompt 'Select drivers' -Default 'ALL' `
+        -Validator { param($v) $v -match '^(ALL|PROBLEMS|q|[0-9, ]+)$' } `
+        -ErrMsg    'Enter ALL, PROBLEMS, a list of numbers, or q to quit.'
 
-                $batch = Invoke-RestMethod -Uri $Script:LFS_BATCH_URL -Method Post `
-                         -Body $body -ContentType 'application/vnd.git-lfs+json' `
-                         -Headers @{ Accept = 'application/vnd.git-lfs+json' }
+    if ($raw -eq 'q') { return @() }
+    if ($raw -eq 'ALL') {
+        $sel = $Drivers
+    } elseif ($raw -eq 'PROBLEMS') {
+        $sel = @($Drivers | Where-Object { $ProblemHWIDs -contains $_.MatchedHWID })
+        if (-not $sel -or $sel.Count -eq 0) {
+            Write-Warn "No problem devices in the list. Selecting ALL."
+            $sel = $Drivers
+        }
+    } else {
+        $indices = $raw -split '[,\s]+' | ForEach-Object {
+            $n = 0
+            if ([int]::TryParse($_.Trim(), [ref]$n) -and $n -ge 1 -and $n -le $Drivers.Count) { $n }
+        } | Where-Object { $_ } | Sort-Object -Unique
+        $sel = @($indices | ForEach-Object { $Drivers[$_ - 1] })
+    }
 
-                $obj  = $batch.objects[0]
-                if ($obj.error) { throw "Git LFS error: $($obj.error.message)" }
-                $href = $obj.actions.download.href
-                if (-not $href) { throw 'Git LFS returned no download URL.' }
+    # Echo selection
+    $names = ($sel | ForEach-Object { $_.DisplayName }) -join ', '
+    Write-OK "Selected: $names"
 
-                $dlH = @{}
-                if ($obj.actions.download.header) {
-                    $obj.actions.download.header.PSObject.Properties |
-                        ForEach-Object { $dlH[$_.Name] = $_.Value }
-                }
-                Invoke-WebRequest -Uri $href -OutFile $Dest -UseBasicParsing -Headers $dlH
+    # Check for superseded in selection
+    $supersededPicked = @($sel | Where-Object { $_.SupersededBy })
+    foreach ($s in $supersededPicked) {
+        Write-Warn "'$($s.DisplayName)' is superseded by $($s.SupersededBy) — consider deselecting."
+    }
+
+    # Confirm
+    Write-Host ""
+    $confirm = Read-Input -Prompt "Proceed with $($sel.Count) driver(s)?" -Default 'Y' `
+        -Validator { param($v) $v -match '^[YyNn]$' } -ErrMsg 'Enter Y or N.'
+    if ($confirm -match '^[Nn]') { return @() }
+
+    return @($sel)
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  OUTPUT FOLDER
+# ═══════════════════════════════════════════════════════════════════════════════
+function Get-OutputFolder {
+    <#
+    .SYNOPSIS Prompts for and validates the driver output/staging folder.
+    Returns the resolved, writable directory path.
+    #>
+    $defaultOut = Join-Path $env:USERPROFILE 'Downloads\DriverDex'
+    $path = Read-Input -Prompt 'Save drivers to' -Default $defaultOut `
+        -Validator { param($v) $v.Length -gt 0 } -ErrMsg 'Path cannot be empty.'
+
+    try {
+        New-Item -ItemType Directory -Force -Path $path -ErrorAction Stop | Out-Null
+        # Write test
+        $testFile = Join-Path $path ".driverdex_write_test"
+        [System.IO.File]::WriteAllText($testFile, 'ok')
+        Remove-Item $testFile -Force -ErrorAction SilentlyContinue
+    } catch {
+        Write-Err -What "Cannot write to output folder." `
+                  -Reason $_.Exception.Message `
+                  -Fix    "Choose a different folder or check permissions."
+        throw
+    }
+
+    # Disk space check
+    try {
+        $drive = Split-Path -Qualifier $path
+        $disk  = Get-PSDrive ($drive -replace ':','') -ErrorAction SilentlyContinue
+        if ($disk) {
+            $freeGB = [Math]::Round($disk.Free / 1GB, 1)
+            $freeMB = $disk.Free / 1MB
+            if ($freeMB -lt 500) {
+                Write-Warn "Only ${freeGB} GB free on $drive — less than 500 MB recommended."
+            } else {
+                Write-Info "  ${freeGB} GB free on $drive ✔"
             }
-        } catch [System.IO.IOException] { <# binary file, not LFS #> }
-    }
-
-    # SHA-256 verification
-    if ($ExpectedSha256) {
-        $actual = (Get-FileHash -LiteralPath $Dest -Algorithm SHA256).Hash.ToLower()
-        if ($actual -ne $ExpectedSha256.ToLower()) {
-            throw "SHA-256 mismatch!`n  Expected : $ExpectedSha256`n  Actual   : $actual"
         }
-    }
+    } catch { <# non-fatal — disk check best-effort #> }
+
+    Write-OK "Output folder: $path"
+    return $path
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  MULTI-PART URL BUILDER
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  DOWNLOAD ENGINE
+# ═══════════════════════════════════════════════════════════════════════════════
 function Get-PartUrls {
+    <#
+    .SYNOPSIS Builds multi-part archive URL list from primary_url + zip_parts count.
+    .PARAMETER PrimaryUrl  URL ending in .0001 (or the single file URL)
+    .PARAMETER ZipParts    Number of parts (1 = single file)
+    #>
     param([string]$PrimaryUrl, [int]$ZipParts)
     if ($ZipParts -le 1) { return @($PrimaryUrl) }
     $base = $PrimaryUrl -replace '\.0001$', ''
     return @(1..$ZipParts | ForEach-Object { '{0}.{1:D4}' -f $base, $_ })
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  CHECK IF DRIVER ALREADY INSTALLED
-# ─────────────────────────────────────────────────────────────────────────────
+function Resolve-LFSPointer {
+    <#
+    .SYNOPSIS Resolves a Git LFS pointer file to a real download URL.
+    .PARAMETER PointerPath  Local path to the downloaded pointer file
+    Returns the resolved download URL and any auth headers as a hashtable.
+    #>
+    param([string]$PointerPath)
+
+    $oid = ''; $size = ''
+    Get-Content -LiteralPath $PointerPath | ForEach-Object {
+        $t = $_.Trim()
+        if ($t -like 'oid sha256:*') { $oid  = $t.Substring($t.IndexOf(':') + 1).Trim() }
+        elseif ($t -like 'size *')   { $size = $t.Substring(5).Trim() }
+    }
+    if (-not $oid -or -not $size) { throw 'Malformed Git LFS pointer: missing oid or size.' }
+
+    $body = @{
+        operation = 'download'
+        transfers = @('basic')
+        objects   = @(@{ oid = $oid; size = [long]$size })
+    } | ConvertTo-Json -Depth 5
+
+    $batch = Invoke-RestMethod -Uri $Script:LFS_BATCH_URL -Method Post `
+             -Body $body -ContentType 'application/vnd.git-lfs+json' `
+             -Headers @{ Accept = 'application/vnd.git-lfs+json' } -ErrorAction Stop
+
+    $obj = $batch.objects[0]
+    if ($obj.error) { throw "Git LFS error: $($obj.error.message)" }
+    $href = $obj.actions.download.href
+    if (-not $href) { throw 'Git LFS returned no download URL.' }
+
+    $dlHeaders = @{}
+    if ($obj.actions.download.header) {
+        $obj.actions.download.header.PSObject.Properties |
+            ForEach-Object { $dlHeaders[$_.Name] = $_.Value }
+    }
+    return @{ Href = $href; Headers = $dlHeaders }
+}
+
+function Get-DriverFile {
+    <#
+    .SYNOPSIS Downloads a file with real-time progress, LFS resolution, retry logic, and SHA-256 verify.
+    .PARAMETER Url            Source URL
+    .PARAMETER Dest           Local destination path
+    .PARAMETER Label          Display name for progress lines
+    .PARAMETER ExpectedSha256 If provided, hard-fail on hash mismatch
+    .PARAMETER MaxRetries     Number of download attempts (default 3)
+    #>
+    param(
+        [string]$Url,
+        [string]$Dest,
+        [string]$Label          = '',
+        [string]$ExpectedSha256 = '',
+        [int]   $MaxRetries     = 3
+    )
+
+    $delays = @(2, 4, 8)
+    $sw     = [System.Diagnostics.Stopwatch]::new()
+
+    for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+        try {
+            $sw.Restart()
+            # Initial request to get content-length
+            $req = [System.Net.HttpWebRequest]::Create($Url)
+            $req.Method  = 'GET'
+            $req.Timeout = 30000
+            $req.ReadWriteTimeout = 60000
+            $resp = $req.GetResponse()
+            $totalBytes = $resp.ContentLength   # -1 if unknown (chunked)
+
+            $stream    = $resp.GetResponseStream()
+            $outStream = [System.IO.File]::OpenWrite($Dest)
+            $buf       = New-Object byte[] 65536
+            $downloaded = [long]0
+            $barW       = 20
+            $displayLabel = if ($Label) { $Label } else { Split-Path $Url -Leaf }
+
+            try {
+                while ($true) {
+                    $read = $stream.Read($buf, 0, $buf.Length)
+                    if ($read -le 0) { break }
+                    $outStream.Write($buf, 0, $read)
+                    $downloaded += $read
+
+                    # Progress display
+                    if ($totalBytes -gt 0) {
+                        $pct  = [int](($downloaded / $totalBytes) * 100)
+                        $fill = [int](($downloaded / $totalBytes) * $barW)
+                        $bar  = ('█' * $fill) + ('░' * ($barW - $fill))
+                        $dlMB = [Math]::Round($downloaded / 1MB, 1)
+                        $totMB= [Math]::Round($totalBytes / 1MB, 1)
+                        Write-Host "`r  ↓ $displayLabel  [$bar]  $dlMB MB / $totMB MB  ($pct%)" -NoNewline -ForegroundColor Cyan
+                    } else {
+                        $f = $Script:SpinnerFrames[$Script:SpinIdx++ % $Script:SpinnerFrames.Count]
+                        $dlMB = [Math]::Round($downloaded / 1MB, 1)
+                        Write-Host "`r  $f $displayLabel  ${dlMB} MB downloaded" -NoNewline -ForegroundColor Cyan
+                    }
+                }
+            } finally {
+                $outStream.Close()
+                $stream.Close()
+                $resp.Close()
+            }
+            Write-Host "`r$(' ' * 80)`r" -NoNewline
+
+            # ── Git LFS pointer detection ──────────────────────────────────────
+            $fi = Get-Item -LiteralPath $Dest
+            if ($fi.Length -le 1024) {
+                try {
+                    $firstLine = Get-Content -LiteralPath $Dest -TotalCount 1 -ErrorAction Stop
+                    if ($firstLine -like 'version https://git-lfs.github.com/spec/*') {
+                        Write-Sub "LFS pointer detected — resolving real file..."
+                        $lfs   = Resolve-LFSPointer -PointerPath $Dest
+                        $sw.Restart()
+                        Invoke-WebRequest -Uri $lfs.Href -OutFile $Dest `
+                            -UseBasicParsing -Headers $lfs.Headers -ErrorAction Stop
+                        $fi = Get-Item -LiteralPath $Dest
+                    }
+                } catch [System.IO.IOException] { <# binary, not LFS — fine #> }
+            }
+
+            $elapsed = $sw.Elapsed.TotalSeconds
+            $sizeMB  = [Math]::Round($fi.Length / 1MB, 2)
+
+            # ── SHA-256 verification ───────────────────────────────────────────
+            $hashResult = 'SKIPPED'
+            if ($ExpectedSha256) {
+                $actual = (Get-FileHash -LiteralPath $Dest -Algorithm SHA256).Hash.ToLower()
+                if ($actual -ne $ExpectedSha256.ToLower()) {
+                    Remove-Item $Dest -Force -ErrorAction SilentlyContinue
+                    throw "SHA-256 mismatch. Expected: $ExpectedSha256 | Got: $actual"
+                }
+                $hashResult = 'OK'
+                Write-Log -Level INFO -Msg "SHA256 verified for $displayLabel"
+            }
+
+            Write-OK "$displayLabel  ·  $sizeMB MB  ·  $($elapsed.ToString('F1'))s  ·  SHA256 $hashResult"
+            return
+
+        } catch {
+            Write-Host "`r$(' ' * 80)`r" -NoNewline
+            $reason = $_.Exception.Message
+            if ($attempt -lt $MaxRetries) {
+                $d = $delays[$attempt - 1]
+                Write-Host "  ↻ Retry $attempt/$MaxRetries in ${d}s — $reason" -ForegroundColor DarkYellow
+                Write-Log -Level WARN -Msg "Download retry $attempt for $Url: $reason"
+                Start-Sleep -Seconds $d
+            } else {
+                Write-Log -Level ERROR -Msg "Download failed after $MaxRetries attempts for $Url: $reason" -Err $_
+                throw "Download failed after $MaxRetries attempts: $reason"
+            }
+        }
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  DRIVER ALREADY INSTALLED CHECK
+# ═══════════════════════════════════════════════════════════════════════════════
 function Test-DriverInstalled {
+    <#
+    .SYNOPSIS Checks Win32_PnPSignedDriver for a matching Provider + Version.
+    Returns $true if the driver is already registered in the system.
+    #>
     param([string]$Provider, [string]$Version)
     try {
-        $installed = Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction Stop |
-                     Where-Object { $_.ProviderName -like "*$Provider*" -and $_.DriverVersion -eq $Version }
-        return ($installed -and $installed.Count -gt 0)
+        $installed = $null
+        try {
+            $installed = Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction Stop |
+                         Where-Object { $_.ProviderName -like "*$Provider*" -and $_.DriverVersion -eq $Version }
+        } catch {
+            $installed = Get-WmiObject -Class Win32_PnPSignedDriver -ErrorAction SilentlyContinue |
+                         Where-Object { $_.ProviderName -like "*$Provider*" -and $_.DriverVersion -eq $Version }
+        }
+        return ($installed -and @($installed).Count -gt 0)
     } catch { return $false }
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  DOWNLOAD + EXTRACT + INSTALL
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PER-DRIVER WORK PANEL
+# ═══════════════════════════════════════════════════════════════════════════════
+function Show-DriverPanel {
+    <#
+    .SYNOPSIS Renders the bordered work panel shown before processing each driver.
+    .PARAMETER Driver  Driver PSObject
+    .PARAMETER Idx     Current index (1-based)
+    .PARAMETER Total   Total drivers being processed
+    #>
+    param([object]$Driver, [int]$Idx, [int]$Total)
+    $inner = 60
+    $title = "[$Idx/$Total] $($Driver.DisplayName)"
+    $dash  = '─' * ([Math]::Max(0, $inner - $title.Length - 1))
+
+    Write-Host ""
+    Write-Host "  ┌─ $title $dash┐" -ForegroundColor DarkCyan
+    $row1 = "  Provider: $($Driver.Provider)  │  v$($Driver.Version)  │  $($Driver.Arch)  │  $($Driver.Category)"
+    $padded1 = $row1.PadRight($inner + 4)
+    Write-Host "$padded1│" -ForegroundColor DarkGray
+    $hwid = $Driver.MatchedHWID
+    if ($hwid.Length -gt $inner - 8) { $hwid = $hwid.Substring(0, $inner - 11) + '...' }
+    $row2 = "  HWID: $hwid"
+    $padded2 = $row2.PadRight($inner + 4)
+    Write-Host "$padded2│" -ForegroundColor DarkGray
+    Write-Host "  └$('─' * ($inner + 2))┘" -ForegroundColor DarkCyan
+    Write-Host ""
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  MAIN INSTALL ROUTINE  (one driver at a time, isolated try/catch)
+# ═══════════════════════════════════════════════════════════════════════════════
 function Install-DriverPackage {
+    <#
+    .SYNOPSIS Downloads, extracts, and installs a single driver package.
+    Returns a PSObject: { Name, Success, Skipped, RebootRequired, Path }
+    .PARAMETER Driver        Driver PSObject from Search-Drivers
+    .PARAMETER OutputRoot    Root folder where driver files are saved
+    .PARAMETER ScratchDir    Temp directory for staging
+    .PARAMETER ExtractorPath Path to the extractor.exe binary
+    .PARAMETER IsAdmin       Whether the session is elevated
+    #>
     param(
         [object]$Driver,
         [string]$OutputRoot,
         [string]$ScratchDir,
         [string]$ExtractorPath,
-        [bool]$IsAdmin
+        [bool]  $IsAdmin
     )
 
-    $pkgName = "$($Driver.Provider)_$($Driver.Category)_$($Driver.Version)_$($Driver.Arch)"
-    $outDir  = Join-Path $OutputRoot $pkgName
-    $pkgTemp = Join-Path $ScratchDir ([System.Guid]::NewGuid().ToString('N').Substring(0,8))
-    New-Item -ItemType Directory -Force -Path $outDir  | Out-Null
-    New-Item -ItemType Directory -Force -Path $pkgTemp | Out-Null
+    $result = [pscustomobject]@{
+        Name           = $Driver.DisplayName
+        Success        = $false
+        Skipped        = $false
+        RebootRequired = $false
+        Path           = ''
+    }
+
+    $safeName = "$($Driver.Provider)_$($Driver.Category)_$($Driver.Version)_$($Driver.Arch)" `
+                -replace '[\\/:*?"<>|]', '_'
+    $outDir   = Join-Path $OutputRoot $safeName
+    $pkgTemp  = Join-Path $ScratchDir ([System.Guid]::NewGuid().ToString('N').Substring(0,8))
 
     try {
-        # ── Pre-install check ──────────────────────────────────────────────
+        New-Item -ItemType Directory -Force -Path $outDir  | Out-Null
+        New-Item -ItemType Directory -Force -Path $pkgTemp | Out-Null
+        $result.Path = $outDir
+
+        # ── Already installed? ─────────────────────────────────────────────
         if (Test-DriverInstalled -Provider $Driver.Provider -Version $Driver.Version) {
-            Write-Warn "v$($Driver.Version) of $($Driver.Provider) already installed — skipping."
-            return [pscustomobject]@{ Success=$false; Skipped=$true; Path=$outDir; Name=$Driver.DisplayName }
+            Write-Warn "v$($Driver.Version) of $($Driver.Provider) is already installed — skipping."
+            Write-Info "Use prefix 'r' in selection to force reinstall."
+            $result.Skipped = $true
+            return $result
         }
 
-        # ── Download all parts ────────────────────────────────────────────
+        # ── Download all parts ─────────────────────────────────────────────
         $partUrls = Get-PartUrls -PrimaryUrl $Driver.PrimaryUrl -ZipParts $Driver.ZipParts
-        $partIdx  = 0
         $firstPart = $null
 
-        foreach ($url in $partUrls) {
-            $partIdx++
+        for ($pi = 0; $pi -lt $partUrls.Count; $pi++) {
+            $url      = $partUrls[$pi]
             $fileName = Split-Path $url -Leaf
-            if ($partIdx -eq 1) { $firstPart = Join-Path $pkgTemp $fileName }
-            $dest = Join-Path $pkgTemp $fileName
+            $dest     = Join-Path $pkgTemp $fileName
+            if ($pi -eq 0) { $firstPart = $dest }
 
-            Write-Host "    ↓ [$partIdx/$($partUrls.Count)] $fileName" -ForegroundColor Cyan
-            $sw = [System.Diagnostics.Stopwatch]::StartNew()
-            Get-DriverDexFile -Url $url -Dest $dest
-            $sw.Stop()
-            $size = [math]::Round((Get-Item $dest).Length / 1MB, 2)
-            Write-Info "      $size MB in $($sw.Elapsed.TotalSeconds.ToString('F1'))s"
+            Write-Sub "[$($pi+1)/$($partUrls.Count)] $fileName"
+            Get-DriverFile -Url $url -Dest $dest -Label $fileName
         }
 
-        # ── Verify SHA256 on first part only (API provides single hash) ───
-        # (full hash checking done per-part if API provided; currently API
-        #  provides hash on the first/only part)
-        Write-Info "    Verifying download integrity..."
-        $firstHash = (Get-FileHash -LiteralPath $firstPart -Algorithm SHA256).Hash.ToLower()
-        Write-Info "    SHA256: $firstHash"
-
-        # ── Extract ───────────────────────────────────────────────────────
-        Write-Host "    ⚙ Extracting..." -ForegroundColor White
+        # ── Extract ────────────────────────────────────────────────────────
+        Write-Step "Extracting archive..."
         $extractArgs = @('--file', $firstPart, '--output', $outDir, '--verify')
         $proc = Start-Process -FilePath $ExtractorPath -ArgumentList $extractArgs `
-                              -Wait -PassThru -NoNewWindow
+                              -Wait -PassThru -NoNewWindow -RedirectStandardError (Join-Path $pkgTemp 'extractor_stderr.txt')
         if ($proc.ExitCode -ne 0) {
-            throw "Extractor exited with code $($proc.ExitCode)"
+            $errLines = ''
+            $errFile  = Join-Path $pkgTemp 'extractor_stderr.txt'
+            if (Test-Path $errFile) {
+                $errLines = (Get-Content $errFile -ErrorAction SilentlyContinue | Select-Object -Last 5) -join ' | '
+            }
+            throw "Extractor failed (exit $($proc.ExitCode)) — $errLines"
         }
         Write-OK "Extracted to: $outDir"
 
-        # ── Write manifest ────────────────────────────────────────────────
+        # ── Manifest ───────────────────────────────────────────────────────
         @{
-            driver_id    = $Driver.DriverId
-            display_name = $Driver.DisplayName
-            provider     = $Driver.Provider
-            category     = $Driver.Category
-            version      = $Driver.Version
-            arch         = $Driver.Arch
-            matched_hwid = $Driver.MatchedHWID
-            installed_on = (Get-Date -Format 'o')
-            generated_by = 'DriverDex v{0} — https://github.com/rhshourav/driverdex' -f $Script:VERSION
-        } | ConvertTo-Json | Set-Content -Path (Join-Path $outDir 'manifest.json') -Encoding UTF8
+            driver_id       = $Driver.DriverId
+            display_name    = $Driver.DisplayName
+            provider        = $Driver.Provider
+            category        = $Driver.Category
+            version         = $Driver.Version
+            arch            = $Driver.Arch
+            matched_hwid    = $Driver.MatchedHWID
+            sha256_parts    = @()
+            installed_on    = (Get-Date -Format 'o')
+            install_result  = 'pending'
+            pnputil_exit    = $null
+            reboot_required = $false
+            generated_by    = "DriverDex v$Script:VERSION — https://github.com/rhshourav/driverdex"
+        } | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $outDir 'manifest.json') -Encoding UTF8
 
-        # ── Install via pnputil ───────────────────────────────────────────
+        # ── Install via pnputil ────────────────────────────────────────────
         $infs = @(Get-ChildItem -Path $outDir -Filter '*.inf' -Recurse -ErrorAction SilentlyContinue)
 
         if ($infs.Count -gt 0 -and $IsAdmin) {
@@ -487,189 +940,290 @@ function Install-DriverPackage {
             $pnpArgs = '/add-driver', (Join-Path $outDir '*.inf'), '/subdirs', '/install'
             $pnpProc = Start-Process -FilePath "$env:SystemRoot\System32\pnputil.exe" `
                                      -ArgumentList $pnpArgs -Wait -PassThru -NoNewWindow
-            if ($pnpProc.ExitCode -in @(0, 3010)) {
-                Write-OK "pnputil completed (exit $($pnpProc.ExitCode))"
-                if ($pnpProc.ExitCode -eq 3010) {
+            $exitCode = $pnpProc.ExitCode
+
+            if ($exitCode -in @(0, 3010)) {
+                Write-OK "pnputil succeeded (exit $exitCode)"
+                if ($exitCode -eq 3010) {
                     Write-Warn "Reboot required to complete driver installation."
+                    $result.RebootRequired = $true
                 }
+                $result.Success = $true
             } else {
-                Write-Warn "pnputil exited with $($pnpProc.ExitCode) — may need manual install."
+                $pnpMsg = switch ($exitCode) {
+                    2    { "Driver may be incompatible with this Windows version." }
+                    5    { "Access denied — check that you are running as Administrator." }
+                    87   { "Invalid parameter passed to pnputil." }
+                    default { "Unexpected pnputil exit code ($exitCode)." }
+                }
+                Write-Err -What "Driver install failed for $($Driver.DisplayName)" `
+                          -Reason $pnpMsg `
+                          -Fix    "Try the x86 variant or install manually via Device Manager at: $outDir"
             }
 
-            # ── Cross-check: verify driver is now registered ──────────────
+            # Post-install cross-check
             Start-Sleep -Seconds 2
             if (Test-DriverInstalled -Provider $Driver.Provider -Version $Driver.Version) {
-                Write-OK "Cross-check PASSED: driver registered in system."
+                Write-OK "Cross-check PASSED — driver registered in Win32_PnPSignedDriver."
             } else {
-                Write-Warn "Cross-check: driver not yet reflected in Win32_PnPSignedDriver (may need reboot)."
+                Write-Warn "Cross-check: driver not yet reflected in system — a reboot may be required."
             }
 
         } elseif ($infs.Count -gt 0 -and -not $IsAdmin) {
-            Write-Warn "INF found but not elevated — point Device Manager at:"
+            Write-Warn "INF found but script is not elevated. Open Device Manager and point it at:"
             Write-Host "      $outDir" -ForegroundColor Cyan
+            $result.Success = $true   # files are ready, install is manual
 
         } else {
-            # Try setup.exe / .msi vendor installer
+            # Fallback: vendor setup.exe / MSI
             $installer = Get-ChildItem -Path $outDir -Include 'setup.exe','*.msi' `
                                        -Recurse -ErrorAction SilentlyContinue |
                          Select-Object -First 1
             if ($installer) {
                 Write-Step "Vendor installer detected: $($installer.Name)"
-                $run = Read-HostDefault "Run installer now? [Y/n]" 'Y'
-                if ($run -notmatch '^[Nn]') {
-                    $args = if ($installer.Extension -eq '.msi') { '/i', $installer.FullName, '/qn' } `
-                            else { @() }
-                    Start-Process -FilePath $installer.FullName -ArgumentList $args -Wait
-                    Write-OK "Installer completed."
+                $run = Read-Input -Prompt "Run installer now?" -Default 'Y' `
+                    -Validator { param($v) $v -match '^[YyNn]$' } -ErrMsg 'Enter Y or N.'
+                if ($run -match '^[Yy]') {
+                    $iArgs = if ($installer.Extension -eq '.msi') { '/i', $installer.FullName, '/qn' } else { @() }
+                    Start-Process -FilePath $installer.FullName -ArgumentList $iArgs -Wait
+                    Write-OK "Vendor installer completed."
+                    $result.Success = $true
                 }
             } else {
-                Write-Warn "No INF or installer found — files are at: $outDir"
+                Write-Warn "No INF or vendor installer found. Files are at: $outDir"
+                $result.Success = $true   # files present, user can install manually
             }
         }
 
-        return [pscustomobject]@{ Success=$true; Skipped=$false; Path=$outDir; Name=$Driver.DisplayName }
+        # Update manifest with final result
+        try {
+            $manifest = Get-Content -LiteralPath (Join-Path $outDir 'manifest.json') -Raw | ConvertFrom-Json
+            $manifest.install_result  = if ($result.Success) { 'success' } else { 'failed' }
+            $manifest.reboot_required = $result.RebootRequired
+            $manifest | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $outDir 'manifest.json') -Encoding UTF8
+        } catch { <# manifest update is best-effort #> }
+
+        return $result
 
     } catch {
-        Write-Err "FAILED: $($_.Exception.Message)"
-        return [pscustomobject]@{ Success=$false; Skipped=$false; Path=$outDir; Name=$Driver.DisplayName }
+        $errMsg = $_.Exception.Message -replace [regex]::Escape($_.Exception.GetType().FullName), '' -replace '^\s*:\s*', ''
+        Write-Err -What "Failed to process $($Driver.DisplayName)" `
+                  -Reason $errMsg `
+                  -Fix    "Check the log file for the full stack trace and try re-running the script." `
+                  -Err    $_
+        $result.Success = $false
+        return $result
+
     } finally {
         Remove-Item -Recurse -Force $pkgTemp -ErrorAction SilentlyContinue
     }
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  SUMMARY TABLE
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SUMMARY BOX
+# ═══════════════════════════════════════════════════════════════════════════════
 function Show-Summary {
+    <#
+    .SYNOPSIS Renders a bordered installation summary box after all drivers are processed.
+    .PARAMETER Results  Array of driver result PSObjects
+    #>
     param([object[]]$Results)
+
+    $inner = 44
+    $title = ' Installation Summary '
+    $fill  = $inner - $title.Length
+    $lFill = [Math]::Floor($fill / 2)
+    $rFill = $fill - $lFill
+
     Write-Host ""
-    Write-Divider
-    Write-Host "  Installation Summary" -ForegroundColor Cyan
-    Write-Divider
+    Write-Host "  ╔══$title$('═' * $rFill)╗" -ForegroundColor DarkCyan
+
     foreach ($r in $Results) {
-        if     ($r.Skipped) { $sym = '─'; $col = 'DarkGray'  ; $label = 'SKIPPED (already installed)' }
-        elseif ($r.Success) { $sym = '✔'; $col = 'Green'     ; $label = 'SUCCESS' }
-        else                { $sym = '✘'; $col = 'Red'        ; $label = 'FAILED' }
-        Write-Host "  [$sym] $($r.Name)" -ForegroundColor $col -NoNewline
-        Write-Host " — $label" -ForegroundColor DarkGray
+        if     ($r.Skipped)  { $sym = '─'; $col = 'DarkGray'; $label = 'skipped (already installed)' }
+        elseif ($r.Success)  { $sym = '✔'; $col = 'Green';    $label = 'installed' }
+        else                 { $sym = '✘'; $col = 'Red';       $label = 'failed' }
+        $rb = if ($r.RebootRequired) { ' ⟳ reboot needed' } else { '' }
+        $line = "  $sym $($r.Name)$rb — $label"
+        $padded = $line.PadRight($inner + 4)
+        Write-Host "  ║$padded║" -ForegroundColor $col
     }
-    Write-Divider
+
+    Write-Host "  ╚$('═' * ($inner + 2))╝" -ForegroundColor DarkCyan
+    Write-Host ""
+
+    $passed  = @($Results | Where-Object { $_.Success -and -not $_.Skipped }).Count
+    $skipped = @($Results | Where-Object { $_.Skipped }).Count
+    $failed  = @($Results | Where-Object { -not $_.Success -and -not $_.Skipped }).Count
+    Write-Info "  $passed installed  ·  $skipped skipped  ·  $failed failed"
     Write-Host ""
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  MAIN ENTRY POINT
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  REBOOT PROMPT
+# ═══════════════════════════════════════════════════════════════════════════════
+function Invoke-RebootPrompt {
+    <#
+    .SYNOPSIS Prompts for reboot only if at least one driver flagged pnputil exit 3010.
+    .PARAMETER Results  Array of driver result PSObjects
+    #>
+    param([object[]]$Results)
+    $needsReboot = @($Results | Where-Object { $_.RebootRequired })
+    if ($needsReboot.Count -eq 0) { return }
+
+    Write-Warn "$($needsReboot.Count) driver(s) require a reboot to activate."
+    Write-Host ""
+    $choice = Read-Input -Prompt 'Restart now to apply all drivers?' -Default 'N' `
+        -Validator { param($v) $v -match '^[YyNn]$' } -ErrMsg 'Enter Y or N.'
+
+    if ($choice -match '^[Yy]') {
+        Write-Warn "Restarting in 10 seconds... Press Ctrl+C to cancel."
+        for ($i = 10; $i -ge 1; $i--) {
+            Write-Host "`r    $i second(s) remaining...  " -NoNewline -ForegroundColor Yellow
+            Start-Sleep -Seconds 1
+        }
+        Write-Host ""
+        Restart-Computer -Force
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  MAIN  — calls everything in sequence
+# ═══════════════════════════════════════════════════════════════════════════════
 function Main {
     Clear-Host
     Write-Header
 
-    # ── OS / environment info ─────────────────────────────────────────────
-    $os      = Get-OSInfo
-    $isAdmin = Test-Administrator
+    Write-Log -Level INFO -Msg "DriverDex v$Script:VERSION session started."
 
-    Write-Step "System Information"
-    Write-Info "OS      : $($os.Caption) (Build $($os.Build))"
-    Write-Info "Arch    : $($os.Arch)"
-    Write-Info "PS      : v$($os.PSVersion)"
-    Write-Info "Admin   : $(if ($isAdmin) { 'Yes ✔' } else { 'No ✘ (elevation recommended)' })"
-    Write-Host ""
+    # ── Scratch directory & cleanup guarantee ──────────────────────────────
+    $Script:scratch = Join-Path $env:TEMP ("driverdex-" + [System.Guid]::NewGuid().ToString('N').Substring(0,8))
+    New-Item -ItemType Directory -Force -Path $Script:scratch | Out-Null
 
-    if (-not $isAdmin) { Request-Elevation }
-    $isAdmin = Test-Administrator   # re-check after potential re-launch
-
-    # ── Enumerate hardware ────────────────────────────────────────────────
-    $hwids       = Get-AllHardwareIDs
-    $problemHWIDs = Get-ProblemDevices
-
-    if ($problemHWIDs.Count -gt 0) {
-        Write-Warn "$($problemHWIDs.Count) problem device(s) detected (missing/broken drivers)."
-    }
-
-    if ($hwids.Count -eq 0) {
-        Write-Err "No hardware IDs found. Cannot continue."
-        return
-    }
-
-    # ── Query API ─────────────────────────────────────────────────────────
-    $drivers = Search-Drivers -HWIDs $hwids -SystemArch $os.Arch
-
-    if ($drivers.Count -eq 0) {
-        Write-Warn "No matching drivers found in the DriverDex database for your hardware."
-        Write-Info "Try updating your hardware list or check https://github.com/rhshourav/driverdex"
-        return
-    }
-    Write-OK "Found $($drivers.Count) matching driver package(s)."
-
-    # ── User selection ────────────────────────────────────────────────────
-    $selected = Show-DriverMenu -Drivers @($drivers) -ProblemHWIDs $problemHWIDs
-
-    if (-not $selected -or $selected.Count -eq 0) {
-        Write-Info "No drivers selected. Exiting."
-        return
-    }
-    Write-OK "$($selected.Count) driver(s) selected for installation."
-
-    # ── Output directory ──────────────────────────────────────────────────
-    Write-Host ""
-    $defaultOut = Join-Path $env:USERPROFILE 'Downloads\DriverDex-Drivers'
-    $outRoot    = Read-HostDefault "Output/staging folder" $defaultOut
-    New-Item -ItemType Directory -Force -Path $outRoot | Out-Null
-
-    # ── Download extractor ────────────────────────────────────────────────
-    $scratch = Join-Path $env:TEMP ("driverdex-" + [System.Guid]::NewGuid().ToString('N').Substring(0,8))
-    New-Item -ItemType Directory -Force -Path $scratch | Out-Null
-
-    $results = [System.Collections.Generic.List[object]]::new()
+    Register-EngineEvent -SourceIdentifier 'PowerShell.Exiting' -Action {
+        Remove-Item $Script:scratch -Recurse -Force -ErrorAction SilentlyContinue
+    } | Out-Null
 
     try {
-        Write-Host ""
-        Write-Step "Downloading extractor binary..."
-        $extractor = Join-Path $scratch 'extractor.exe'
-        Get-DriverDexFile -Url $Script:EXTRACTOR_URL -Dest $extractor
-        Write-OK "Extractor ready."
+        # ── OS / environment banner ────────────────────────────────────────
+        $os      = Get-OSInfo
+        $isAdmin = Test-Administrator
 
-        # ── Process each selected driver ──────────────────────────────────
-        $dIdx = 0
+        Write-Step "System information"
+        Write-Info "OS      : $($os.Caption) (Build $($os.Build))"
+        Write-Info "Arch    : $($os.Arch)"
+        Write-Info "PS      : v$($os.PSVersion)"
+        Write-Info "Admin   : $(if ($isAdmin) { 'Yes ✔' } else { 'No ✘ (elevation recommended)' })"
+        Write-Info "Log     : $Script:LOG_PATH"
+        Write-Host ""
+        Write-Log -Level INFO -Msg "OS=$($os.Caption) Build=$($os.Build) Arch=$($os.Arch) Admin=$isAdmin"
+
+        # ── Step 1: Elevation ──────────────────────────────────────────────
+        if (-not $isAdmin) { Request-Elevation }
+        $isAdmin = Test-Administrator
+
+        # ── Step 2: Network ────────────────────────────────────────────────
+        Write-Divider
+        if (-not (Test-NetworkConnectivity)) { return }
+        Write-Host ""
+
+        # ── Step 3: Hardware scan ──────────────────────────────────────────
+        Write-Divider
+        $hwids        = Get-AllHardwareIDs
+        $problemHWIDs = Get-ProblemDevices
+        Write-OK "Found $($hwids.Count) hardware IDs · $($problemHWIDs.Count) problem device(s)"
+        Write-Host ""
+
+        if ($hwids.Count -eq 0) {
+            Write-Err -What "No hardware IDs found." `
+                      -Reason "CIM and WMI queries returned empty results." `
+                      -Fix    "Ensure you have read access to WMI on this machine."
+            return
+        }
+
+        # ── Step 4: API query ──────────────────────────────────────────────
+        Write-Divider
+        $drivers = Search-Drivers -HWIDs $hwids -SystemArch $os.Arch
+        Write-Host ""
+
+        if ($drivers.Count -eq 0) {
+            Write-Warn "No matching drivers found in the DriverDex database for your hardware."
+            Write-Info "Check https://github.com/rhshourav/driverdex for coverage info."
+            return
+        }
+
+        # Category summary
+        $byCat = $drivers | Group-Object Category
+        $catSummary = ($byCat | ForEach-Object { "$($_.Name): $($_.Count)" }) -join '  ·  '
+        Write-OK "Found $($drivers.Count) matching driver(s)  [$catSummary]"
+        Write-Host ""
+
+        # ── Step 5: Driver selection ───────────────────────────────────────
+        $selected = Show-DriverMenu -Drivers @($drivers) -ProblemHWIDs $problemHWIDs
+
+        if (-not $selected -or $selected.Count -eq 0) {
+            Write-Info "No drivers selected. Exiting."
+            return
+        }
+        Write-Host ""
+
+        # ── Step 6: Output folder ──────────────────────────────────────────
+        Write-Divider
+        $outRoot = Get-OutputFolder
+        Write-Host ""
+
+        # ── Estimate disk space ────────────────────────────────────────────
+        # Conservative 200 MB per driver when exact size unknown
+        $estMB = $selected.Count * 200
+        Write-Info "Estimated download: ~${estMB} MB (rough estimate)"
+
+        # ── Download extractor once ────────────────────────────────────────
+        Write-Divider
+        Write-Step "Downloading DriverDex extractor..."
+        $extractor = Join-Path $Script:scratch 'extractor.exe'
+        try {
+            Get-DriverFile -Url $Script:EXTRACTOR_URL -Dest $extractor -Label 'extractor.exe'
+        } catch {
+            Write-Err -What "Failed to download extractor." `
+                      -Reason $_.Exception.Message `
+                      -Fix    "Check your internet connection and re-run the script."
+            return
+        }
+        Write-Host ""
+
+        # ── Step 7: Per-driver processing ──────────────────────────────────
+        $results = [System.Collections.Generic.List[object]]::new()
+        $dIdx    = 0
+
         foreach ($drv in $selected) {
             $dIdx++
-            Write-Host ""
-            Write-Divider
-            Write-Host "  [$dIdx/$($selected.Count)] $($drv.DisplayName)" -ForegroundColor Yellow
-            Write-Host "  Provider : $($drv.Provider)  |  Category : $($drv.Category)" -ForegroundColor DarkGray
-            Write-Host "  Version  : $($drv.Version)   |  Arch     : $($drv.Arch)" -ForegroundColor DarkGray
-            Write-Host "  HWID     : $($drv.MatchedHWID)" -ForegroundColor DarkGray
-            Write-Divider
+            Show-DriverPanel -Driver $drv -Idx $dIdx -Total $selected.Count
 
             $res = Install-DriverPackage `
-                        -Driver $drv `
-                        -OutputRoot $outRoot `
-                        -ScratchDir $scratch `
+                        -Driver        $drv `
+                        -OutputRoot    $outRoot `
+                        -ScratchDir    $Script:scratch `
                         -ExtractorPath $extractor `
-                        -IsAdmin $isAdmin
+                        -IsAdmin       $isAdmin
             $results.Add($res)
+            Write-Log -Level INFO -Msg "Driver '$($drv.DisplayName)': success=$($res.Success) skipped=$($res.Skipped) reboot=$($res.RebootRequired)"
         }
 
+        # ── Step 8: Summary ────────────────────────────────────────────────
         Show-Summary -Results @($results)
 
-        $rebootNeeded = $results | Where-Object { $_.Success }
-        if ($rebootNeeded) {
-            $reboot = Read-HostDefault "Restart Windows now to apply drivers? [y/N]" 'N'
-            if ($reboot -match '^[Yy]') {
-                Write-Warn "Restarting in 10 seconds... Press Ctrl+C to cancel."
-                Start-Sleep -Seconds 10
-                Restart-Computer -Force
-            }
-        }
+        # ── Step 9: Reboot prompt ──────────────────────────────────────────
+        Invoke-RebootPrompt -Results @($results)
 
-        Write-Host "  All done. DriverDex — https://github.com/rhshourav/driverdex" -ForegroundColor DarkCyan
+        Write-Host "  DriverDex — https://github.com/rhshourav/driverdex" -ForegroundColor DarkCyan
+        Write-Info "  Session log: $Script:LOG_PATH"
         Write-Host ""
+        Write-Log -Level INFO -Msg "Session complete."
 
     } finally {
-        Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $Script:scratch -ErrorAction SilentlyContinue
     }
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
 Main
-# ─────────────────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
