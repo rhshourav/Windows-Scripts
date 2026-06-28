@@ -656,7 +656,7 @@ function Search-Drivers {
             [void]$seen.Add($match.driver_id)
             $results.Add([pscustomobject]@{
                 DriverId         = $match.driver_id
-                DisplayName      = $match.display_name
+                DisplayName      = if ($match.display_name) { $match.display_name } else { "$($match.provider) $($match.category)".Trim() }
                 Provider         = $match.provider
                 Category         = $match.category
                 Version          = $match.version
@@ -715,7 +715,8 @@ function Show-DriverTable {
         $star = if ($d.IsRecommended) { '★' } else { ' ' }
         $cls  = Get-DriverClassification -Driver $d -ProblemHWIDs $ProblemHWIDs
 
-        $name = if ($d.DisplayName.Length -gt $colName) { $d.DisplayName.Substring(0,$colName-1)+'…' } else { $d.DisplayName }
+        $dName = if ($d.DisplayName) { $d.DisplayName } else { '—' }
+        $name = if ($dName.Length -gt $colName) { $dName.Substring(0,$colName-1)+'…' } else { $dName }
         $prov = if ($d.Provider.Length -gt $colProv)    { $d.Provider.Substring(0,$colProv-1)+'…' }    else { $d.Provider }
         $inst = if ($d.InstalledVersion) { $d.InstalledVersion } else { '—' }
         if ($inst.Length -gt $colInst) { $inst = $inst.Substring(0,$colInst-1)+'…' }
@@ -1633,7 +1634,7 @@ function Invoke-SearchAPI {
                     if ($archOk -and $catOk) {
                         $results.Add([pscustomobject]@{
                             DriverId    = $m.driver_id
-                            DisplayName = $m.display_name
+                            DisplayName = if ($m.display_name) { $m.display_name } else { "$($m.provider) $($m.category)".Trim() }
                             Provider    = $m.provider
                             Category    = $m.category
                             Version     = $m.version
@@ -1726,7 +1727,8 @@ function Show-SearchResultsTable {
     $rowNum = $startIdx
     foreach ($item in $pageItems) {
         $rowNum++
-        $name = if ($item.DisplayName.Length -gt $cName) { $item.DisplayName.Substring(0,$cName-1)+'…' } else { $item.DisplayName }
+        $iName = if ($item.DisplayName) { $item.DisplayName } else { '—' }
+        $name = if ($iName.Length -gt $cName) { $iName.Substring(0,$cName-1)+'…' } else { $iName }
         $prov = if ($item.Provider.Length   -gt $cProv)  { $item.Provider.Substring(0,$cProv-1)+'…'   } else { $item.Provider }
         $cat  = if ($item.Category.Length   -gt $cCat)   { $item.Category.Substring(0,$cCat-1)+'…'    } else { $item.Category }
         $ver  = if ($item.Version -and $item.Version.Length -gt $cVer) { $item.Version.Substring(0,$cVer-1)+'…' } else { if ($item.Version) { $item.Version } else { '—' } }
