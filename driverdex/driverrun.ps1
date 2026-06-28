@@ -573,6 +573,7 @@ function Get-DriverClassification {
 function Invoke-ApiWithRetry {
     <#
     .SYNOPSIS Calls the HWID API with up to 3 retries and exponential backoff.
+             Used by the auto-detect flow where reliability matters more than speed.
     .PARAMETER HWID  The hardware ID string to query
     Returns the parsed JSON response or $null on failure.
     #>
@@ -593,6 +594,104 @@ function Invoke-ApiWithRetry {
         }
     }
     return $null
+}
+
+function Invoke-ApiFast {
+    <#
+    .SYNOPSIS Single-shot HWID API call with a short timeout — no retries, no backoff.
+             Used by the search cache builder where speed matters and failures are cheap
+             (the cache just skips that HWID and moves on).
+    .PARAMETER HWID    Hardware ID string to query
+    .PARAMETER ApiBase Base API URL
+    Returns the parsed JSON response or $null on any failure.
+    #>
+    param([string]$HWID, [string]$ApiBase)
+    try {
+        $url  = "$ApiBase/$([Uri]::EscapeDataString($HWID))"
+        $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 8 -ErrorAction Stop
+        return ($resp.Content | ConvertFrom-Json)
+    } catch { return $null }
+}
+
+function Build-HwidCache {
+    <#
+    .SYNOPSIS Scans all local hardware IDs against the HWID API and stores the
+             flattened driver list in $Script:HwidCache. Called once per session
+             the first time a keyword search needs a fallback. Progress is written
+             inline so the caller's spinner keeps ticking.
+
+    Strategy: iterate all unique HWIDs, call Invoke-ApiFast (no retries / 8 s
+    timeout), accumulate every enabled driver record into a de-duplicated flat
+    list. Total time is dominated by network RTT * HWID count; with an 8-second
+    cap per call and no backoff the worst-case is ~16 minutes for 120 HWIDs on a
+    dead connection — but in practice on a live API each call returns in <300 ms,
+    so 120 HWIDs takes ~40 seconds.
+    #>
+    param([string]$ApiBase)
+
+    # ── Collect unique HWIDs from PnP ────────────────────────────────────────
+    $hwids = $null
+    try {
+        $hwids = @(Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop |
+                   Where-Object { $_.HardwareID -and @($_.HardwareID).Count -gt 0 } |
+                   ForEach-Object { $_.HardwareID } |
+                   Sort-Object -Unique)
+    } catch {
+        try {
+            $hwids = @(Get-WmiObject -Class Win32_PnPEntity -ErrorAction SilentlyContinue |
+                       Where-Object { $_.HardwareID } |
+                       ForEach-Object { $_.HardwareID } |
+                       Sort-Object -Unique)
+        } catch { $hwids = @() }
+    }
+    if (-not $hwids -or $hwids.Count -eq 0) {
+        $Script:HwidCache      = @()
+        $Script:HwidCacheBuilt = $true
+        return
+    }
+
+    $all    = [System.Collections.Generic.List[object]]::new()
+    $seen   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $total  = $hwids.Count
+    $done   = 0
+    $barW   = 24
+
+    foreach ($hwid in $hwids) {
+        $done++
+        # ── Inline progress bar ───────────────────────────────────────────
+        $fill    = [int](($done / $total) * $barW)
+        $bar     = ('[' + ('█' * $fill) + ('░' * ($barW - $fill)) + ']')
+        $pctStr  = "$done/$total"
+        Write-Host "`r  ◈ Building search index... $bar $pctStr  " -NoNewline -ForegroundColor DarkGray
+
+        $data = Invoke-ApiFast -HWID $hwid -ApiBase $ApiBase
+        if (-not $data -or -not $data.matches) { continue }
+
+        foreach ($m in @($data.matches)) {
+            if (-not $m.enabled)               { continue }
+            if ($seen.Contains($m.driver_id))  { continue }
+            [void]$seen.Add($m.driver_id)
+            $dn   = if ($m.display_name) { $m.display_name } else { '' }
+            $prov = if ($m.provider)     { $m.provider }     else { '' }
+            $cat  = if ($m.category)     { $m.category }     else { '' }
+            $all.Add([pscustomobject]@{
+                DriverId    = if ($m.driver_id)   { $m.driver_id }    else { '' }
+                DisplayName = if ($dn)            { $dn }             else { "$prov $cat".Trim() }
+                Provider    = $prov
+                Category    = $cat
+                Version     = if ($m.version)     { $m.version }      else { '' }
+                Arch        = if ($m.arch)        { $m.arch }         else { 'any' }
+                PrimaryUrl  = if ($m.primary_url) { $m.primary_url }  else { '' }
+                ZipParts    = if ($m.zip_parts)   { [int]$m.zip_parts } else { 1 }
+                MatchedHWID = $hwid
+                Score       = 50
+            })
+        }
+    }
+
+    Write-Host "`r$(' ' * 72)`r" -NoNewline   # erase progress line
+    $Script:HwidCache      = $all.ToArray()
+    $Script:HwidCacheBuilt = $true
 }
 
 function Search-Drivers {
@@ -1545,7 +1644,13 @@ function Invoke-ContributePrompt {
 #  multi-result display, and download-only or download+install modes.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-$Script:SEARCH_API = 'https://driverdex-check.driverdex.workers.dev/api/search'
+$Script:SEARCH_API    = 'https://driverdex-check.driverdex.workers.dev/api/search'
+
+# Session-level HWID result cache — populated once on first keyword search,
+# reused for all subsequent searches. Keyword filtering is then instant in-memory.
+# $null = not yet built; @() = built but empty; populated = ready to filter.
+$Script:HwidCache      = $null   # [object[]] all driver records from local HWIDs
+$Script:HwidCacheBuilt = $false  # set to $true once the cache population is complete
 
 function Set-BlackBackground {
     <#
@@ -1683,66 +1788,42 @@ function Invoke-SearchAPI {
             })
         }
     } catch {
-        # Search endpoint not available — silently fall through to HWID scan fallback below
-        Write-Host "  ◈ Search endpoint unavailable — scanning local hardware IDs..." -ForegroundColor DarkGray
+        # Search endpoint not available — fall through to cache-based fallback below
+        Write-Host "  ◈ Search endpoint unavailable — using local index..." -ForegroundColor DarkGray
     }
 
-    # ── HWID scan fallback: if search endpoint returned nothing, query every
-    #    local HWID and keyword-filter the display_name / provider / category ─
+    # ── Cache-based keyword fallback ───────────────────────────────────────────
+    # If the search API returned nothing, filter the session-level HWID cache
+    # in memory. Build the cache on first use (one scan per session, not per query).
     if ($results.Count -eq 0) {
-        $lcQuery = $Query.ToLower()
-        $hwids   = $null
-        try {
-            $hwids = Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop |
-                     Where-Object { $_.HardwareID -and @($_.HardwareID).Count -gt 0 } |
-                     ForEach-Object { $_.HardwareID } | Sort-Object -Unique
-        } catch {
-            try {
-                $hwids = Get-WmiObject -Class Win32_PnPEntity -ErrorAction SilentlyContinue |
-                         Where-Object { $_.HardwareID } |
-                         ForEach-Object { $_.HardwareID } | Sort-Object -Unique
-            } catch { $hwids = @() }
-        }
-        $seen2 = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-        $scanned = 0
-        foreach ($hwid in @($hwids)) {
-            $scanned++
-            if ($scanned % 30 -eq 0) {
-                Write-Host "`r  ◈ Scanning HWIDs... $scanned checked, $($results.Count) match(es) so far  " `
-                           -NoNewline -ForegroundColor DarkGray
+
+        if (-not $Script:HwidCacheBuilt) {
+            Write-Host "  ◈ Building local driver index (one-time, ~30 s on live API)..." -ForegroundColor DarkGray
+            Build-HwidCache -ApiBase $Script:API_BASE
+            if ($Script:HwidCache -and $Script:HwidCache.Count -gt 0) {
+                Write-OK "Index ready — $($Script:HwidCache.Count) driver record(s) indexed from your hardware."
+            } else {
+                Write-Warn "Index is empty — no drivers found for this machine's hardware IDs."
             }
-            $apiResult = Invoke-ApiWithRetry -HWID $hwid
-            if (-not $apiResult -or -not $apiResult.matches) { continue }
-            foreach ($m in @($apiResult.matches)) {
-                if (-not $m.enabled)          { continue }
-                if ($seen2.Contains($m.driver_id)) { continue }
-                $archOk = (-not $Arch) -or ($m.arch -eq $Arch) -or ($m.arch -in @('any','noarch',''))
-                $catOk  = (-not $Category) -or ($m.category -like "*$Category*")
+        }
+
+        if ($Script:HwidCache -and $Script:HwidCache.Count -gt 0) {
+            foreach ($entry in $Script:HwidCache) {
+                # Arch / category filters
+                $rawArch = if ($entry.Arch) { $entry.Arch } else { 'any' }
+                $archOk  = (-not $Arch) -or ($rawArch -eq $Arch) -or ($rawArch -in @('any','noarch',''))
+                $catOk   = (-not $Category) -or ($entry.Category -like "*$Category*")
                 if (-not $archOk -or -not $catOk) { continue }
-                # Keyword match against name / provider / category
-                $dn   = if ($m.display_name) { $m.display_name } else { '' }
-                $prov = if ($m.provider)     { $m.provider }     else { '' }
-                $cat  = if ($m.category)     { $m.category }     else { '' }
-                $hit  = ($dn   -like "*$Query*") -or
-                        ($prov -like "*$Query*") -or
-                        ($cat  -like "*$Query*")
+
+                # Keyword match (case-insensitive) across name, provider, category
+                $hit = ($entry.DisplayName -like "*$Query*") -or
+                       ($entry.Provider    -like "*$Query*") -or
+                       ($entry.Category    -like "*$Query*")
                 if (-not $hit) { continue }
-                [void]$seen2.Add($m.driver_id)
-                $results.Add([pscustomobject]@{
-                    DriverId    = if ($m.driver_id)    { $m.driver_id }    else { '' }
-                    DisplayName = if ($dn)             { $dn }             else { "$prov $cat".Trim() }
-                    Provider    = $prov
-                    Category    = $cat
-                    Version     = if ($m.version)      { $m.version }      else { '' }
-                    Arch        = if ($m.arch)         { $m.arch }         else { 'any' }
-                    PrimaryUrl  = if ($m.primary_url)  { $m.primary_url }  else { '' }
-                    ZipParts    = if ($m.zip_parts)    { [int]$m.zip_parts } else { 1 }
-                    MatchedHWID = $hwid
-                    Score       = 50
-                })
+
+                $results.Add($entry)
             }
         }
-        Write-Host "`r$(' ' * 72)`r" -NoNewline   # clear progress line
     }
 
     return , [object[]]$results.ToArray()
