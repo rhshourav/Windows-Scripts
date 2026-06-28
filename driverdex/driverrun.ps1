@@ -25,7 +25,7 @@ $ProgressPreference    = 'SilentlyContinue'   # Suppress PS built-in progress ba
 # ═══════════════════════════════════════════════════════════════════════════════
 #  CONSTANTS
 # ═══════════════════════════════════════════════════════════════════════════════
-$Script:VERSION       = '2.1.0'
+$Script:VERSION       = '2.2.0'
 $Script:API_BASE      = 'https://driverdex-check.driverdex.workers.dev/api/hwid'
 $Script:LFS_BATCH_URL = 'https://github.com/rhshourav/driverdex.git/info/lfs/objects/batch'
 $Script:EXTRACTOR_URL = 'https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/extractor/extractor.exe'
@@ -692,6 +692,7 @@ function Show-DriverTable {
     Write-Host ""
     Write-Divider
     Write-Host "  Found $($Drivers.Count) matching driver package(s) for your hardware:" -ForegroundColor Cyan
+    Write-Host "  ⚠  Default: installs PROBLEM devices only (error code > 0)  ·  Optional updates listed separately" -ForegroundColor DarkYellow
     Write-Divider
     Write-Host ""
 
@@ -726,7 +727,7 @@ function Show-DriverTable {
     }
 
     Write-Host ""
-    Write-Info "★ = best architecture match     NEW/UPDATE = needs action     INSTALLED/NEWER = already fine"
+    Write-Info "★ = best arch match    PROBLEM = error/missing (default install)    UPDATE = optional    INSTALLED/NEWER = already fine"
     Write-Host ""
 }
 
@@ -750,43 +751,56 @@ function Show-DriverMenu {
             Class  = (Get-DriverClassification -Driver $_ -ProblemHWIDs $ProblemHWIDs)
         }
     })
-    $smartSet = @($classified | Where-Object { $_.Class.Recommended } | ForEach-Object { $_.Driver })
+    # PROBLEMS = default: only devices flagged with ConfigManagerErrorCode > 0 (missing/broken drivers)
+    $problemSet = @($Drivers | Where-Object { $ProblemHWIDs -contains $_.MatchedHWID })
+    # UPDATE set: drivers with a newer version available (shown as optional, not selected by default)
+    $updateSet  = @($classified | Where-Object {
+        $_.Class.StatusCode -eq 'UPDATE' -and -not ($ProblemHWIDs -contains $_.Driver.MatchedHWID)
+    } | ForEach-Object { $_.Driver })
 
-    if ($smartSet.Count -gt 0) {
-        Write-OK "$($smartSet.Count) of $($Drivers.Count) driver(s) need action — the rest are already up to date."
+    if (@($problemSet).Count -gt 0) {
+        Write-OK "$(@($problemSet).Count) PROBLEM device(s) with missing/broken drivers — selected by default."
     } else {
-        Write-OK "Everything here is already installed and current. Nothing needs action."
+        Write-OK "No problem devices detected. All hardware has functional drivers."
+    }
+    if (@($updateSet).Count -gt 0) {
+        Write-Host ""
+        Write-Host "  ℹ  $(@($updateSet).Count) optional driver update(s) available (older versions — not selected by default):" -ForegroundColor DarkYellow
+        foreach ($u in $updateSet) {
+            Write-Host "       · $($u.DisplayName)  installed v$($u.InstalledVersion) → DB v$($u.Version)" -ForegroundColor DarkGray
+        }
+        Write-Host "     Use 'UPDATES' or enter numbers to install these." -ForegroundColor DarkGray
     }
     Write-Host ""
 
-    Write-Info "Selection: SMART (recommended, default) · ALL · PROBLEMS · NONE · comma-separated numbers · q to quit"
+    Write-Info "Selection: PROBLEMS (default, errors only) · UPDATES (optional) · ALL · NONE · numbers · q to quit"
     Write-Host ""
 
-    $raw = Read-Input -Prompt 'Select drivers' -Default 'SMART' `
-        -Validator { param($v) $v -match '^(SMART|ALL|PROBLEMS|NONE|q|[0-9, ]+)$' } `
-        -ErrMsg    'Enter SMART, ALL, PROBLEMS, NONE, a list of numbers, or q to quit.'
+    $raw = Read-Input -Prompt 'Select drivers' -Default 'PROBLEMS' `
+        -Validator { param($v) $v -match '^(PROBLEMS|UPDATES|ALL|NONE|q|[0-9, ]+)$' } `
+        -ErrMsg    'Enter PROBLEMS, UPDATES, ALL, NONE, a list of numbers, or q to quit.'
 
     if ($raw -eq 'q')    { return @() }
     if ($raw -eq 'NONE') { return @() }
 
-    if ($raw -eq 'SMART') {
-        $sel = $smartSet
+    if ($raw -eq 'PROBLEMS') {
+        $sel = $problemSet
         if (@($sel).Count -eq 0) {
-            Write-Info "Nothing selected. Re-run and choose ALL if you want to force-reinstall anyway."
+            Write-Info "No problem devices found. Use UPDATES or ALL to install/update drivers."
+            return @()
+        }
+    } elseif ($raw -eq 'UPDATES') {
+        $sel = $updateSet
+        if (-not $sel -or @($sel).Count -eq 0) {
+            Write-Warn "No optional updates available in the current list."
             return @()
         }
     } elseif ($raw -eq 'ALL') {
         $sel = $Drivers
-    } elseif ($raw -eq 'PROBLEMS') {
-        $sel = @($Drivers | Where-Object { $ProblemHWIDs -contains $_.MatchedHWID })
-        if (-not $sel -or @($sel).Count -eq 0) {
-            Write-Warn "No problem devices in the list. Falling back to SMART selection."
-            $sel = $smartSet
-        }
     } else {
         $indices = $raw -split '[,\s]+' | ForEach-Object {
             $n = 0
-            if ([int]::TryParse($_.Trim(), [ref]$n) -and $n -ge 1 -and $n -le $Drivers.Count) { $n }
+            if ([int]::TryParse($_.Trim(), [ref]$n) -and $n -ge 1 -and $n -le @($Drivers).Count) { $n }
         } | Where-Object { $_ } | Sort-Object -Unique
         $sel = @($indices | ForEach-Object { $Drivers[$_ - 1] })
     }
@@ -815,7 +829,7 @@ function Show-DriverMenu {
 
     # Confirm
     Write-Host ""
-    $confirm = Read-Input -Prompt "Proceed with $($sel.Count) driver(s)?" -Default 'Y' `
+    $confirm = Read-Input -Prompt "Proceed with $(@($sel).Count) driver(s)?" -Default 'Y' `
         -Validator { param($v) $v -match '^[YyNn]$' } -ErrMsg 'Enter Y or N.'
     if ($confirm -match '^[Nn]') { return @() }
 
@@ -1139,7 +1153,7 @@ function Install-DriverPackage {
         }
 
         # ── Download all parts ─────────────────────────────────────────────
-        $partUrls = Get-PartUrls -PrimaryUrl $Driver.PrimaryUrl -ZipParts $Driver.ZipParts
+        $partUrls  = @(Get-PartUrls -PrimaryUrl $Driver.PrimaryUrl -ZipParts $Driver.ZipParts)
         $firstPart = $null
 
         for ($pi = 0; $pi -lt $partUrls.Count; $pi++) {
@@ -1185,11 +1199,13 @@ function Install-DriverPackage {
         } | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $outDir 'manifest.json') -Encoding UTF8
 
         # ── Install via pnputil ────────────────────────────────────────────
-        $infs = @(Get-ChildItem -Path $outDir -Filter '*.inf' -Recurse -ErrorAction SilentlyContinue)
+        $infs = @(Get-ChildItem -Path $outDir -Filter '*.inf' -Recurse -ErrorAction SilentlyContinue |
+                  Where-Object { $_ -ne $null })
 
         if ($infs.Count -gt 0 -and $IsAdmin) {
             Write-Step "Installing $($infs.Count) INF package(s) via pnputil..."
-            $pnpArgs = '/add-driver', (Join-Path $outDir '*.inf'), '/subdirs', '/install'
+            # pnputil /add-driver on a glob is not reliable in all PS versions; pass the folder instead
+            $pnpArgs = @('/add-driver', "$outDir\*.inf", '/subdirs', '/install')
             $pnpProc = Start-Process -FilePath "$env:SystemRoot\System32\pnputil.exe" `
                                      -ArgumentList $pnpArgs -Wait -PassThru -NoNewWindow
             $exitCode = $pnpProc.ExitCode
@@ -1228,15 +1244,15 @@ function Install-DriverPackage {
 
         } else {
             # Fallback: vendor setup.exe / MSI
-            $installer = Get-ChildItem -Path $outDir -Include 'setup.exe','*.msi' `
+            $installer = @(Get-ChildItem -Path $outDir -Include 'setup.exe','*.msi' `
                                        -Recurse -ErrorAction SilentlyContinue |
-                         Select-Object -First 1
+                         Where-Object { $_ -ne $null }) | Select-Object -First 1
             if ($installer) {
                 Write-Step "Vendor installer detected: $($installer.Name)"
                 $run = Read-Input -Prompt "Run installer now?" -Default 'Y' `
                     -Validator { param($v) $v -match '^[YyNn]$' } -ErrMsg 'Enter Y or N.'
                 if ($run -match '^[Yy]') {
-                    $iArgs = if ($installer.Extension -eq '.msi') { '/i', $installer.FullName, '/qn' } else { @() }
+                    $iArgs = if ($installer.Extension -eq '.msi') { @('/i', $installer.FullName, '/qn') } else { @() }
                     Start-Process -FilePath $installer.FullName -ArgumentList $iArgs -Wait
                     Write-OK "Vendor installer completed."
                     $result.Success = $true
@@ -1520,9 +1536,655 @@ function Invoke-ContributePrompt {
     Write-Host ""
 }
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
-#  MAIN  — calls everything in sequence
+#  DRIVER SEARCH ENGINE  — Standalone search, download, and install menu
+#  Always forces black background. Production-ready with pagination, filters,
+#  multi-result display, and download-only or download+install modes.
 # ═══════════════════════════════════════════════════════════════════════════════
+
+$Script:SEARCH_API = 'https://driverdex-check.driverdex.workers.dev/api/search'
+
+function Set-BlackBackground {
+    <#
+    .SYNOPSIS Forces the terminal background to black for the Search Engine UI.
+             Restores on exit when called with -Restore.
+    #>
+    param([switch]$Restore)
+    if (-not $Restore) {
+        try {
+            $Host.UI.RawUI.BackgroundColor = [System.ConsoleColor]::Black
+            $Host.UI.RawUI.ForegroundColor = [System.ConsoleColor]::White
+            Clear-Host
+        } catch { <# non-fatal in non-interactive hosts #> }
+    } else {
+        try {
+            $Host.UI.RawUI.BackgroundColor = [System.ConsoleColor]::Black
+        } catch {}
+    }
+}
+
+function Write-SearchBanner {
+    <#.SYNOPSIS Renders the DriverDex Search Engine branded header.#>
+    $inner = 74
+    function _SPad { param([string]$s) $s.PadRight($inner).Substring(0, $inner) }
+
+    $top   = '╔' + ('═' * $inner) + '╗'
+    $bot   = '╚' + ('═' * $inner) + '╝'
+    $blank = '║' + (' ' * $inner) + '║'
+
+    Write-Host ""
+    Write-Host "  $top"   -ForegroundColor DarkCyan
+    Write-Host "  $blank" -ForegroundColor DarkCyan
+
+    $art = @(
+        '  ██████╗ ██████╗ ██╗██╗   ██╗███████╗██████╗ ██████╗ ███████╗██╗  ██╗  ',
+        '  ██╔══██╗██╔══██╗██║╚██╗ ██╔╝██╔════╝██╔══██╗██╔══██╗██╔════╝╚██╗██╔╝  ',
+        '  ██║  ██║██████╔╝██║ ╚████╔╝ █████╗  ██████╔╝██║  ██║█████╗   ╚███╔╝   ',
+        '  ██║  ██║██╔══██╗██║  ╚██╔╝  ██╔══╝  ██╔══██╗██║  ██║██╔══╝   ██╔██╗   ',
+        '  ██████╔╝██║  ██║██║   ██║   ███████╗██║  ██║██████╔╝███████╗██╔╝ ██╗   ',
+        '  ╚═════╝ ╚═╝  ╚═╝╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═╝  '
+    )
+    foreach ($row in $art) {
+        Write-Host "  ║$(_SPad $row)║" -ForegroundColor Cyan
+    }
+
+    Write-Host "  $blank" -ForegroundColor DarkCyan
+    $tagLine = "  ◈  DRIVER SEARCH ENGINE  ◈  Search · Download · Install"
+    Write-Host "  ║$(_SPad $tagLine)║" -ForegroundColor Yellow
+    $sub = "  Type a keyword, device name, HWID, or category to find drivers"
+    Write-Host "  ║$(_SPad $sub)║"     -ForegroundColor DarkGray
+    Write-Host "  $blank"              -ForegroundColor DarkCyan
+    Write-Host "  $bot"               -ForegroundColor DarkCyan
+    Write-Host ""
+}
+
+function Invoke-SearchAPI {
+    <#
+    .SYNOPSIS Queries the DriverDex search endpoint. Falls back to HWID API for
+    HWID-style queries (PCI\, USB\, ACPI\, etc.) when search endpoint returns nothing.
+    Returns an array of driver result objects, or empty array on failure.
+    .PARAMETER Query  User search string
+    .PARAMETER Arch   Optional architecture filter (x64 / x86 / any)
+    .PARAMETER Category Optional category filter
+    #>
+    param(
+        [string]$Query,
+        [string]$Arch     = '',
+        [string]$Category = ''
+    )
+
+    $results = [System.Collections.Generic.List[object]]::new()
+
+    # ── Detect HWID-style queries and use the HWID endpoint directly ───────
+    $isHWID = $Query -match '^(PCI|USB|ACPI|HDAUDIO|HID|ROOT|SCSI|DISPLAY|IDE|STORAGE)\\'
+    if ($isHWID) {
+        Write-Host "  ◈ Detected hardware ID — querying HWID endpoint..." -ForegroundColor DarkGray
+        try {
+            $encoded = [Uri]::EscapeDataString($Query.ToUpper())
+            $url     = "$Script:API_BASE/$encoded"
+            $resp    = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+            $data    = $resp.Content | ConvertFrom-Json
+            if ($data.matches) {
+                foreach ($m in $data.matches) {
+                    if (-not $m.enabled) { continue }
+                    $archOk = (-not $Arch) -or ($m.arch -eq $Arch) -or ($m.arch -in @('any','noarch',''))
+                    $catOk  = (-not $Category) -or ($m.category -like "*$Category*")
+                    if ($archOk -and $catOk) {
+                        $results.Add([pscustomobject]@{
+                            DriverId    = $m.driver_id
+                            DisplayName = $m.display_name
+                            Provider    = $m.provider
+                            Category    = $m.category
+                            Version     = $m.version
+                            Arch        = $m.arch
+                            PrimaryUrl  = $m.primary_url
+                            ZipParts    = [int]$m.zip_parts
+                            MatchedHWID = $Query.ToUpper()
+                            Score       = 100
+                        })
+                    }
+                }
+            }
+        } catch {
+            Write-Warn "HWID lookup failed: $($_.Exception.Message)"
+        }
+        return [array]$results
+    }
+
+    # ── Text search endpoint ────────────────────────────────────────────────
+    $encodedQ = [Uri]::EscapeDataString($Query)
+    $url      = "$Script:SEARCH_API`?q=$encodedQ"
+    if ($Arch)     { $url += "&arch=$Arch" }
+    if ($Category) { $url += "&category=$([Uri]::EscapeDataString($Category))" }
+
+    try {
+        $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+        $data = $resp.Content | ConvertFrom-Json
+
+        $raw = if ($data.results) { $data.results } elseif ($data.matches) { $data.matches } else { $data }
+        foreach ($m in $raw) {
+            if ($m.enabled -eq $false) { continue }
+            $results.Add([pscustomobject]@{
+                DriverId    = if ($m.driver_id)    { $m.driver_id }    else { $m.id }
+                DisplayName = if ($m.display_name) { $m.display_name } else { $m.name }
+                Provider    = if ($m.provider)     { $m.provider }     else { '' }
+                Category    = if ($m.category)     { $m.category }     else { '' }
+                Version     = if ($m.version)      { $m.version }      else { '' }
+                Arch        = if ($m.arch)         { $m.arch }         else { 'any' }
+                PrimaryUrl  = if ($m.primary_url)  { $m.primary_url }  else { $m.url }
+                ZipParts    = if ($m.zip_parts)    { [int]$m.zip_parts } else { 1 }
+                MatchedHWID = if ($m.hardware_id)  { $m.hardware_id }  else { '' }
+                Score       = if ($m.score)        { [int]$m.score }   else { 0 }
+            })
+        }
+    } catch {
+        # Search endpoint not available — try keyword scan via known categories
+        Write-Host "  ◈ Search endpoint unavailable — performing local keyword match..." -ForegroundColor DarkGray
+    }
+
+    return [array]$results
+}
+
+function Show-SearchResultsTable {
+    <#
+    .SYNOPSIS Renders a paginated, indexed results table for the search engine.
+    .PARAMETER Results     Array of search result objects
+    .PARAMETER Page        Current page (1-based)
+    .PARAMETER PageSize    Results per page (default 10)
+    #>
+    param([object[]]$Results, [int]$Page = 1, [int]$PageSize = 10)
+
+    $total     = @($Results).Count
+    $totalPages= [Math]::Ceiling($total / $PageSize)
+    if ($Page -lt 1) { $Page = 1 }
+    if ($Page -gt $totalPages) { $Page = $totalPages }
+
+    $startIdx  = ($Page - 1) * $PageSize
+    $endIdx    = [Math]::Min($startIdx + $PageSize - 1, $total - 1)
+    $pageItems = @($Results[$startIdx..$endIdx])
+
+    # ── Header ─────────────────────────────────────────────────────────────
+    Write-Host ""
+    Write-Host "  ┌─────────────────────────────────────────────────────────────────────────────┐" -ForegroundColor DarkCyan
+    Write-Host "  │  SEARCH RESULTS   $total result(s) found   Page $Page / $totalPages$((' ' * 30).Substring(0, [Math]::Max(0, 30 - "$total result(s) found   Page $Page / $totalPages".Length)))│" -ForegroundColor Cyan
+    Write-Host "  └─────────────────────────────────────────────────────────────────────────────┘" -ForegroundColor DarkCyan
+    Write-Host ""
+
+    # Column widths
+    $cN  = 3; $cName = 26; $cProv = 16; $cCat = 11; $cVer = 14; $cArch = 5
+
+    $hdr = "  {0,-$cN} │ {1,-$cName} │ {2,-$cProv} │ {3,-$cCat} │ {4,-$cVer} │ {5,-$cArch}" `
+           -f '#', 'Driver Name', 'Provider', 'Category', 'Version', 'Arch'
+    Write-Host $hdr -ForegroundColor DarkGray
+    $sep = "  {0}─┼─{1}─┼─{2}─┼─{3}─┼─{4}─┼─{5}" `
+           -f ('─'*$cN),('─'*$cName),('─'*$cProv),('─'*$cCat),('─'*$cVer),('─'*$cArch)
+    Write-Host $sep -ForegroundColor DarkGray
+
+    $rowNum = $startIdx
+    foreach ($item in $pageItems) {
+        $rowNum++
+        $name = if ($item.DisplayName.Length -gt $cName) { $item.DisplayName.Substring(0,$cName-1)+'…' } else { $item.DisplayName }
+        $prov = if ($item.Provider.Length   -gt $cProv)  { $item.Provider.Substring(0,$cProv-1)+'…'   } else { $item.Provider }
+        $cat  = if ($item.Category.Length   -gt $cCat)   { $item.Category.Substring(0,$cCat-1)+'…'    } else { $item.Category }
+        $ver  = if ($item.Version -and $item.Version.Length -gt $cVer) { $item.Version.Substring(0,$cVer-1)+'…' } else { if ($item.Version) { $item.Version } else { '—' } }
+        $arch = if ($item.Arch) { $item.Arch } else { 'any' }
+
+        $row = "  {0,-$cN} │ {1,-$cName} │ {2,-$cProv} │ {3,-$cCat} │ {4,-$cVer} │ {5,-$cArch}" `
+               -f $rowNum, $name, $prov, $cat, $ver, $arch
+        Write-Host $row -ForegroundColor White
+    }
+
+    Write-Host ""
+    if ($totalPages -gt 1) {
+        Write-Host "  Page $Page of $totalPages  ·  n=next  p=prev  g<N>=go to page" -ForegroundColor DarkGray
+    }
+
+    return [pscustomobject]@{ Page = $Page; TotalPages = $totalPages; StartIdx = $startIdx }
+}
+
+function Get-SearchResultDetail {
+    <#
+    .SYNOPSIS Shows full details for a single search result.
+    .PARAMETER Item Driver result object
+    #>
+    param([object]$Item)
+
+    $inner = 70
+    Write-Host ""
+    Write-Host "  ╔══ DRIVER DETAILS $('═' * ($inner - 17))╗" -ForegroundColor DarkCyan
+    $fields = [ordered]@{
+        'Name'        = $Item.DisplayName
+        'Provider'    = $Item.Provider
+        'Category'    = $Item.Category
+        'Version'     = $Item.Version
+        'Arch'        = $Item.Arch
+        'Driver ID'   = $Item.DriverId
+        'Matched HWID'= if ($Item.MatchedHWID) { $Item.MatchedHWID } else { 'N/A (keyword match)' }
+        'Parts'       = "$($Item.ZipParts) archive part(s)"
+        'Download URL'= $Item.PrimaryUrl
+    }
+    foreach ($kv in $fields.GetEnumerator()) {
+        $label = $kv.Key.PadRight(14)
+        $val   = if ($kv.Value) { $kv.Value } else { '—' }
+        # Wrap long values
+        if ($val.Length -gt ($inner - 18)) { $val = $val.Substring(0,$inner - 21) + '...' }
+        Write-Host "  ║  $label : $($val.PadRight($inner - 18))  ║" -ForegroundColor White
+    }
+    Write-Host "  ╚$('═' * ($inner + 2))╝" -ForegroundColor DarkCyan
+    Write-Host ""
+}
+
+function Invoke-SearchDownload {
+    <#
+    .SYNOPSIS Handles download (and optionally install) for a single search result.
+    .PARAMETER Item        Driver result object
+    .PARAMETER OutRoot     Root output folder
+    .PARAMETER ScratchDir  Temp staging directory
+    .PARAMETER Extractor   Path to extractor.exe
+    .PARAMETER IsAdmin     Whether the session is elevated
+    .PARAMETER InstallMode 'download' | 'install'
+    #>
+    param(
+        [object]$Item,
+        [string]$OutRoot,
+        [string]$ScratchDir,
+        [string]$Extractor,
+        [bool]  $IsAdmin,
+        [string]$InstallMode = 'download'
+    )
+
+    $safeName = "$($Item.Provider)_$($Item.Category)_$($Item.Version)_$($Item.Arch)" `
+                -replace '[\\/:*?"<>|]', '_'
+    if (-not $safeName.Trim('_')) { $safeName = "driver_$($Item.DriverId)" }
+    $outDir   = Join-Path $OutRoot $safeName
+    $pkgTemp  = Join-Path $ScratchDir ([System.Guid]::NewGuid().ToString('N').Substring(0,8))
+
+    try {
+        New-Item -ItemType Directory -Force -Path $outDir  | Out-Null
+        New-Item -ItemType Directory -Force -Path $pkgTemp | Out-Null
+
+        # Download all parts
+        $partUrls  = @(Get-PartUrls -PrimaryUrl $Item.PrimaryUrl -ZipParts $Item.ZipParts)
+        $firstPart = $null
+
+        for ($pi = 0; $pi -lt $partUrls.Count; $pi++) {
+            $url      = $partUrls[$pi]
+            $fileName = Split-Path $url -Leaf
+            $dest     = Join-Path $pkgTemp $fileName
+            if ($pi -eq 0) { $firstPart = $dest }
+            Write-Sub "[$($pi+1)/$($partUrls.Count)] $fileName"
+            Get-DriverFile -Url $url -Dest $dest -Label $fileName
+        }
+
+        # Extract
+        Write-Step "Extracting..."
+        $proc = Start-Process -FilePath $Extractor -Wait -PassThru -NoNewWindow `
+                    -ArgumentList @('--file', $firstPart, '--output', $outDir, '--verify') `
+                    -RedirectStandardError (Join-Path $pkgTemp 'stderr.txt')
+        if ($proc.ExitCode -ne 0) {
+            $errLines = ''
+            $ef = Join-Path $pkgTemp 'stderr.txt'
+            if (Test-Path $ef) { $errLines = (Get-Content $ef -ErrorAction SilentlyContinue | Select-Object -Last 3) -join ' | ' }
+            throw "Extractor failed (exit $($proc.ExitCode)) — $errLines"
+        }
+        Write-OK "Extracted to: $outDir"
+
+        if ($InstallMode -eq 'install') {
+            $infs = @(Get-ChildItem -Path $outDir -Filter '*.inf' -Recurse -ErrorAction SilentlyContinue |
+                      Where-Object { $_ -ne $null })
+            if ($infs.Count -gt 0 -and $IsAdmin) {
+                Write-Step "Installing via pnputil ($($infs.Count) INF)..."
+                $pnp = Start-Process "$env:SystemRoot\System32\pnputil.exe" `
+                           -ArgumentList @('/add-driver', "$outDir\*.inf", '/subdirs', '/install') `
+                           -Wait -PassThru -NoNewWindow
+                if ($pnp.ExitCode -in @(0,3010)) {
+                    Write-OK "Driver installed successfully$(if ($pnp.ExitCode -eq 3010) { ' — reboot required' } else { '' })"
+                } else {
+                    Write-Warn "pnputil returned exit code $($pnp.ExitCode) — try Device Manager at: $outDir"
+                }
+            } elseif ($infs.Count -gt 0 -and -not $IsAdmin) {
+                Write-Warn "Not elevated. Point Device Manager to: $outDir"
+            } else {
+                $inst = @(Get-ChildItem -Path $outDir -Include 'setup.exe','*.msi' -Recurse `
+                          -ErrorAction SilentlyContinue | Where-Object { $_ -ne $null }) | Select-Object -First 1
+                if ($inst) {
+                    Write-Step "Running vendor installer: $($inst.Name)"
+                    $iArgs = if ($inst.Extension -eq '.msi') { @('/i', $inst.FullName, '/qn') } else { @() }
+                    Start-Process $inst.FullName -ArgumentList $iArgs -Wait
+                    Write-OK "Vendor installer completed."
+                } else {
+                    Write-Warn "No INF or setup.exe found — files at: $outDir"
+                }
+            }
+        } else {
+            Write-OK "Download complete. Files saved to:"
+            Write-Host "      $outDir" -ForegroundColor Cyan
+        }
+
+    } catch {
+        Write-Err -What "Failed to process $($Item.DisplayName)" -Reason $_.Exception.Message `
+                  -Fix "Check the log and try again."
+    } finally {
+        Remove-Item -Recurse -Force $pkgTemp -ErrorAction SilentlyContinue
+    }
+}
+
+function Show-SearchHelp {
+    <#.SYNOPSIS Prints search engine help and usage examples.#>
+    Write-Host ""
+    Write-Host "  ┌─ SEARCH ENGINE HELP ──────────────────────────────────────────────────────┐" -ForegroundColor DarkCyan
+    Write-Host "  │                                                                            │" -ForegroundColor DarkCyan
+    Write-Host "  │  SEARCH EXAMPLES:                                                          │" -ForegroundColor DarkCyan
+    Write-Host "  │   realtek audio           Search by device name keyword                   │" -ForegroundColor White
+    Write-Host "  │   intel network           Search by brand + category                      │" -ForegroundColor White
+    Write-Host "  │   PCI\VEN_8086&DEV_1234   Direct hardware ID lookup                       │" -ForegroundColor White
+    Write-Host "  │   nvidia gpu              Category keyword search                          │" -ForegroundColor White
+    Write-Host "  │                                                                            │" -ForegroundColor DarkCyan
+    Write-Host "  │  FILTERS (type after search):                                              │" -ForegroundColor DarkCyan
+    Write-Host "  │   arch x64 / x86 / any   Filter by architecture                          │" -ForegroundColor White
+    Write-Host "  │   cat audio / network / display / storage / bluetooth / chipset           │" -ForegroundColor White
+    Write-Host "  │                                                                            │" -ForegroundColor DarkCyan
+    Write-Host "  │  NAVIGATION:                                                               │" -ForegroundColor DarkCyan
+    Write-Host "  │   n / p                   Next / Previous page                            │" -ForegroundColor White
+    Write-Host "  │   g<N>                    Go to page N  (e.g. g3)                        │" -ForegroundColor White
+    Write-Host "  │   <number>                Select a result by row number                   │" -ForegroundColor White
+    Write-Host "  │   d<number>               Download only (e.g. d3)                        │" -ForegroundColor White
+    Write-Host "  │   i<number>               Download + Install (e.g. i3)                   │" -ForegroundColor White
+    Write-Host "  │   det<number>             Show full detail for a result                   │" -ForegroundColor White
+    Write-Host "  │   new / s <query>         New search                                      │" -ForegroundColor White
+    Write-Host "  │   filter                  Apply arch/category filters                     │" -ForegroundColor White
+    Write-Host "  │   clear                   Clear filters                                   │" -ForegroundColor White
+    Write-Host "  │   back / q                Return to main menu                             │" -ForegroundColor White
+    Write-Host "  │                                                                            │" -ForegroundColor DarkCyan
+    Write-Host "  └────────────────────────────────────────────────────────────────────────────┘" -ForegroundColor DarkCyan
+    Write-Host ""
+}
+
+function Invoke-DriverSearchEngine {
+    <#
+    .SYNOPSIS  Entry point for the DriverDex Search Engine.
+               Separate from the auto-detect flow. Always black background.
+    .PARAMETER IsAdmin     Whether the session is elevated
+    .PARAMETER ScratchDir  Temp directory for staging downloads
+    #>
+    param([bool]$IsAdmin, [string]$ScratchDir)
+
+    Set-BlackBackground
+    Write-SearchBanner
+
+    # ── Output folder (ask once per search session) ─────────────────────────
+    $defaultOut = Join-Path $env:USERPROFILE 'Downloads\DriverDex'
+    $outRoot    = Read-Input -Prompt 'Save drivers to' -Default $defaultOut `
+                      -Validator { param($v) $v.Length -gt 0 } -ErrMsg 'Path cannot be empty.'
+    try {
+        New-Item -ItemType Directory -Force -Path $outRoot | Out-Null
+        Write-OK "Output folder: $outRoot"
+    } catch {
+        Write-Err -What "Cannot create output folder" -Reason $_.Exception.Message -Fix "Choose a different path."
+        $outRoot = $env:TEMP
+    }
+
+    # ── Ensure extractor is available ──────────────────────────────────────
+    $extractor = Join-Path $ScratchDir 'extractor.exe'
+    if (-not (Test-Path $extractor)) {
+        Write-Step "Downloading extractor utility..."
+        try {
+            Get-DriverFile -Url $Script:EXTRACTOR_URL -Dest $extractor -Label 'extractor.exe'
+            Write-OK "Extractor ready."
+        } catch {
+            Write-Warn "Extractor download failed — install mode will be unavailable. Download-only will work."
+            $extractor = $null
+        }
+    }
+
+    # ── Session state ───────────────────────────────────────────────────────
+    $currentResults = @()
+    $currentPage    = 1
+    $pageSize       = 10
+    $currentQuery   = ''
+    $filterArch     = ''
+    $filterCategory = ''
+    $pageState      = $null
+
+    Write-Host ""
+    Write-Host "  Type a search query to find drivers. Type 'help' for usage." -ForegroundColor DarkGray
+    Write-Host ""
+
+    # ── Main search REPL ────────────────────────────────────────────────────
+    while ($true) {
+        # Build prompt context
+        $filterStr  = ''
+        if ($filterArch)     { $filterStr += " [arch:$filterArch]" }
+        if ($filterCategory) { $filterStr += " [cat:$filterCategory]" }
+        $promptText = if ($currentQuery) { "Search$filterStr" } else { "Search$filterStr" }
+
+        Write-Host "  ▸ $promptText" -ForegroundColor White -NoNewline
+        Write-Host " > " -ForegroundColor DarkCyan -NoNewline
+        $input = $Host.UI.ReadLine()
+        if ($null -eq $input) { break }
+        $input = $input.Trim()
+        if (-not $input) { continue }
+
+        # ── Command dispatch ──────────────────────────────────────────────
+        switch -Regex ($input.ToLower()) {
+
+            '^(back|q|quit|exit)$' {
+                Write-Host ""
+                Write-Host "  Returning to main menu..." -ForegroundColor DarkGray
+                Set-BlackBackground -Restore
+                return
+            }
+
+            '^help$' {
+                Show-SearchHelp
+                continue
+            }
+
+            '^clear$' {
+                $filterArch = ''; $filterCategory = ''
+                Write-OK "Filters cleared."
+                continue
+            }
+
+            '^filter$' {
+                Write-Host "  Arch filter  (x64/x86/any, blank=all) > " -ForegroundColor White -NoNewline
+                $fa = $Host.UI.ReadLine()
+                Write-Host "  Category filter (audio/network/display/storage/bluetooth/chipset, blank=all) > " -ForegroundColor White -NoNewline
+                $fc = $Host.UI.ReadLine()
+                $filterArch     = $fa.Trim().ToLower()
+                $filterCategory = $fc.Trim().ToLower()
+                Write-OK "Filter set: arch='$filterArch'  category='$filterCategory'"
+                # Re-run last search with new filters if available
+                if ($currentQuery) {
+                    Write-Step "Re-searching '$currentQuery' with new filters..."
+                    $currentResults = Invoke-SearchAPI -Query $currentQuery -Arch $filterArch -Category $filterCategory
+                    $currentPage    = 1
+                    if ($currentResults.Count -gt 0) {
+                        $pageState = Show-SearchResultsTable -Results $currentResults -Page $currentPage -PageSize $pageSize
+                    } else {
+                        Write-Warn "No results with current filters."
+                    }
+                }
+                continue
+            }
+
+            '^n(ext)?$' {
+                if ($currentResults.Count -eq 0) { Write-Warn "No search results. Run a search first."; continue }
+                $currentPage++
+                $pageState = Show-SearchResultsTable -Results $currentResults -Page $currentPage -PageSize $pageSize
+                $currentPage = $pageState.Page
+                continue
+            }
+
+            '^p(rev)?$' {
+                if ($currentResults.Count -eq 0) { Write-Warn "No search results. Run a search first."; continue }
+                $currentPage = [Math]::Max(1, $currentPage - 1)
+                $pageState = Show-SearchResultsTable -Results $currentResults -Page $currentPage -PageSize $pageSize
+                $currentPage = $pageState.Page
+                continue
+            }
+
+            '^g(\d+)$' {
+                if ($currentResults.Count -eq 0) { Write-Warn "No search results."; continue }
+                $gPage = [int]($Matches[1])
+                $currentPage = $gPage
+                $pageState = Show-SearchResultsTable -Results $currentResults -Page $currentPage -PageSize $pageSize
+                $currentPage = $pageState.Page
+                continue
+            }
+
+            '^det(\d+)$' {
+                $idx = [int]($Matches[1]) - 1
+                if ($idx -ge 0 -and $idx -lt $currentResults.Count) {
+                    Get-SearchResultDetail -Item $currentResults[$idx]
+                } else { Write-Warn "Invalid result number." }
+                continue
+            }
+
+            '^d(\d+)$' {
+                # Download only
+                $idx = [int]($Matches[1]) - 1
+                if ($idx -ge 0 -and $idx -lt $currentResults.Count) {
+                    $item = $currentResults[$idx]
+                    Get-SearchResultDetail -Item $item
+                    Write-Step "Downloading: $($item.DisplayName)"
+                    if (-not $extractor) { Write-Warn "Extractor unavailable — download will be raw parts only."; return }
+                    Invoke-SearchDownload -Item $item -OutRoot $outRoot -ScratchDir $ScratchDir `
+                                         -Extractor $extractor -IsAdmin $IsAdmin -InstallMode 'download'
+                } else { Write-Warn "Invalid result number. Valid range: 1–$($currentResults.Count)" }
+                continue
+            }
+
+            '^i(\d+)$' {
+                # Download + Install
+                $idx = [int]($Matches[1]) - 1
+                if ($idx -ge 0 -and $idx -lt $currentResults.Count) {
+                    $item = $currentResults[$idx]
+                    Get-SearchResultDetail -Item $item
+                    if (-not $IsAdmin) {
+                        Write-Warn "Not running as Administrator. Driver install may require elevation."
+                    }
+                    $confirm = Read-Input -Prompt "Download and INSTALL '$($item.DisplayName)'?" -Default 'Y' `
+                                   -Validator { param($v) $v -match '^[YyNn]$' } -ErrMsg 'Y or N'
+                    if ($confirm -match '^[Yy]') {
+                        if (-not $extractor) { Write-Err -What "Extractor not available" -Reason "Download failed earlier" -Fix "Check internet and retry."; continue }
+                        Invoke-SearchDownload -Item $item -OutRoot $outRoot -ScratchDir $ScratchDir `
+                                             -Extractor $extractor -IsAdmin $IsAdmin -InstallMode 'install'
+                    }
+                } else { Write-Warn "Invalid result number. Valid range: 1–$($currentResults.Count)" }
+                continue
+            }
+
+            '^(\d+)$' {
+                # Select by number — show details then ask action
+                $idx = [int]($Matches[1]) - 1
+                if ($idx -ge 0 -and $idx -lt $currentResults.Count) {
+                    $item = $currentResults[$idx]
+                    Get-SearchResultDetail -Item $item
+                    Write-Host "  What would you like to do with '$($item.DisplayName)'?" -ForegroundColor White
+                    Write-Host "   [d] Download only     [i] Download + Install     [x] Cancel" -ForegroundColor DarkGray
+                    Write-Host "  > " -ForegroundColor DarkCyan -NoNewline
+                    $act = $Host.UI.ReadLine()
+                    if ($act -match '^[Dd]') {
+                        if (-not $extractor) { Write-Warn "Extractor unavailable."; continue }
+                        Invoke-SearchDownload -Item $item -OutRoot $outRoot -ScratchDir $ScratchDir `
+                                             -Extractor $extractor -IsAdmin $IsAdmin -InstallMode 'download'
+                    } elseif ($act -match '^[Ii]') {
+                        if (-not $extractor) { Write-Err -What "Extractor not available" -Reason "Earlier download failed" -Fix "Retry."; continue }
+                        if (-not $IsAdmin) { Write-Warn "Not elevated — install may be incomplete." }
+                        Invoke-SearchDownload -Item $item -OutRoot $outRoot -ScratchDir $ScratchDir `
+                                             -Extractor $extractor -IsAdmin $IsAdmin -InstallMode 'install'
+                    }
+                } else { Write-Warn "Invalid result number. Valid range: 1–$($currentResults.Count)" }
+                continue
+            }
+
+            '^(new|s )(.+)$' {
+                # Explicit new search command: "new nvidia" or "s realtek"
+                $query = $input -replace '^(new|s)\s+', ''
+                $currentQuery   = $query
+                $currentPage    = 1
+                $currentResults = @()
+                Write-Host ""
+                Write-Step "Searching for '$query'..."
+                $Script:SpinIdx = 0
+                Show-Spinner -Label "Querying DriverDex..."
+                $currentResults = Invoke-SearchAPI -Query $query -Arch $filterArch -Category $filterCategory
+                Clear-SpinnerLine
+                if ($currentResults.Count -gt 0) {
+                    $pageState = Show-SearchResultsTable -Results $currentResults -Page $currentPage -PageSize $pageSize
+                    $currentPage = $pageState.Page
+                    Write-Host ""
+                    Write-Host "  Use d<N> to download, i<N> to install, det<N> for details, n/p to page." -ForegroundColor DarkGray
+                } else {
+                    Write-Warn "No drivers found for '$query'. Try a different keyword."
+                    Write-Info "Examples: 'realtek audio', 'intel wifi', 'PCI\\VEN_8086&DEV_1234'"
+                }
+                continue
+            }
+
+            default {
+                # Treat anything else as a new search query
+                $query          = $input
+                $currentQuery   = $query
+                $currentPage    = 1
+                $currentResults = @()
+                Write-Host ""
+                Write-Step "Searching for '$query'..."
+                $Script:SpinIdx = 0
+                Show-Spinner -Label "Querying DriverDex..."
+                $currentResults = Invoke-SearchAPI -Query $query -Arch $filterArch -Category $filterCategory
+                Clear-SpinnerLine
+                if ($currentResults.Count -gt 0) {
+                    $pageState = Show-SearchResultsTable -Results $currentResults -Page $currentPage -PageSize $pageSize
+                    $currentPage = $pageState.Page
+                    Write-Host ""
+                    Write-Host "  Use d<N> to download, i<N> to install, det<N> for details, n/p to page." -ForegroundColor DarkGray
+                } else {
+                    Write-Warn "No drivers found for '$query'. Try a different keyword or HWID."
+                    Write-Info "Examples: 'realtek audio', 'intel wifi', 'PCI\\VEN_8086&DEV_1234'"
+                    Write-Info "Type 'help' for full command reference."
+                }
+                continue
+            }
+        }
+    }
+}
+
+
+function Show-MainMenu {
+    <#
+    .SYNOPSIS Shows the DriverDex mode selection menu after the header.
+    Returns 'auto', 'search', or 'quit'.
+    #>
+    Write-Host "  ┌─────────────────────────────────────────────────────────────────────────┐" -ForegroundColor DarkCyan
+    Write-Host "  │                         SELECT A MODE                                   │" -ForegroundColor Cyan
+    Write-Host "  ├─────────────────────────────────────────────────────────────────────────┤" -ForegroundColor DarkCyan
+    Write-Host "  │                                                                         │" -ForegroundColor DarkCyan
+    Write-Host "  │   [1]  Auto-Detect & Install                                            │" -ForegroundColor White
+    Write-Host "  │        Scans your hardware, finds matching drivers,                     │" -ForegroundColor DarkGray
+    Write-Host "  │        installs only error devices by default.                          │" -ForegroundColor DarkGray
+    Write-Host "  │        Older driver updates shown as optional.                          │" -ForegroundColor DarkGray
+    Write-Host "  │                                                                         │" -ForegroundColor DarkCyan
+    Write-Host "  │   [2]  Driver Search Engine                                             │" -ForegroundColor Yellow
+    Write-Host "  │        Search by name, keyword, or HWID. Download or                   │" -ForegroundColor DarkGray
+    Write-Host "  │        install any driver from the DriverDex database.                 │" -ForegroundColor DarkGray
+    Write-Host "  │                                                                         │" -ForegroundColor DarkCyan
+    Write-Host "  │   [q]  Quit                                                             │" -ForegroundColor DarkGray
+    Write-Host "  │                                                                         │" -ForegroundColor DarkCyan
+    Write-Host "  └─────────────────────────────────────────────────────────────────────────┘" -ForegroundColor DarkCyan
+    Write-Host ""
+
+    $choice = Read-Input -Prompt 'Select mode' -Default '1' `
+        -Validator { param($v) $v -match '^[12qQ]$' } `
+        -ErrMsg    'Enter 1 (Auto-Detect), 2 (Search Engine), or q to quit.'
+
+    if ($choice -match '^[Qq]') { return 'quit' }
+    if ($choice -eq '2')        { return 'search' }
+    return 'auto'
+}
+
 function Main {
     Clear-Host
     Write-Header
@@ -1538,6 +2200,25 @@ function Main {
     } | Out-Null
 
     try {
+        # ── Mode selection ─────────────────────────────────────────────────
+        $mode = Show-MainMenu
+        if ($mode -eq 'quit') {
+            Write-Info "Exiting DriverDex. Goodbye."
+            return
+        }
+        if ($mode -eq 'search') {
+            Write-Host ""
+            # Ensure scratch exists for search engine
+            Invoke-DriverSearchEngine -IsAdmin (Test-Administrator) -ScratchDir $Script:scratch
+            Write-Host ""
+            Write-Host "  DriverDex — https://github.com/rhshourav/driverdex" -ForegroundColor DarkCyan
+            Write-Info "  Session log: $Script:LOG_PATH"
+            Write-Host ""
+            Write-Log -Level INFO -Msg "Search Engine session complete."
+            return
+        }
+
+        # ── Auto-Detect mode ───────────────────────────────────────────────
         # ── OS / environment banner ────────────────────────────────────────
         $os      = Get-OSInfo
         $isAdmin = Test-Administrator
