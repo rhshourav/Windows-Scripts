@@ -319,7 +319,7 @@ function Get-AllHardwareIDs {
     $devices = $null
     try {
         $devices = Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop |
-                   Where-Object { $_.HardwareID -and $_.HardwareID.Count -gt 0 }
+                   Where-Object { $_.HardwareID -and @($_.HardwareID).Count -gt 0 }
     } catch {
         Write-Warn "CIM query failed — falling back to WMI (Windows 7 mode)..."
         Write-Log -Level WARN -Msg "CIM fallback: $($_.Exception.Message)"
@@ -336,7 +336,7 @@ function Get-AllHardwareIDs {
         foreach ($dev in $devices) {
             $i++
             if ($i % 50 -eq 0) {
-                Write-Host "`r    Scanning... $($hwids.Count) IDs found so far" -NoNewline -ForegroundColor DarkGray
+                Write-Host "`r    Scanning... $(@($hwids).Count) IDs found so far" -NoNewline -ForegroundColor DarkGray
             }
             foreach ($id in $dev.HardwareID) {
                 if ($id -match '^(PCI|USB|ACPI|HDAUDIO|HID|ROOT|SCSI|DISPLAY|IDE|STORAGE)\\') {
@@ -363,8 +363,8 @@ function Get-AllHardwareIDs {
         }
     } catch { <# supplemental — non-fatal #> }
 
-    Write-OK "Found $($hwids.Count) unique hardware IDs"
-    return @($hwids)
+    Write-OK "Found $(@($hwids).Count) unique hardware IDs"
+    return [array]$hwids
 }
 
 function Get-ProblemDevices {
@@ -393,7 +393,7 @@ function Get-ProblemDevices {
     if ($count -gt 0) {
         Write-Accent "  [$count PROBLEM DEVICE(S) DETECTED — missing or broken drivers]"
     }
-    return @($problem)
+    return [array]$problem
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -432,10 +432,10 @@ function Search-Drivers {
     #>
     param([string[]]$HWIDs, [string]$SystemArch)
 
-    Write-Step "Querying DriverDex API for $($HWIDs.Count) hardware IDs..."
+    Write-Step "Querying DriverDex API for $(@($HWIDs).Count) hardware IDs..."
     $results = [System.Collections.Generic.List[object]]::new()
     $seen    = [System.Collections.Generic.HashSet[string]]::new()
-    $total   = $HWIDs.Count
+    $total   = @($HWIDs).Count
     $count   = 0
     $barW    = 20
 
@@ -448,7 +448,7 @@ function Search-Drivers {
         Write-Host "`r  » Querying API... [$bar] $count / $total  " -NoNewline -ForegroundColor White
 
         $apiResult = Invoke-ApiWithRetry -HWID $id
-        if (-not $apiResult -or -not $apiResult.matches -or $apiResult.matches.Count -eq 0) { continue }
+        if (-not $apiResult -or -not $apiResult.matches -or @($apiResult.matches).Count -eq 0) { continue }
 
         foreach ($match in $apiResult.matches) {
             if (-not $match.enabled)               { continue }
@@ -483,7 +483,7 @@ function Search-Drivers {
         }
     }
     Write-Host ""   # newline after progress bar
-    return $results
+    return [array]$results
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -567,7 +567,7 @@ function Show-DriverMenu {
         $sel = $Drivers
     } elseif ($raw -eq 'PROBLEMS') {
         $sel = @($Drivers | Where-Object { $ProblemHWIDs -contains $_.MatchedHWID })
-        if (-not $sel -or $sel.Count -eq 0) {
+        if (-not $sel -or @($sel).Count -eq 0) {
             Write-Warn "No problem devices in the list. Selecting ALL."
             $sel = $Drivers
         }
@@ -1111,6 +1111,152 @@ function Invoke-RebootPrompt {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  CONTRIBUTION PROMPT
+#  Shown when: (a) zero drivers found for this machine, or (b) some installed
+#  drivers have no database entry / were already installed from elsewhere.
+#  DriverDex is community-driven — every submission makes it better for everyone.
+# ═══════════════════════════════════════════════════════════════════════════════
+function Invoke-ContributePrompt {
+    <#
+    .SYNOPSIS  Invites the user to contribute their driver data to the DriverDex
+               community database. Explains what is collected, what is NOT
+               collected, and gives two launch options (TUI / background).
+    .PARAMETER HWIDs    The full list of hardware IDs found on this machine
+    .PARAMETER Reason   'no_drivers' | 'partial' — shapes the message tone
+    #>
+    param(
+        [string[]]$HWIDs,
+        [string]  $Reason = 'no_drivers'
+    )
+
+    $w = 66
+    $top = '╔' + ('═' * ($w - 2)) + '╗'
+    $bot = '╚' + ('═' * ($w - 2)) + '╝'
+    $mid = { param($s) "  ║  $($s.PadRight($w - 6))  ║" }
+
+    Write-Host ""
+    Write-Host "  $top" -ForegroundColor Magenta
+
+    if ($Reason -eq 'no_drivers') {
+        Write-Host (& $mid "  DriverDex has no drivers for your hardware — yet.") -ForegroundColor White
+    } else {
+        Write-Host (& $mid "  Some of your devices aren't in the DriverDex database yet.") -ForegroundColor White
+    }
+    Write-Host (& $mid "") -ForegroundColor Magenta
+    Write-Host (& $mid "  You can change that.") -ForegroundColor Cyan
+    Write-Host (& $mid "") -ForegroundColor Magenta
+    Write-Host "  $bot" -ForegroundColor Magenta
+    Write-Host ""
+
+    # ── The pitch ──────────────────────────────────────────────────────────
+    Write-Host "  DriverDex is 100% community-driven." -ForegroundColor White
+    Write-Host "  Every hardware profile submitted makes the database smarter" -ForegroundColor DarkGray
+    Write-Host "  for the next person with the same machine — maybe someone who" -ForegroundColor DarkGray
+    Write-Host "  can't figure out why their device doesn't work." -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  Contributing takes under a minute and requires no account." -ForegroundColor White
+    Write-Host ""
+
+    # ── Transparency: what IS and ISN'T collected ──────────────────────────
+    Write-Host "  What the contribution tool collects:" -ForegroundColor Cyan
+    Write-Host "    ✔  Hardware IDs (PCI\VEN_..., USB\VID_... strings)" -ForegroundColor Green
+    Write-Host "    ✔  Device categories and friendly names from Windows" -ForegroundColor Green
+    Write-Host "    ✔  Currently installed driver versions (Provider, Version, Date)" -ForegroundColor Green
+    Write-Host "    ✔  Windows version and architecture (to flag driver compatibility)" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  What it does NOT collect:" -ForegroundColor Yellow
+    Write-Host "    ✘  Your name, username, or any account information" -ForegroundColor DarkGray
+    Write-Host "    ✘  IP address or location (submissions are anonymised server-side)" -ForegroundColor DarkGray
+    Write-Host "    ✘  Files, documents, browsing data, or anything personal" -ForegroundColor DarkGray
+    Write-Host "    ✘  Serial numbers, MAC addresses, or unique device identifiers" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  Submissions are reviewed by maintainers before entering the" -ForegroundColor DarkGray
+    Write-Host "  database. You can read the full privacy policy at:" -ForegroundColor DarkGray
+    Write-Host "  https://github.com/rhshourav/driverdex/blob/main/PRIVACY.md" -ForegroundColor Cyan
+    Write-Host ""
+
+    # ── Show what would be submitted (preview) ────────────────────────────
+    Write-Host "  Preview — hardware IDs that would be submitted from this machine:" -ForegroundColor White
+    $preview = @($HWIDs | Select-Object -First 6)
+    foreach ($id in $preview) {
+        Write-Host "    · $id" -ForegroundColor DarkGray
+    }
+    if (@($HWIDs).Count -gt 6) {
+        Write-Host "    · ... and $(@($HWIDs).Count - 6) more hardware ID(s)" -ForegroundColor DarkGray
+    }
+    Write-Host ""
+
+    # ── Ask ────────────────────────────────────────────────────────────────
+    Write-Host "  Your submission directly helps the next person with your" -ForegroundColor White
+    Write-Host "  hardware. It costs you nothing and takes less than 60 seconds." -ForegroundColor White
+    Write-Host ""
+
+    $contrib = Read-Input `
+        -Prompt  'Contribute your hardware profile to the DriverDex community?' `
+        -Default 'Y' `
+        -Validator { param($v) $v -match '^[YyNn]$' } `
+        -ErrMsg  'Enter Y or N.'
+
+    if ($contrib -notmatch '^[Yy]') {
+        Write-Info "No problem — you can always contribute later by re-running this script."
+        Write-Info "Or visit: https://github.com/rhshourav/driverdex"
+        Write-Host ""
+        return
+    }
+
+    # ── Thank-you ──────────────────────────────────────────────────────────
+    Write-Host ""
+    Write-Host "  Thank you! You're helping build something genuinely useful" -ForegroundColor Green
+    Write-Host "  for everyone who has the same hardware as you." -ForegroundColor Green
+    Write-Host "  Your submission will be reviewed and, if valid, added to" -ForegroundColor Green
+    Write-Host "  the public database — credited to the DriverDex community." -ForegroundColor Green
+    Write-Host ""
+
+    # ── Two launch options ─────────────────────────────────────────────────
+    Write-Divider
+    Write-Host "  How would you like to run the contribution tool?" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  [1]  TUI mode    — interactive, step-by-step walkthrough" -ForegroundColor Cyan
+    Write-Host "       Reviews exactly what will be sent before it goes anywhere." -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  [2]  Background  — silent, zero-click, runs in under 30 seconds" -ForegroundColor Cyan
+    Write-Host "       Collects and submits automatically; no prompts." -ForegroundColor DarkGray
+    Write-Host ""
+
+    $mode = Read-Input `
+        -Prompt  'Choose contribution mode' `
+        -Default '1' `
+        -Validator { param($v) $v -match '^[12]$' } `
+        -ErrMsg  'Enter 1 (TUI) or 2 (Background).'
+
+    Write-Host ""
+
+    if ($mode -eq '1') {
+        Write-Step "Launching DriverDex Contribution Tool (TUI)..."
+        try {
+            Invoke-Expression (Invoke-RestMethod `
+                'https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/contribute/run.ps1')
+        } catch {
+            Write-Err -What "Could not launch the TUI contribution tool." `
+                      -Reason $_.Exception.Message `
+                      -Fix    "Run manually: irm https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/contribute/run.ps1 | iex"
+        }
+    } else {
+        Write-Step "Launching DriverDex Contribution Tool (Background)..."
+        try {
+            Invoke-Expression (Invoke-RestMethod `
+                'https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/contribute/bg/run_bg.ps1')
+        } catch {
+            Write-Err -What "Could not launch the background contribution tool." `
+                      -Reason $_.Exception.Message `
+                      -Fix    "Run manually: irm https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/contribute/bg/run_bg.ps1 | iex"
+        }
+    }
+
+    Write-Host ""
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  MAIN  — calls everything in sequence
 # ═══════════════════════════════════════════════════════════════════════════════
 function Main {
@@ -1154,10 +1300,10 @@ function Main {
         Write-Divider
         $hwids        = Get-AllHardwareIDs
         $problemHWIDs = Get-ProblemDevices
-        Write-OK "Found $($hwids.Count) hardware IDs · $($problemHWIDs.Count) problem device(s)"
+        Write-OK "Found $(@($hwids).Count) hardware IDs · $(@($problemHWIDs).Count) problem device(s)"
         Write-Host ""
 
-        if ($hwids.Count -eq 0) {
+        if (@($hwids).Count -eq 0) {
             Write-Err -What "No hardware IDs found." `
                       -Reason "CIM and WMI queries returned empty results." `
                       -Fix    "Ensure you have read access to WMI on this machine."
@@ -1169,22 +1315,23 @@ function Main {
         $drivers = Search-Drivers -HWIDs $hwids -SystemArch $os.Arch
         Write-Host ""
 
-        if ($drivers.Count -eq 0) {
+        if (@($drivers).Count -eq 0) {
             Write-Warn "No matching drivers found in the DriverDex database for your hardware."
-            Write-Info "Check https://github.com/rhshourav/driverdex for coverage info."
+            Write-Host ""
+            Invoke-ContributePrompt -HWIDs $hwids -Reason 'no_drivers'
             return
         }
 
         # Category summary
         $byCat = $drivers | Group-Object Category
         $catSummary = ($byCat | ForEach-Object { "$($_.Name): $($_.Count)" }) -join '  ·  '
-        Write-OK "Found $($drivers.Count) matching driver(s)  [$catSummary]"
+        Write-OK "Found $(@($drivers).Count) matching driver(s)  [$catSummary]"
         Write-Host ""
 
         # ── Step 5: Driver selection ───────────────────────────────────────
         $selected = Show-DriverMenu -Drivers @($drivers) -ProblemHWIDs $problemHWIDs
 
-        if (-not $selected -or $selected.Count -eq 0) {
+        if (-not $selected -or @($selected).Count -eq 0) {
             Write-Info "No drivers selected. Exiting."
             return
         }
@@ -1197,7 +1344,7 @@ function Main {
 
         # ── Estimate disk space ────────────────────────────────────────────
         # Conservative 200 MB per driver when exact size unknown
-        $estMB = $selected.Count * 200
+        $estMB = @($selected).Count * 200
         Write-Info "Estimated download: ~${estMB} MB (rough estimate)"
 
         # ── Download extractor once ────────────────────────────────────────
@@ -1220,7 +1367,7 @@ function Main {
 
         foreach ($drv in $selected) {
             $dIdx++
-            Show-DriverPanel -Driver $drv -Idx $dIdx -Total $selected.Count
+            Show-DriverPanel -Driver $drv -Idx $dIdx -Total @($selected).Count
 
             $res = Install-DriverPackage `
                         -Driver        $drv `
@@ -1235,7 +1382,14 @@ function Main {
         # ── Step 8: Summary ────────────────────────────────────────────────
         Show-Summary -Results @($results)
 
-        # ── Step 9: Reboot prompt ──────────────────────────────────────────
+        # ── Step 9: Contribution prompt ───────────────────────────────────
+        $skippedDrivers = @($results | Where-Object { $_.Skipped })
+        $failedDrivers  = @($results | Where-Object { -not $_.Success -and -not $_.Skipped })
+        if ($skippedDrivers.Count -gt 0 -or $failedDrivers.Count -gt 0) {
+            Invoke-ContributePrompt -HWIDs $hwids -Reason 'partial'
+        }
+
+        # ── Step 10: Reboot prompt ─────────────────────────────────────────
         Invoke-RebootPrompt -Results @($results)
 
         Write-Host "  DriverDex — https://github.com/rhshourav/driverdex" -ForegroundColor DarkCyan
