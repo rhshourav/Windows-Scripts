@@ -2651,7 +2651,7 @@ function Invoke-DriverSearchEngine {
 function Show-MainMenu {
     <#
     .SYNOPSIS Shows the DriverDex mode selection menu after the header.
-    Returns 'auto', 'search', or 'quit'.
+    Returns 'auto', 'search', 'winupdate', or 'quit'.
     #>
     Write-Host "  ┌─────────────────────────────────────────────────────────────────────────┐" -ForegroundColor DarkCyan
     Write-Host "  │                         SELECT A MODE                                   │" -ForegroundColor Cyan
@@ -2666,18 +2666,264 @@ function Show-MainMenu {
     Write-Host "  │        Search by name, keyword, or HWID. Download or                   │" -ForegroundColor DarkGray
     Write-Host "  │        install any driver from the DriverDex database.                 │" -ForegroundColor DarkGray
     Write-Host "  │                                                                         │" -ForegroundColor DarkCyan
+    Write-Host "  │   [3]  Force Windows Update                                             │" -ForegroundColor Magenta
+    Write-Host "  │        Triggers Windows Update, installs all pending patches,           │" -ForegroundColor DarkGray
+    Write-Host "  │        and optional driver updates from Microsoft servers.              │" -ForegroundColor DarkGray
+    Write-Host "  │                                                                         │" -ForegroundColor DarkCyan
     Write-Host "  │   [q]  Quit                                                             │" -ForegroundColor DarkGray
     Write-Host "  │                                                                         │" -ForegroundColor DarkCyan
     Write-Host "  └─────────────────────────────────────────────────────────────────────────┘" -ForegroundColor DarkCyan
     Write-Host ""
 
     $choice = Read-Input -Prompt 'Select mode' -Default '1' `
-        -Validator { param($v) $v -match '^[12qQ]$' } `
-        -ErrMsg    'Enter 1 (Auto-Detect), 2 (Search Engine), or q to quit.'
+        -Validator { param($v) $v -match '^[123qQ]$' } `
+        -ErrMsg    'Enter 1 (Auto-Detect), 2 (Search Engine), 3 (Windows Update), or q to quit.'
 
     if ($choice -match '^[Qq]') { return 'quit' }
     if ($choice -eq '2')        { return 'search' }
+    if ($choice -eq '3')        { return 'winupdate' }
     return 'auto'
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  FORCE WINDOWS UPDATE
+#  Triggers Windows Update via PSWindowsUpdate (auto-installed if absent) or
+#  falls back to the built-in wuauclt / UsoClient native tools so the function
+#  works on every Windows version from 7 SP1 through 11.
+# ═══════════════════════════════════════════════════════════════════════════════
+function Invoke-ForceWindowsUpdate {
+    <#
+    .SYNOPSIS Forces Windows Update: installs PSWindowsUpdate if needed, scans
+              for all pending patches + optional driver updates, applies them, and
+              reports the result.  Falls back gracefully to native WU clients
+              (UsoClient / wuauclt) on systems where PowerShell Gallery is
+              unavailable or the module install is blocked.
+    .PARAMETER IsAdmin  $true when the session is elevated.
+    #>
+    param([bool]$IsAdmin)
+
+    Write-Host ""
+    Write-Divider
+    Write-Host "  ▸ Force Windows Update" -ForegroundColor Magenta
+    Write-Divider
+    Write-Host ""
+
+    if (-not $IsAdmin) {
+        Write-Warn "Windows Update installation requires Administrator rights."
+        Write-Info "Please re-run DriverDex as Administrator to use this feature."
+        Write-Host ""
+        return
+    }
+
+    # ── Render a compact info box ──────────────────────────────────────────
+    $w = 66
+    Write-Host "  ╔$('═' * ($w - 2))╗" -ForegroundColor DarkCyan
+    Write-Host "  ║  This option will:$(' ' * ($w - 21))║" -ForegroundColor White
+    Write-Host "  ║    • Scan for ALL pending Windows Updates$(' ' * ($w - 44))║" -ForegroundColor DarkGray
+    Write-Host "  ║    • Include optional Microsoft driver updates$(' ' * ($w - 49))║" -ForegroundColor DarkGray
+    Write-Host "  ║    • Download and install everything found$(' ' * ($w - 44))║" -ForegroundColor DarkGray
+    Write-Host "  ║    • Prompt for reboot if required$(' ' * ($w - 37))║" -ForegroundColor DarkGray
+    Write-Host "  ║$(' ' * ($w - 2))║" -ForegroundColor DarkCyan
+    Write-Host "  ║  This may take several minutes depending on$(' ' * ($w - 46))║" -ForegroundColor DarkGray
+    Write-Host "  ║  your internet speed and number of updates.$(' ' * ($w - 45))║" -ForegroundColor DarkGray
+    Write-Host "  ╚$('═' * ($w - 2))╝" -ForegroundColor DarkCyan
+    Write-Host ""
+
+    $confirm = Read-Input -Prompt 'Proceed with Force Windows Update?' -Default 'Y' `
+        -Validator { param($v) $v -match '^[YyNn]$' } -ErrMsg 'Enter Y or N.'
+    if ($confirm -notmatch '^[Yy]') {
+        Write-Info "Windows Update skipped."
+        Write-Host ""
+        return
+    }
+
+    Write-Host ""
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # STRATEGY 1: PSWindowsUpdate module (richest output, works on PS 5.1+)
+    # ══════════════════════════════════════════════════════════════════════════
+    $moduleAvailable = $false
+    if (Get-Module -ListAvailable -Name PSWindowsUpdate -ErrorAction SilentlyContinue) {
+        $moduleAvailable = $true
+        Write-OK "PSWindowsUpdate module already installed."
+    } else {
+        Write-Step "PSWindowsUpdate module not found — attempting to install from PSGallery..."
+        try {
+            # Ensure TLS 1.2 for Gallery
+            [Net.ServicePointManager]::SecurityProtocol =
+                [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+        } catch {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        }
+
+        try {
+            # Bootstrap NuGet provider silently if missing (required on fresh installs)
+            if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
+                Write-Sub "Installing NuGet provider..."
+                Install-PackageProvider -Name NuGet -Force -Scope CurrentUser -ErrorAction Stop | Out-Null
+            }
+            # Trust PSGallery for this session
+            if ((Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue).InstallationPolicy -ne 'Trusted') {
+                Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+            }
+            Install-Module -Name PSWindowsUpdate -Force -Scope CurrentUser `
+                           -AllowClobber -ErrorAction Stop
+            $moduleAvailable = $true
+            Write-OK "PSWindowsUpdate installed successfully."
+        } catch {
+            Write-Warn "Could not install PSWindowsUpdate: $($_.Exception.Message)"
+            Write-Info "Falling back to native Windows Update client..."
+            Write-Log -Level WARN -Msg "PSWindowsUpdate install failed: $($_.Exception.Message)"
+        }
+    }
+
+    if ($moduleAvailable) {
+        # ── Use PSWindowsUpdate for full control ──────────────────────────
+        try {
+            Import-Module PSWindowsUpdate -ErrorAction Stop
+
+            Write-Step "Scanning for available Windows Updates (including drivers)..."
+            $Script:SpinIdx = 0
+            Show-Spinner -Label "Checking Windows Update servers..."
+
+            # Retrieve all updates, including optional Microsoft driver updates
+            $updates = Get-WindowsUpdate -MicrosoftUpdate -AcceptAll -IgnoreReboot `
+                                         -ErrorAction Stop
+            Clear-SpinnerLine
+
+            if (-not $updates -or @($updates).Count -eq 0) {
+                Write-OK "Your system is fully up to date. No pending updates found."
+                Write-Host ""
+                return
+            }
+
+            Write-OK "Found $(@($updates).Count) pending update(s):"
+            Write-Host ""
+            foreach ($u in $updates) {
+                $kb   = if ($u.KBArticleIDs) { " [KB$($u.KBArticleIDs -join ',KB')]" } else { '' }
+                $size = if ($u.Size -gt 0) { " ($([Math]::Round($u.Size / 1MB, 1)) MB)" } else { '' }
+                Write-Host "  ·  $($u.Title)$kb$size" -ForegroundColor Cyan
+            }
+            Write-Host ""
+
+            $install = Read-Input -Prompt "Install all $(@($updates).Count) update(s) now?" `
+                -Default 'Y' -Validator { param($v) $v -match '^[YyNn]$' } -ErrMsg 'Y or N.'
+            if ($install -notmatch '^[Yy]') {
+                Write-Info "Update installation cancelled by user."
+                Write-Host ""
+                return
+            }
+
+            Write-Step "Installing updates — this may take a while..."
+            Write-Host ""
+            $results = Install-WindowsUpdate -MicrosoftUpdate -AcceptAll -IgnoreReboot `
+                                              -Verbose -ErrorAction Stop
+
+            $rebootNeeded = $false
+            foreach ($r in $results) {
+                $status = if ($r.Result -eq 2) { '✔ Installed' }
+                          elseif ($r.Result -eq 3) { '⟳ Reboot required' }
+                          elseif ($r.Result -eq 4) { '✘ Failed' }
+                          else                      { "  Result: $($r.Result)" }
+                $col = switch ($r.Result) {
+                    2 { 'Green' }; 3 { 'Yellow' }; 4 { 'Red' }; default { 'DarkGray' }
+                }
+                Write-Host "  $status  ·  $($r.Title)" -ForegroundColor $col
+                if ($r.Result -eq 3) { $rebootNeeded = $true }
+            }
+            Write-Host ""
+
+            if ($rebootNeeded) {
+                Write-Warn "One or more updates require a reboot to complete installation."
+                Write-Host ""
+                $rb = Read-Input -Prompt 'Restart now?' -Default 'N' `
+                    -Validator { param($v) $v -match '^[YyNn]$' } -ErrMsg 'Y or N.'
+                if ($rb -match '^[Yy]') {
+                    Write-Warn "Restarting in 10 seconds... Press Ctrl+C to cancel."
+                    for ($i = 10; $i -ge 1; $i--) {
+                        Write-Host "`r    $i second(s) remaining...  " -NoNewline -ForegroundColor Yellow
+                        Start-Sleep -Seconds 1
+                    }
+                    Write-Host ""
+                    Restart-Computer -Force
+                }
+            } else {
+                Write-OK "All updates installed successfully. No reboot required."
+            }
+
+        } catch {
+            Write-Err -What "PSWindowsUpdate encountered an error." `
+                      -Reason $_.Exception.Message `
+                      -Fix    "Check the log for details or try again." `
+                      -Err    $_
+            Write-Info "Attempting native WU client fallback..."
+            # Fall through to Strategy 2
+            $moduleAvailable = $false
+        }
+    }
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # STRATEGY 2: Native WU clients — UsoClient (Win 10/11) or wuauclt (Win 7/8)
+    # ══════════════════════════════════════════════════════════════════════════
+    if (-not $moduleAvailable) {
+        Write-Step "Using native Windows Update client..."
+        Write-Host ""
+
+        $usoPath    = "$env:SystemRoot\System32\UsoClient.exe"
+        $wuauclt    = "$env:SystemRoot\System32\wuauclt.exe"
+        $triggered  = $false
+
+        if (Test-Path $usoPath) {
+            # Windows 10 / 11
+            Write-Sub "Triggering scan via UsoClient (Windows 10/11)..."
+            try {
+                & $usoPath StartScan           2>$null
+                Start-Sleep -Seconds 3
+                & $usoPath StartDownload       2>$null
+                Start-Sleep -Seconds 3
+                & $usoPath StartInstall        2>$null
+                $triggered = $true
+                Write-OK "UsoClient: scan, download & install triggered."
+            } catch {
+                Write-Warn "UsoClient call failed: $($_.Exception.Message)"
+            }
+        }
+
+        if (-not $triggered -and (Test-Path $wuauclt)) {
+            # Windows 7 / 8.1
+            Write-Sub "Triggering scan via wuauclt (Windows 7/8)..."
+            try {
+                & $wuauclt /detectnow         2>$null
+                Start-Sleep -Seconds 3
+                & $wuauclt /updatenow         2>$null
+                $triggered = $true
+                Write-OK "wuauclt: detect + update triggered."
+            } catch {
+                Write-Warn "wuauclt call failed: $($_.Exception.Message)"
+            }
+        }
+
+        if (-not $triggered) {
+            Write-Err -What "Could not trigger Windows Update." `
+                      -Reason "Neither UsoClient nor wuauclt found at expected paths." `
+                      -Fix    "Open Windows Settings → Windows Update → Check for updates."
+            Write-Host ""
+            return
+        }
+
+        Write-Host ""
+        Write-Host "  ℹ  Windows Update is now running in the background." -ForegroundColor Cyan
+        Write-Host "     Updates will download and install automatically." -ForegroundColor DarkGray
+        Write-Host "     You can monitor progress in:" -ForegroundColor DarkGray
+        Write-Host "       Settings → Windows Update   (Windows 10/11)" -ForegroundColor DarkGray
+        Write-Host "       Control Panel → Windows Update   (Windows 7/8)" -ForegroundColor DarkGray
+        Write-Host ""
+        Write-Host "  ℹ  For driver-specific updates Microsoft may show as 'Optional'." -ForegroundColor Yellow
+        Write-Host "     Open Windows Update > View optional updates to see them." -ForegroundColor DarkGray
+    }
+
+    Write-Host ""
+    Write-Log -Level INFO -Msg "Force Windows Update completed. ModuleUsed=$moduleAvailable"
 }
 
 function Main {
@@ -2710,6 +2956,25 @@ function Main {
             Write-Info "  Session log: $Script:LOG_PATH"
             Write-Host ""
             Write-Log -Level INFO -Msg "Search Engine session complete."
+            # ── Contribution prompt after Search mode ──────────────────────
+            $hwidsForContrib = @()
+            try { $hwidsForContrib = @(Get-AllHardwareIDs) } catch {}
+            Invoke-ContributePrompt -HWIDs $hwidsForContrib -Reason 'partial' -UnmatchedLocalDrivers @()
+            return
+        }
+        if ($mode -eq 'winupdate') {
+            $isAdmin = Test-Administrator
+            if (-not $isAdmin) { Request-Elevation }
+            $isAdmin = Test-Administrator
+            Invoke-ForceWindowsUpdate -IsAdmin $isAdmin
+            Write-Host "  DriverDex — https://github.com/rhshourav/driverdex" -ForegroundColor DarkCyan
+            Write-Info "  Session log: $Script:LOG_PATH"
+            Write-Host ""
+            Write-Log -Level INFO -Msg "Force Windows Update session complete."
+            # ── Contribution prompt after WU mode ──────────────────────────
+            $hwidsForContrib = @()
+            try { $hwidsForContrib = @(Get-AllHardwareIDs) } catch {}
+            Invoke-ContributePrompt -HWIDs $hwidsForContrib -Reason 'partial' -UnmatchedLocalDrivers @()
             return
         }
 
@@ -2839,9 +3104,9 @@ function Main {
 
         # ── Step 9: Contribution prompt ───────────────────────────────────
         $failedDrivers  = @($results | Where-Object { (-not $_.Success -and -not $_.Skipped) -or $_.PartialFailure })
-        if ($failedDrivers.Count -gt 0 -or @($unmatchedLocal).Count -gt 0) {
-            Invoke-ContributePrompt -HWIDs $hwids -Reason 'partial' -UnmatchedLocalDrivers $unmatchedLocal
-        }
+        # Always invite contributions after any successful run — not just failures.
+        # On a clean all-success run, we still show a brief "help the community" ask.
+        Invoke-ContributePrompt -HWIDs $hwids -Reason 'partial' -UnmatchedLocalDrivers $unmatchedLocal
 
         # ── Step 10: Reboot prompt ─────────────────────────────────────────
         Invoke-RebootPrompt -Results @($results)
