@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    DriverDex — Automatic Hardware Driver Detector & Installer  v2.1.0
+    DriverDex — Automatic Hardware Driver Detector & Installer  v2.2.3
     Run via: irm https://your-url/DriverDex-Installer.ps1 | iex
 
 .DESCRIPTION
@@ -28,17 +28,15 @@ $ProgressPreference    = 'SilentlyContinue'   # Suppress PS built-in progress ba
 function Get-Prop {
     <#
     .SYNOPSIS Reads a property safely under Set-StrictMode -Version Latest.
-             Under strict mode, $obj.Foo THROWS (PropertyNotFoundStrict) if Foo
-             isn't a member of $obj — it does NOT just return $null like in
-             non-strict mode. Every object in this script that ultimately comes
-             from JSON (API responses) or gets built across a few different
-             code paths is at risk of having an inconsistent shape, so any bare
-             ".PropertyName" access on one of those objects is a latent crash.
-             This helper uses reflection-based member lookup instead of the
-             dot operator, so a missing property safely yields $Default
-             instead of a terminating error — while leaving Set-StrictMode's
-             other protections (uninitialized variables, bad method-call
-             syntax) fully intact everywhere else in the script.
+             Handles BOTH PSCustomObject (PS 6+) and Newtonsoft JObject (PS 5.1).
+
+             In PowerShell 5.1, ConvertFrom-Json returns Newtonsoft.Json.Linq.JObject
+             instances. PSObject.Properties[] wrapping a JObject does NOT expose JSON
+             fields — every lookup returns $null. This function detects JObject and
+             uses the Newtonsoft Item[] indexer instead, which works correctly on PS 5.1.
+
+             In PowerShell 6+, ConvertFrom-Json returns proper PSCustomObject, so
+             PSObject.Properties[] works as expected.
     .PARAMETER Obj      The object to read from (may be $null)
     .PARAMETER Name     Property name to look up
     .PARAMETER Default  Value to return if the object is $null or lacks the property
@@ -49,6 +47,24 @@ function Get-Prop {
         $Default = $null
     )
     if ($null -eq $Obj) { return $Default }
+
+    # ── PS 5.1: ConvertFrom-Json returns Newtonsoft JObject/JArray ──────────
+    # JObject exposes properties via its Item[] indexer, not PSObject.Properties.
+    # JToken.ToObject([string]) converts the JValue to a native .NET type.
+    $typeName = $Obj.GetType().FullName
+    if ($typeName -like 'Newtonsoft.Json.Linq.*') {
+        try {
+            $token = $Obj[$Name]
+            if ($null -eq $token) { return $Default }
+            # JTokenType.Null means the JSON field is explicitly null
+            if ($token.Type.ToString() -eq 'Null') { return $Default }
+            $val = $token.ToObject([object])
+            if ($null -eq $val) { return $Default }
+            return $val
+        } catch { return $Default }
+    }
+
+    # ── PS 6+ / PSCustomObject: reflection-based lookup ─────────────────────
     $member = $Obj.PSObject.Properties[$Name]
     if ($null -eq $member) { return $Default }
     $val = $member.Value
@@ -59,7 +75,7 @@ function Get-Prop {
 # ═══════════════════════════════════════════════════════════════════════════════
 #  CONSTANTS
 # ═══════════════════════════════════════════════════════════════════════════════
-$Script:VERSION       = '2.2.0'
+$Script:VERSION       = '2.2.3'
 $Script:API_BASE      = 'https://driverdex-check.driverdex.workers.dev/api/hwid'
 $Script:LFS_BATCH_URL = 'https://github.com/rhshourav/driverdex.git/info/lfs/objects/batch'
 $Script:EXTRACTOR_URL = 'https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/extractor/extractor.exe'
@@ -775,12 +791,12 @@ function Build-HwidCache {
             try {
                 $result = $job.Pipe.EndInvoke($job.Handle)
                 $data   = if ($result) { $result[0].Data } else { $null }
-                $matches = Get-Prop $data 'matches'
+                $matches = try { $data.matches } catch { $null }
                 if ($matches) {
                     foreach ($m in @($matches)) {
-                        $mEnabled = Get-Prop $m 'enabled'
-                        $mId      = Get-Prop $m 'driver_id'
-                        if (-not $mEnabled)              { continue }
+                        $mEnabled = try { $m.enabled }    catch { $true }
+                        $mId      = try { [string]($m.driver_id) } catch { '' }
+                        if ($null -ne $mEnabled -and $mEnabled -eq $false) { continue }
                         if (-not $mId)                   { continue }
                         if ($seen.Contains($mId))         { continue }
                         [void]$seen.Add($mId)
@@ -1835,6 +1851,14 @@ function Invoke-SearchAPI {
     .SYNOPSIS Queries the DriverDex search endpoint. Falls back to HWID API for
     HWID-style queries (PCI\, USB\, ACPI\, etc.) when search endpoint returns nothing.
     Always returns [object[]] — never $null, never a bare object.
+
+    API SCHEMA (confirmed from live responses):
+      Search endpoint  → .results[]  fields: driver_id, display_name, provider,
+                         category, version, arch, primary_url, zip_parts, enabled
+      HWID endpoint    → .matches[]  fields: driver_id (string), id (int, ignore),
+                         display_name, provider, category, version, arch,
+                         primary_url, zip_parts, enabled, matched_is_generic
+
     .PARAMETER Query  User search string
     .PARAMETER Arch   Optional architecture filter (x64 / x86 / any)
     .PARAMETER Category Optional category filter
@@ -1846,63 +1870,134 @@ function Invoke-SearchAPI {
     )
 
     $results = [System.Collections.Generic.List[object]]::new()
+    $seen    = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
-    # ── Detect HWID-style queries and use the HWID endpoint directly ───────
-    $isHWID = $Query -match '^(PCI|USB|ACPI|HDAUDIO|HID|ROOT|SCSI|DISPLAY|IDE|STORAGE)\\'
+    # ── Helper: build a canonical record from one raw API item ─────────────
+    # Direct dot-access + try/catch bypasses PSObject.Properties[] which in PS 5.1
+    # silently returns $null for pscustomobject members created inside scriptblocks.
+    $buildRecord = {
+        param([object]$M, [string]$HwidTag, [int]$Score)
+
+        $mId      = try { $s = [string]($M.driver_id);    if ($s.Trim()) { $s } else { '' } } catch { '' }
+        $mName    = try { $s = [string]($M.display_name); if ($s.Trim()) { $s } else { '' } } catch { '' }
+        $mProv    = try { $s = [string]($M.provider);     if ($s.Trim()) { $s } else { '' } } catch { '' }
+        $mCat     = try { $s = [string]($M.category);     if ($s.Trim()) { $s } else { '' } } catch { '' }
+        $mVer     = try { $s = [string]($M.version);      if ($s.Trim()) { $s } else { '' } } catch { '' }
+        $mArchRaw = try { $s = [string]($M.arch);         if ($s.Trim()) { $s } else { 'any' } } catch { 'any' }
+        $mUrl     = try { $s = [string]($M.primary_url);  if ($s.Trim()) { $s } else { '' } } catch { '' }
+
+        $mZip = 1
+        try {
+            $zRaw = [string]($M.zip_parts)
+            $zInt = 1
+            if ([int]::TryParse($zRaw, [ref]$zInt) -and $zInt -ge 1) { $mZip = $zInt }
+        } catch {}
+
+        # Fallback display name when display_name is blank
+        if (-not $mName.Trim()) {
+            $mName = if ($mProv -or $mCat) { "$mProv $mCat".Trim() } else { $mId }
+        }
+
+        return [pscustomobject]@{
+            DriverId    = $mId
+            DisplayName = $mName
+            Provider    = $mProv
+            Category    = $mCat
+            Version     = $mVer
+            Arch        = $mArchRaw
+            PrimaryUrl  = $mUrl
+            ZipParts    = $mZip
+            MatchedHWID = $HwidTag
+            Score       = $Score
+        }
+    }
+
+    # ── Helper: true when a record has real payload worth showing ──────────
+    # Ghost/stub records have null provider, version, url — all fields empty.
+    # try/catch on each field guards against StrictMode member-not-found throws.
+    $hasPayload = {
+        param([object]$R)
+        $p = try { [string]($R.Provider)   } catch { '' }
+        $v = try { [string]($R.Version)    } catch { '' }
+        $u = try { [string]($R.PrimaryUrl) } catch { '' }
+        $c = try { [string]($R.Category)   } catch { '' }
+        ($p -and $p.Trim()) -or ($v -and $v.Trim()) -or
+        ($u -and $u.Trim()) -or ($c -and $c.Trim())
+    }
+
+    # ── Detect HWID-style queries (anything containing a backslash) ─────────
+    $isHWID = $Query -match '\\'
     if ($isHWID) {
         Write-Host "  ◈ Detected hardware ID — querying HWID endpoint..." -ForegroundColor DarkGray
         try {
             $encoded = [Uri]::EscapeDataString($Query.ToUpper())
-            $url     = "$Script:API_BASE/$encoded"
-            $resp    = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+            $resp    = Invoke-WebRequest -Uri "$Script:API_BASE/$encoded" -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
             $data    = $resp.Content | ConvertFrom-Json
-            $matches = Get-Prop $data 'matches'
-            if ($matches) {
-                foreach ($m in @($matches)) {
-                    if (-not (Get-Prop $m 'enabled')) { continue }
-                    $mArch = Get-Prop $m 'arch'
-                    $mCat  = Get-Prop $m 'category' ''
-                    $archOk = (-not $Arch) -or ($mArch -eq $Arch) -or ($mArch -in @('any','noarch',''))
+
+            $rawItems = try { $data.matches } catch { $null }
+            if ($rawItems) {
+                foreach ($m in @($rawItems)) {
+                    if ($null -eq $m) { continue }
+                    $mEnabled = try { $m.enabled } catch { $true }
+                    if ($null -ne $mEnabled -and $mEnabled -eq $false) { continue }
+
+                    $mArchRaw2 = try { [string]($m.arch) } catch { 'any' }
+                    $mCat2     = try { [string]($m.category) } catch { '' }
+                    $mArch = if ($mArchRaw2.Trim()) { $mArchRaw2.Trim().ToLower() } else { 'any' }
+                    $mCat  = $mCat2
+                    $archOk = (-not $Arch) -or ($mArch -eq $Arch.ToLower()) -or ($mArch -in @('any','noarch',''))
                     $catOk  = (-not $Category) -or ($mCat -like "*$Category*")
-                    if ($archOk -and $catOk) {
-                        $results.Add((ConvertTo-NormalizedDriverRecord -M $m -MatchedHWID $Query.ToUpper() -Score 100))
-                    }
+                    if (-not $archOk -or -not $catOk) { continue }
+
+                    $rec = & $buildRecord $m $Query.ToUpper() 100
+                    $rid = $rec.DriverId
+                    if ($rid -and $seen.Contains($rid)) { continue }
+                    if ($rid) { [void]$seen.Add($rid) }
+                    if (& $hasPayload $rec) { $results.Add($rec) }
                 }
+            }
+
+            if ($results.Count -eq 0) {
+                Write-Host "  ◈ Hardware ID recognized but no driver package is available yet." -ForegroundColor DarkGray
+                Write-Host "    Try a keyword search (e.g. 'elan touchpad') or contribute this driver." -ForegroundColor DarkGray
             }
         } catch {
             Write-Warn "HWID lookup failed: $($_.Exception.Message)"
+            Write-Host "  ◈ Try a keyword search instead." -ForegroundColor DarkGray
         }
-        # Always return object[] — never let PowerShell unwrap a single item
         return , [object[]]$results.ToArray()
     }
 
-    # ── Text search endpoint ────────────────────────────────────────────────
-    $encodedQ = [Uri]::EscapeDataString($Query)
-    $url      = "$Script:SEARCH_API`?q=$encodedQ"
-    if ($Arch)     { $url += "&arch=$Arch" }
-    if ($Category) { $url += "&category=$([Uri]::EscapeDataString($Category))" }
+    # ── Text / keyword search endpoint ─────────────────────────────────────
+    $searchUrl = "$Script:SEARCH_API`?q=$([Uri]::EscapeDataString($Query))"
+    if ($Arch)     { $searchUrl += "&arch=$Arch" }
+    if ($Category) { $searchUrl += "&category=$([Uri]::EscapeDataString($Category))" }
 
     try {
-        $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+        $resp = Invoke-WebRequest -Uri $searchUrl -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
         $data = $resp.Content | ConvertFrom-Json
 
-        $resultsField = Get-Prop $data 'results'
-        $matchesField = Get-Prop $data 'matches'
-        $raw = if ($resultsField) { @($resultsField) } elseif ($matchesField) { @($matchesField) } else { @($data) }
-        foreach ($m in $raw) {
-            if ($null -eq $m) { continue }
-            if ((Get-Prop $m 'enabled' $true) -eq $false) { continue }
-            $hwidTag = Get-Prop $m 'hardware_id' ''
-            $scoreRaw = Get-Prop $m 'score' 0
-            $score   = [int]$scoreRaw
-            $rec     = ConvertTo-NormalizedDriverRecord -M $m -MatchedHWID $hwidTag -Score $score
-            # PrimaryUrl fallback specific to the text-search shape (m.url, not just m.primary_url)
-            $altUrl = Get-Prop $m 'url'
-            if (-not $rec.PrimaryUrl -and $altUrl) { $rec.PrimaryUrl = $altUrl }
-            $results.Add($rec)
+        $rawItems = try { $data.results } catch { $null }     # confirmed field from live response
+        if (-not $rawItems) { $rawItems = try { $data.matches } catch { $null } }
+        if (-not $rawItems) { $rawItems = $data }
+
+        if ($rawItems) {
+            foreach ($m in @($rawItems)) {
+                if ($null -eq $m) { continue }
+                $mEnabled2 = try { $m.enabled } catch { $true }
+                if ($null -ne $mEnabled2 -and $mEnabled2 -eq $false) { continue }
+
+                $scoreRaw = try { [string]($m.score) } catch { '0' }
+                $score    = 0; [void][int]::TryParse($scoreRaw, [ref]$score)
+
+                $rec = & $buildRecord $m '' $score
+                $rid = $rec.DriverId
+                if ($rid -and $seen.Contains($rid)) { continue }
+                if ($rid) { [void]$seen.Add($rid) }
+                if (& $hasPayload $rec) { $results.Add($rec) }
+            }
         }
     } catch {
-        # Search endpoint not available — fall through to cache-based fallback below
         Write-Host "  ◈ Search endpoint unavailable — using local index..." -ForegroundColor DarkGray
     }
 
@@ -1929,10 +2024,12 @@ function Invoke-SearchAPI {
                 $catOk   = (-not $Category) -or ($entry.Category -like "*$Category*")
                 if (-not $archOk -or -not $catOk) { continue }
 
-                # Keyword match (case-insensitive) across name, provider, category
+                # Keyword match (case-insensitive) across name, provider, category, HWID, and driver ID
                 $hit = ($entry.DisplayName -like "*$Query*") -or
                        ($entry.Provider    -like "*$Query*") -or
-                       ($entry.Category    -like "*$Query*")
+                       ($entry.Category    -like "*$Query*") -or
+                       ($entry.MatchedHWID -like "*$Query*") -or
+                       ($entry.DriverId    -like "*$Query*")
                 if (-not $hit) { continue }
 
                 $results.Add($entry)
@@ -1994,11 +2091,13 @@ function Show-SearchResultsTable {
     $rowNum = $startIdx
     foreach ($item in $pageItems) {
         $rowNum++
-        $rawName = Get-Prop $item 'DisplayName' '—'
-        $rawProv = Get-Prop $item 'Provider'    '—'
-        $rawCat  = Get-Prop $item 'Category'    '—'
-        $rawVer  = Get-Prop $item 'Version'     '—'
-        $rawArch = Get-Prop $item 'Arch'        'any'
+        # Direct dot-access — PSObject.Properties[] fails silently in PS 5.1
+        # for pscustomobject members; dot-access goes through the native binder.
+        $rawName = try { $v = [string]($item.DisplayName); if ($v) { $v } else { '—' } } catch { '—' }
+        $rawProv = try { $v = [string]($item.Provider);    if ($v) { $v } else { '—' } } catch { '—' }
+        $rawCat  = try { $v = [string]($item.Category);    if ($v) { $v } else { '—' } } catch { '—' }
+        $rawVer  = try { $v = [string]($item.Version);     if ($v) { $v } else { '—' } } catch { '—' }
+        $rawArch = try { $v = [string]($item.Arch);        if ($v) { $v } else { 'any' } } catch { 'any' }
 
         $name = if ($rawName.Length -gt $cName) { $rawName.Substring(0,$cName-1)+'…' } else { $rawName }
         $prov = if ($rawProv.Length -gt $cProv)  { $rawProv.Substring(0,$cProv-1)+'…'  } else { $rawProv }
@@ -2036,17 +2135,18 @@ function Get-SearchResultDetail {
     $inner = 70
     Write-Host ""
     Write-Host "  ╔══ DRIVER DETAILS $('═' * ($inner - 17))╗" -ForegroundColor DarkCyan
-    $zipParts = Get-Prop $Item 'ZipParts' 1
+    # Direct dot-access — avoids PSObject.Properties[] PS 5.1 silent-null bug
+    $zipParts = try { $zv = $Item.ZipParts; if ($null -ne $zv) { [int]$zv } else { 1 } } catch { 1 }
     $fields = [ordered]@{
-        'Name'        = Get-Prop $Item 'DisplayName'
-        'Provider'    = Get-Prop $Item 'Provider'
-        'Category'    = Get-Prop $Item 'Category'
-        'Version'     = Get-Prop $Item 'Version'
-        'Arch'        = Get-Prop $Item 'Arch'
-        'Driver ID'   = Get-Prop $Item 'DriverId'
-        'Matched HWID'= Get-Prop $Item 'MatchedHWID' 'N/A (keyword match)'
+        'Name'        = (try { $v=[string]($Item.DisplayName); if($v){$v}else{'—'} } catch {'—'})
+        'Provider'    = (try { $v=[string]($Item.Provider);    if($v){$v}else{'—'} } catch {'—'})
+        'Category'    = (try { $v=[string]($Item.Category);    if($v){$v}else{'—'} } catch {'—'})
+        'Version'     = (try { $v=[string]($Item.Version);     if($v){$v}else{'—'} } catch {'—'})
+        'Arch'        = (try { $v=[string]($Item.Arch);        if($v){$v}else{'any'} } catch {'any'})
+        'Driver ID'   = (try { $v=[string]($Item.DriverId);    if($v){$v}else{'—'} } catch {'—'})
+        'Matched HWID'= (try { $v=[string]($Item.MatchedHWID); if($v){$v}else{'N/A (keyword match)'} } catch {'N/A (keyword match)'})
         'Parts'       = "$zipParts archive part(s)"
-        'Download URL'= Get-Prop $Item 'PrimaryUrl'
+        'Download URL'= (try { $v=[string]($Item.PrimaryUrl);  if($v){$v}else{'—'} } catch {'—'})
     }
     foreach ($kv in $fields.GetEnumerator()) {
         $label = $kv.Key.PadRight(14)
@@ -2245,13 +2345,13 @@ function Invoke-DriverSearchEngine {
 
         Write-Host "  ▸ $promptText" -ForegroundColor White -NoNewline
         Write-Host " > " -ForegroundColor DarkCyan -NoNewline
-        $input = $Host.UI.ReadLine()
-        if ($null -eq $input) { break }
-        $input = $input.Trim()
-        if (-not $input) { continue }
+        $userInput = $Host.UI.ReadLine()
+        if ($null -eq $userInput) { break }
+        $userInput = $userInput.Trim()
+        if (-not $userInput) { continue }
 
         # ── Command dispatch ──────────────────────────────────────────────
-        switch -Regex ($input.ToLower()) {
+        switch -Regex ($userInput.ToLower()) {
 
             '^(back|q|quit|exit)$' {
                 Write-Host ""
@@ -2386,7 +2486,7 @@ function Invoke-DriverSearchEngine {
 
             '^(new|s )(.+)$' {
                 # Explicit new search command: "new nvidia" or "s realtek"
-                $query = $input -replace '^(new|s)\s+', ''
+                $query = $userInput -replace '^(new|s)\s+', ''
                 $currentQuery   = $query
                 $currentPage    = 1
                 $currentResults = @()
@@ -2410,7 +2510,7 @@ function Invoke-DriverSearchEngine {
 
             default {
                 # Treat anything else as a new search query
-                $query          = $input
+                $query          = $userInput
                 $currentQuery   = $query
                 $currentPage    = 1
                 $currentResults = @()
@@ -2427,7 +2527,9 @@ function Invoke-DriverSearchEngine {
                     Write-Host "  Use d<N> to download, i<N> to install, det<N> for details, n/p to page." -ForegroundColor DarkGray
                 } else {
                     Write-Warn "No drivers found for '$query'. Try a different keyword or HWID."
-                    Write-Info "Examples: 'realtek audio', 'intel wifi', 'PCI\\VEN_8086&DEV_1234'"
+                    Write-Info "Examples: 'realtek audio', 'intel wifi', 'nvidia gpu'"
+                    Write-Info "For HWID lookup: 'PCI\VEN_8086&DEV_1234', 'ACPI\GenuineIntel_-_Intel64_Family_6_Model_165'"
+                    Write-Info "Note: some hardware IDs are known but have no driver package in the database yet."
                     Write-Info "Type 'help' for full command reference."
                 }
                 continue
