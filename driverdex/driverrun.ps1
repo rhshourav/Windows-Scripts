@@ -2979,6 +2979,15 @@ function Main {
         }
 
         # ── Auto-Detect mode ───────────────────────────────────────────────
+        # Contribution-prompt state — populated as we go so the finally block
+        # always has something meaningful to pass even on an early exit.
+        $Script:ContribHWIDs         = @()
+        $Script:ContribUnmatched     = @()
+        $Script:ContribReason        = 'no_drivers'
+        $Script:ContribShouldPrompt  = $true   # set to $false only on hard errors before HWIDs exist
+
+        try {
+
         # ── OS / environment banner ────────────────────────────────────────
         $os      = Get-OSInfo
         $isAdmin = Test-Administrator
@@ -2998,7 +3007,11 @@ function Main {
 
         # ── Step 2: Network ────────────────────────────────────────────────
         Write-Divider
-        if (-not (Test-NetworkConnectivity)) { return }
+        if (-not (Test-NetworkConnectivity)) {
+            # No network — still ask for contribution (HWIDs already known locally)
+            $Script:ContribShouldPrompt = $false
+            return
+        }
         Write-Host ""
 
         # ── Step 3: Hardware scan ──────────────────────────────────────────
@@ -3008,10 +3021,14 @@ function Main {
         Write-OK "Found $(@($hwids).Count) hardware IDs · $(@($problemHWIDs).Count) problem device(s)"
         Write-Host ""
 
+        # Capture HWIDs for the contribution prompt as soon as we have them
+        $Script:ContribHWIDs = $hwids
+
         if (@($hwids).Count -eq 0) {
             Write-Err -What "No hardware IDs found." `
                       -Reason "CIM and WMI queries returned empty results." `
                       -Fix    "Ensure you have read access to WMI on this machine."
+            $Script:ContribShouldPrompt = $false
             return
         }
 
@@ -3029,13 +3046,16 @@ function Main {
         # Devices with a working local driver that the DB has never seen at all —
         # the strongest, most specific contribution candidates.
         $unmatchedLocal = Get-UnmatchedLocalDrivers -AllHWIDs $hwids -MatchedDrivers @($drivers) -Snapshot $installedSnapshot
+        $Script:ContribUnmatched = $unmatchedLocal
 
         if (@($drivers).Count -eq 0) {
             Write-Warn "No matching drivers found in the DriverDex database for your hardware."
             Write-Host ""
-            Invoke-ContributePrompt -HWIDs $hwids -Reason 'no_drivers' -UnmatchedLocalDrivers $unmatchedLocal
-            return
+            $Script:ContribReason = 'no_drivers'
+            return   # finally block will show the prompt
         }
+
+        $Script:ContribReason = 'partial'
 
         if (@($unmatchedLocal).Count -gt 0) {
             Write-Accent "  [$(@($unmatchedLocal).Count) locally installed driver(s) have no DriverDex entry yet — more on this at the end]"
@@ -3052,8 +3072,8 @@ function Main {
         $selected = Show-DriverMenu -Drivers @($drivers) -ProblemHWIDs $problemHWIDs
 
         if (-not $selected -or @($selected).Count -eq 0) {
-            Write-Info "No drivers selected. Exiting."
-            return
+            Write-Info "No drivers selected."
+            return   # finally block will still show the prompt
         }
         Write-Host ""
 
@@ -3077,7 +3097,7 @@ function Main {
             Write-Err -What "Failed to download extractor." `
                       -Reason $_.Exception.Message `
                       -Fix    "Check your internet connection and re-run the script."
-            return
+            return   # finally block will still show the prompt
         }
         Write-Host ""
 
@@ -3102,12 +3122,6 @@ function Main {
         # ── Step 8: Summary ────────────────────────────────────────────────
         Show-Summary -Results @($results)
 
-        # ── Step 9: Contribution prompt ───────────────────────────────────
-        $failedDrivers  = @($results | Where-Object { (-not $_.Success -and -not $_.Skipped) -or $_.PartialFailure })
-        # Always invite contributions after any successful run — not just failures.
-        # On a clean all-success run, we still show a brief "help the community" ask.
-        Invoke-ContributePrompt -HWIDs $hwids -Reason 'partial' -UnmatchedLocalDrivers $unmatchedLocal
-
         # ── Step 10: Reboot prompt ─────────────────────────────────────────
         Invoke-RebootPrompt -Results @($results)
 
@@ -3116,7 +3130,22 @@ function Main {
         Write-Host ""
         Write-Log -Level INFO -Msg "Session complete."
 
+        } finally {
+            # ── Step 9: Contribution prompt — ALWAYS runs ──────────────────
+            # Executes on every exit path: success, no drivers found, user
+            # pressed NONE/q at selection, extractor download failed, or any
+            # unhandled exception.  Only skipped on the two hard pre-HWID
+            # failures (no network, no WMI access) where we have nothing useful.
+            if ($Script:ContribShouldPrompt) {
+                Invoke-ContributePrompt `
+                    -HWIDs                $Script:ContribHWIDs `
+                    -Reason               $Script:ContribReason `
+                    -UnmatchedLocalDrivers $Script:ContribUnmatched
+            }
+        }   # end inner try/finally (auto-detect)
+
     } finally {
+        # Outer finally: scratch-dir cleanup — runs on ALL modes and ALL exits
         Remove-Item -Recurse -Force $Script:scratch -ErrorAction SilentlyContinue
     }
 }
