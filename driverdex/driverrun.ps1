@@ -1345,6 +1345,63 @@ function Show-DriverPanel {
 # ═══════════════════════════════════════════════════════════════════════════════
 #  MAIN INSTALL ROUTINE  (one driver at a time, isolated try/catch)
 # ═══════════════════════════════════════════════════════════════════════════════
+function Invoke-Extractor {
+    <#
+    .SYNOPSIS Runs extractor.exe against an archive. Fixes two separate failure modes:
+
+             1) PATH-WITH-SPACES BUG: Start-Process -ArgumentList just joins its array
+                with plain spaces and does NOT quote elements that contain spaces (e.g.
+                an output folder derived from a vendor name like "Synaptics FP Sensors").
+                That silently splits into multiple argv tokens and the extractor's own
+                argparse rejects the stray pieces as "unrecognized arguments". The call
+                operator (&) below quotes each splatted argument correctly regardless of
+                embedded spaces, so this can no longer happen.
+
+             2) CORRUPTED/TAMPERED BINARY: a failure whose own output contains a
+                "[PYI-####:ERROR]" tag comes from the PyInstaller bootloader trying to
+                self-extract its OWN bundled modules — i.e. extractor.exe itself is
+                broken on disk (incomplete download, or antivirus quarantining/locking a
+                bundled crypto module — a common false-positive trigger), not a problem
+                with our arguments or the driver archive. In that case we re-download
+                extractor.exe once and retry before giving up.
+    .PARAMETER ExtractorPath Path to extractor.exe (overwritten in place if re-downloaded)
+    .PARAMETER ArchivePath   Archive file to extract
+    .PARAMETER OutputDir     Destination folder
+    .OUTPUTS PSObject { Success, Output, ExitCode, IsBootstrapFailure }
+    #>
+    param(
+        [string]$ExtractorPath,
+        [string]$ArchivePath,
+        [string]$OutputDir
+    )
+
+    $extractArgs = @('--file', $ArchivePath, '--output', $OutputDir, '--verify')
+
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $output   = @(& $ExtractorPath @extractArgs 2>&1)
+        $exitCode = $LASTEXITCODE
+
+        if ($exitCode -eq 0) {
+            return [pscustomobject]@{ Success = $true; Output = $output; ExitCode = 0; IsBootstrapFailure = $false }
+        }
+
+        $isBootstrapFailure = ($output -join "`n") -match '\[PYI-\d+:ERROR\]'
+
+        if ($isBootstrapFailure -and $attempt -eq 1) {
+            Write-Warn "Extractor self-extraction failed — binary may be corrupted or blocked by antivirus. Re-downloading and retrying once..."
+            try {
+                Remove-Item -LiteralPath $ExtractorPath -Force -ErrorAction SilentlyContinue
+                Get-DriverFile -Url $Script:EXTRACTOR_URL -Dest $ExtractorPath -Label 'extractor.exe'
+                continue
+            } catch {
+                # Re-download itself failed — fall through and report the original error.
+            }
+        }
+
+        return [pscustomobject]@{ Success = $false; Output = $output; ExitCode = $exitCode; IsBootstrapFailure = $isBootstrapFailure }
+    }
+}
+
 function Install-DriverPackage {
     <#
     .SYNOPSIS Downloads, extracts, and installs a single driver package.
@@ -1376,7 +1433,7 @@ function Install-DriverPackage {
     }
 
     $safeName = "$($Driver.Provider)_$($Driver.Category)_$($Driver.Version)_$($Driver.Arch)" `
-                -replace '[\\/:*?"<>|]', '_'
+                -replace '[\\/:*?"<>|]', '_' -replace '\s+', '_' -replace '_+', '_'
     $outDir   = Join-Path $OutputRoot $safeName
     $pkgTemp  = Join-Path $ScratchDir ([System.Guid]::NewGuid().ToString('N').Substring(0,8))
 
@@ -1413,16 +1470,13 @@ function Install-DriverPackage {
 
         # ── Extract ────────────────────────────────────────────────────────
         Write-Step "Extracting archive..."
-        $extractArgs = @('--file', $firstPart, '--output', $outDir, '--verify')
-        $proc = Start-Process -FilePath $ExtractorPath -ArgumentList $extractArgs `
-                              -Wait -PassThru -NoNewWindow -RedirectStandardError (Join-Path $pkgTemp 'extractor_stderr.txt')
-        if ($proc.ExitCode -ne 0) {
-            $errLines = ''
-            $errFile  = Join-Path $pkgTemp 'extractor_stderr.txt'
-            if (Test-Path $errFile) {
-                $errLines = (Get-Content $errFile -ErrorAction SilentlyContinue | Select-Object -Last 5) -join ' | '
-            }
-            throw "Extractor failed (exit $($proc.ExitCode)) — $errLines"
+        $extractResult = Invoke-Extractor -ExtractorPath $ExtractorPath -ArchivePath $firstPart -OutputDir $outDir
+        if (-not $extractResult.Success) {
+            $errLines = ($extractResult.Output | Select-Object -Last 5) -join ' | '
+            $hint = if ($extractResult.IsBootstrapFailure) {
+                " — this points to antivirus interference or a corrupted extractor download (re-download already retried once), not a bad archive. Try excluding the DriverDex temp/output folders from real-time scanning."
+            } else { '' }
+            throw "Extractor failed (exit $($extractResult.ExitCode))$hint — $errLines"
         }
         Write-OK "Extracted to: $outDir"
 
@@ -2226,7 +2280,7 @@ function Invoke-SearchDownload {
     )
 
     $safeName = "$($Item.Provider)_$($Item.Category)_$($Item.Version)_$($Item.Arch)" `
-                -replace '[\\/:*?"<>|]', '_'
+                -replace '[\\/:*?"<>|]', '_' -replace '\s+', '_' -replace '_+', '_'
     if (-not $safeName.Trim('_')) { $safeName = "driver_$($Item.DriverId)" }
     $outDir   = Join-Path $OutRoot $safeName
     $pkgTemp  = Join-Path $ScratchDir ([System.Guid]::NewGuid().ToString('N').Substring(0,8))
@@ -2250,14 +2304,13 @@ function Invoke-SearchDownload {
 
         # Extract
         Write-Step "Extracting..."
-        $proc = Start-Process -FilePath $Extractor -Wait -PassThru -NoNewWindow `
-                    -ArgumentList @('--file', $firstPart, '--output', $outDir, '--verify') `
-                    -RedirectStandardError (Join-Path $pkgTemp 'stderr.txt')
-        if ($proc.ExitCode -ne 0) {
-            $errLines = ''
-            $ef = Join-Path $pkgTemp 'stderr.txt'
-            if (Test-Path $ef) { $errLines = (Get-Content $ef -ErrorAction SilentlyContinue | Select-Object -Last 3) -join ' | ' }
-            throw "Extractor failed (exit $($proc.ExitCode)) — $errLines"
+        $extractResult = Invoke-Extractor -ExtractorPath $Extractor -ArchivePath $firstPart -OutputDir $outDir
+        if (-not $extractResult.Success) {
+            $errLines = ($extractResult.Output | Select-Object -Last 3) -join ' | '
+            $hint = if ($extractResult.IsBootstrapFailure) {
+                " — looks like antivirus interference or a corrupted extractor download (already retried once)."
+            } else { '' }
+            throw "Extractor failed (exit $($extractResult.ExitCode))$hint — $errLines"
         }
         Write-OK "Extracted to: $outDir"
 
