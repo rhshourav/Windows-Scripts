@@ -1369,6 +1369,10 @@ function Install-DriverPackage {
         Skipped        = $false
         RebootRequired = $false
         Path           = ''
+        PartialFailure = $false   # true = some INFs in the package installed, some didn't
+        PackagesAdded  = 0
+        PackagesTotal  = 0
+        FailedInfs     = @()
     }
 
     $safeName = "$($Driver.Provider)_$($Driver.Category)_$($Driver.Version)_$($Driver.Arch)" `
@@ -1447,17 +1451,58 @@ function Install-DriverPackage {
             Write-Step "Installing $(@($infs).Count) INF package(s) via pnputil..."
             # pnputil /add-driver on a glob is not reliable in all PS versions; pass the folder instead
             $pnpArgs = @('/add-driver', "$outDir\*.inf", '/subdirs', '/install')
-            $pnpProc = Start-Process -FilePath "$env:SystemRoot\System32\pnputil.exe" `
-                                     -ArgumentList $pnpArgs -Wait -PassThru -NoNewWindow
-            $exitCode = $pnpProc.ExitCode
 
-            if ($exitCode -in @(0, 3010)) {
-                Write-OK "pnputil succeeded (exit $exitCode)"
+            # NOTE: pnputil installs every matching INF in ONE batch call and returns
+            # a SINGLE exit code for the whole batch. If 2 of 3 INFs install fine and
+            # one fails (e.g. a redundant/incompatible INF bundled in the same archive),
+            # the exit code alone makes the WHOLE package look like a hard failure even
+            # though most of it actually went in. So we capture pnputil's own console
+            # output and parse its "Total/Added driver packages" tally instead of
+            # trusting the exit code alone.
+            $pnpOutput = @(& "$env:SystemRoot\System32\pnputil.exe" @pnpArgs 2>&1)
+            $exitCode  = $LASTEXITCODE
+
+            # Echo pnputil's own lines back to the console (capturing the output above
+            # means it no longer prints live on its own).
+            $pnpOutput | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+
+            $totalMatch = $pnpOutput | Select-String -Pattern 'Total driver packages:\s*(\d+)'
+            $addedMatch = $pnpOutput | Select-String -Pattern 'Added driver packages:\s*(\d+)'
+            $totalCount = if ($totalMatch) { [int]$totalMatch[0].Matches[0].Groups[1].Value } else { @($infs).Count }
+            $addedCount = if ($addedMatch) { [int]$addedMatch[0].Matches[0].Groups[1].Value } else { 0 }
+
+            # Pair each "Adding driver package: X.inf" line with the line right after it —
+            # if that next line is a failure, X.inf is the one that didn't make it in.
+            $failedInfs = [System.Collections.Generic.List[string]]::new()
+            for ($li = 0; $li -lt (@($pnpOutput).Count - 1); $li++) {
+                if ($pnpOutput[$li] -match 'Adding driver package:\s*(.+\.inf)\s*$' -and
+                    $pnpOutput[$li + 1] -match 'Failed to add driver package') {
+                    $failedInfs.Add($Matches[1].Trim())
+                }
+            }
+
+            $result.PackagesAdded = $addedCount
+            $result.PackagesTotal = $totalCount
+            $result.FailedInfs    = @($failedInfs)
+
+            if ($exitCode -in @(0, 3010) -or ($totalCount -gt 0 -and $addedCount -eq $totalCount)) {
+                Write-OK "pnputil succeeded — $addedCount/$totalCount package(s) added (exit $exitCode)"
                 if ($exitCode -eq 3010) {
                     Write-Warn "Reboot required to complete driver installation."
                     $result.RebootRequired = $true
                 }
                 $result.Success = $true
+
+            } elseif ($addedCount -gt 0) {
+                # Partial success — this is the case you hit: some INFs installed,
+                # at least one didn't. The device is very likely already working off
+                # the package(s) that DID install, so this is not treated as a failure.
+                $result.Success        = $true
+                $result.PartialFailure = $true
+                $infList = if ($failedInfs.Count -gt 0) { $failedInfs -join ', ' } else { 'one or more packages' }
+                Write-Warn "Partially installed — $addedCount of $totalCount package(s) added. Not added: $infList"
+                Write-Info "This is usually fine: the package that failed is often redundant or built for a different architecture/Windows build than the one(s) that succeeded."
+
             } else {
                 $pnpMsg = switch ($exitCode) {
                     2    { "Driver may be incompatible with this Windows version." }
@@ -1507,7 +1552,7 @@ function Install-DriverPackage {
         # Update manifest with final result
         try {
             $manifest = Get-Content -LiteralPath (Join-Path $outDir 'manifest.json') -Raw | ConvertFrom-Json
-            $manifest.install_result  = if ($result.Success) { 'success' } else { 'failed' }
+            $manifest.install_result  = if ($result.PartialFailure) { 'partial' } elseif ($result.Success) { 'success' } else { 'failed' }
             $manifest.reboot_required = $result.RebootRequired
             $manifest | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $outDir 'manifest.json') -Encoding UTF8
         } catch { <# manifest update is best-effort #> }
@@ -1548,9 +1593,10 @@ function Show-Summary {
     Write-Host "  ╔══$title$('═' * $rFill)╗" -ForegroundColor DarkCyan
 
     foreach ($r in $Results) {
-        if     ($r.Skipped)  { $sym = '─'; $col = 'DarkGray'; $label = 'skipped (already installed)' }
-        elseif ($r.Success)  { $sym = '✔'; $col = 'Green';    $label = 'installed' }
-        else                 { $sym = '✘'; $col = 'Red';       $label = 'failed' }
+        if     ($r.Skipped)        { $sym = '─'; $col = 'DarkGray'; $label = 'skipped (already installed)' }
+        elseif ($r.PartialFailure) { $sym = '⚠'; $col = 'Yellow';   $label = "installed (partial — $($r.PackagesAdded)/$($r.PackagesTotal) packages)" }
+        elseif ($r.Success)        { $sym = '✔'; $col = 'Green';    $label = 'installed' }
+        else                        { $sym = '✘'; $col = 'Red';      $label = 'failed' }
         $rb = if ($r.RebootRequired) { ' ⟳ reboot needed' } else { '' }
         $line = "  $sym $($r.Name)$rb — $label"
         $padded = $line.PadRight($inner + 4)
@@ -1560,10 +1606,11 @@ function Show-Summary {
     Write-Host "  ╚$('═' * ($inner + 2))╝" -ForegroundColor DarkCyan
     Write-Host ""
 
-    $passed  = @($Results | Where-Object { $_.Success -and -not $_.Skipped }).Count
+    $passed  = @($Results | Where-Object { $_.Success -and -not $_.Skipped -and -not $_.PartialFailure }).Count
+    $partial = @($Results | Where-Object { $_.PartialFailure }).Count
     $skipped = @($Results | Where-Object { $_.Skipped }).Count
     $failed  = @($Results | Where-Object { -not $_.Success -and -not $_.Skipped }).Count
-    Write-Info "  $passed installed  ·  $skipped skipped  ·  $failed failed"
+    Write-Info "  $passed installed  ·  $partial partial  ·  $skipped skipped  ·  $failed failed"
     Write-Host ""
 }
 
@@ -2219,13 +2266,22 @@ function Invoke-SearchDownload {
                       Where-Object { $_ -ne $null })
             if (@($infs).Count -gt 0 -and $IsAdmin) {
                 Write-Step "Installing via pnputil ($(@($infs).Count) INF)..."
-                $pnp = Start-Process "$env:SystemRoot\System32\pnputil.exe" `
-                           -ArgumentList @('/add-driver', "$outDir\*.inf", '/subdirs', '/install') `
-                           -Wait -PassThru -NoNewWindow
-                if ($pnp.ExitCode -in @(0,3010)) {
-                    Write-OK "Driver installed successfully$(if ($pnp.ExitCode -eq 3010) { ' — reboot required' } else { '' })"
+                $pnpOutput = @(& "$env:SystemRoot\System32\pnputil.exe" `
+                                '/add-driver' "$outDir\*.inf" '/subdirs' '/install' 2>&1)
+                $exitCode  = $LASTEXITCODE
+                $pnpOutput | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+
+                $totalMatch = $pnpOutput | Select-String -Pattern 'Total driver packages:\s*(\d+)'
+                $addedMatch = $pnpOutput | Select-String -Pattern 'Added driver packages:\s*(\d+)'
+                $totalCount = if ($totalMatch) { [int]$totalMatch[0].Matches[0].Groups[1].Value } else { @($infs).Count }
+                $addedCount = if ($addedMatch) { [int]$addedMatch[0].Matches[0].Groups[1].Value } else { 0 }
+
+                if ($exitCode -in @(0,3010) -or ($totalCount -gt 0 -and $addedCount -eq $totalCount)) {
+                    Write-OK "Driver installed successfully — $addedCount/$totalCount package(s)$(if ($exitCode -eq 3010) { ' — reboot required' } else { '' })"
+                } elseif ($addedCount -gt 0) {
+                    Write-Warn "Partially installed — $addedCount of $totalCount package(s) added. The rest may be redundant or for a different Windows build; check Device Manager if the device isn't working at: $outDir"
                 } else {
-                    Write-Warn "pnputil returned exit code $($pnp.ExitCode) — try Device Manager at: $outDir"
+                    Write-Warn "pnputil returned exit code $exitCode — try Device Manager at: $outDir"
                 }
             } elseif (@($infs).Count -gt 0 -and -not $IsAdmin) {
                 Write-Warn "Not elevated. Point Device Manager to: $outDir"
@@ -2722,14 +2778,14 @@ function Main {
                         -ExtractorPath $extractor `
                         -IsAdmin       $isAdmin
             $results.Add($res)
-            Write-Log -Level INFO -Msg "Driver '$($drv.DisplayName)': success=$($res.Success) skipped=$($res.Skipped) reboot=$($res.RebootRequired)"
+            Write-Log -Level INFO -Msg "Driver '$($drv.DisplayName)': success=$($res.Success) partial=$($res.PartialFailure) ($($res.PackagesAdded)/$($res.PackagesTotal)) skipped=$($res.Skipped) reboot=$($res.RebootRequired)"
         }
 
         # ── Step 8: Summary ────────────────────────────────────────────────
         Show-Summary -Results @($results)
 
         # ── Step 9: Contribution prompt ───────────────────────────────────
-        $failedDrivers  = @($results | Where-Object { -not $_.Success -and -not $_.Skipped })
+        $failedDrivers  = @($results | Where-Object { (-not $_.Success -and -not $_.Skipped) -or $_.PartialFailure })
         if ($failedDrivers.Count -gt 0 -or @($unmatchedLocal).Count -gt 0) {
             Invoke-ContributePrompt -HWIDs $hwids -Reason 'partial' -UnmatchedLocalDrivers $unmatchedLocal
         }
