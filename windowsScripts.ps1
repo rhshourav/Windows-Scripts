@@ -407,13 +407,13 @@ function Show-Menu {
     Write-Item  '5' 'Install Edge'
     Write-Item  '6' 'Remove Edge'
     Write-Item  '7' 'Remove New Outlook'
-    Write-Item  '8' 'RICHO Printer Setup' 'NEW' 
+    Write-Item  '8' 'RICHO Printer Setup'
 
     # ---------- SYSTEM & MAINTENANCE ----------
     Write-Section 'SYSTEM & MAINTENANCE'
     Write-Item  'A' 'Activation / Edition Change'
     Write-Item  'B' 'Time Sync & Format'
-    Write-Item  'C' 'Remove Duplicate Files' 'NEW'
+    Write-Item  'C' 'Remove Duplicate Files' 
     Write-Item  'D' 'IP Config'
     Write-Item  'E' 'Disk Manager'
     Write-Item  'F' 'Install MediCatUSB'
@@ -430,7 +430,7 @@ function Show-Menu {
     
    # Write-Item  'M' 'Ricoh Printer '
     Write-Item  'N' 'ERP Font Install' 'NEW'
-    Write-Item  'O' 'Auto Driver Deploy'
+    Write-Item  'O' 'DriverDex Auto Driver Installation' 'NEW'
     Write-Item  'W' 'WARDEN  [Registry Nexus]'
     Write-Item  'X' 'ERP Setup'
     Write-Item  'Y' 'Intel Interrupt Fix'
@@ -564,7 +564,7 @@ $Actions = @{
     'M' = @{ Title = 'Install Extracted Drivers'; Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dInstaller.ps1' }
      #'M' = @{ Title = 'RICOH B&W Printer';         Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addRICHO.ps1' }
     'N' = @{ Title = 'ERP Font Install';          Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/font_install.ps1' }
-    'O' = @{ Title = 'Auto Driver Deploy';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/AutoDriverDeploy/AutoDriverDeploy.ps1' }
+    'O' = @{ Title = 'DriverDex Auto Driver Installation';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/driverdex/driverrun.ps1' }
     'W' = @{ Title = 'WARDEN [Registry Nexus]';   Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/regBack/WARDEN.ps1' }
     'X' = @{ Title = 'ERP Automate Setup';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/run_Auto-ERP.ps1' }
     'Y' = @{ Title = 'Intel Interrupt Fix';       Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/SystemInterrupt-Fix/Intel-SystemInterrupt-Fix.ps1' }
