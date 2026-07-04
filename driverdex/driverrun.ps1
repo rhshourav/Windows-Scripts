@@ -73,6 +73,52 @@ function Get-Prop {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  ARRAY-SAFE FIELD FLATTENING
+# ═══════════════════════════════════════════════════════════════════════════════
+function ConvertTo-CleanFieldString {
+    <#
+    .SYNOPSIS Normalizes a raw API field into a short, readable string.
+    .DESCRIPTION
+        Some DriverDex records bundle multiple devices / OS-versions under one
+        driver_id, so fields like arch, version, provider, or category can come
+        back as JSON ARRAYS instead of plain strings. A naive [string](...) cast
+        on an array silently joins every element with a space via PowerShell's
+        default array-to-string conversion — producing exactly the kind of
+        garbled "x64 x86 x86 x86 x86 x64 x64..." cell seen in search results.
+        This function detects that case, de-duplicates the values, and returns
+        a short, human-readable summary instead.
+    .PARAMETER Value      Raw value (string, array, JArray, or $null)
+    .PARAMETER Separator  Delimiter used to join distinct values (default ' / ')
+    .PARAMETER MaxItems   Max distinct values shown before collapsing to "+N more"
+    #>
+    param(
+        $Value,
+        [string]$Separator = ' / ',
+        [int]$MaxItems = 3
+    )
+
+    if ($null -eq $Value) { return '' }
+
+    $isArray = ($Value -is [System.Collections.IEnumerable]) -and -not ($Value -is [string])
+
+    if (-not $isArray) {
+        try { return ([string]$Value).Trim() } catch { return '' }
+    }
+
+    $items = [System.Collections.Generic.List[string]]::new()
+    $seen  = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($v in @($Value)) {
+        $s = try { ([string]$v).Trim() } catch { '' }
+        if (-not $s -or $seen.Contains($s)) { continue }
+        [void]$seen.Add($s)
+        $items.Add($s)
+    }
+    if ($items.Count -eq 0) { return '' }
+    if ($items.Count -le $MaxItems) { return ($items -join $Separator) }
+    return "$($items[0..($MaxItems-1)] -join $Separator) +$($items.Count - $MaxItems) more"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  CONSTANTS
 # ═══════════════════════════════════════════════════════════════════════════════
 $Script:VERSION       = '2.2.3'
@@ -681,18 +727,19 @@ function ConvertTo-NormalizedDriverRecord {
         [string]$MatchedHWID = '',
         [int]$Score = 50
     )
-    $dn   = Get-Prop $M 'display_name' (Get-Prop $M 'name' '')
-    $prov = Get-Prop $M 'provider' ''
-    $cat  = Get-Prop $M 'category' ''
+    $dn   = ConvertTo-CleanFieldString (Get-Prop $M 'display_name' (Get-Prop $M 'name' ''))
+    $prov = ConvertTo-CleanFieldString (Get-Prop $M 'provider' '')
+    $cat  = ConvertTo-CleanFieldString (Get-Prop $M 'category' '')
     $id   = Get-Prop $M 'driver_id' (Get-Prop $M 'id' '')
     $zip  = Get-Prop $M 'zip_parts' 1
+    $arch = ConvertTo-CleanFieldString (Get-Prop $M 'arch' 'any')
     return [pscustomobject]@{
         DriverId    = $id
         DisplayName = if ($dn)            { $dn }             else { "$prov $cat".Trim() }
         Provider    = $prov
         Category    = $cat
-        Version     = Get-Prop $M 'version' ''
-        Arch        = Get-Prop $M 'arch' 'any'
+        Version     = ConvertTo-CleanFieldString (Get-Prop $M 'version' '')
+        Arch        = if ($arch) { $arch } else { 'any' }
         PrimaryUrl  = Get-Prop $M 'primary_url' ''
         ZipParts    = [int]$zip
         MatchedHWID = $MatchedHWID
@@ -1980,11 +2027,11 @@ function Invoke-SearchAPI {
         param([object]$M, [string]$HwidTag, [int]$Score)
 
         $mId      = try { $s = [string]($M.driver_id);    if ($s.Trim()) { $s } else { '' } } catch { '' }
-        $mName    = try { $s = [string]($M.display_name); if ($s.Trim()) { $s } else { '' } } catch { '' }
-        $mProv    = try { $s = [string]($M.provider);     if ($s.Trim()) { $s } else { '' } } catch { '' }
-        $mCat     = try { $s = [string]($M.category);     if ($s.Trim()) { $s } else { '' } } catch { '' }
-        $mVer     = try { $s = [string]($M.version);      if ($s.Trim()) { $s } else { '' } } catch { '' }
-        $mArchRaw = try { $s = [string]($M.arch);         if ($s.Trim()) { $s } else { 'any' } } catch { 'any' }
+        $mName    = try { ConvertTo-CleanFieldString $M.display_name } catch { '' }
+        $mProv    = try { ConvertTo-CleanFieldString $M.provider }     catch { '' }
+        $mCat     = try { ConvertTo-CleanFieldString $M.category }     catch { '' }
+        $mVer     = try { ConvertTo-CleanFieldString $M.version }      catch { '' }
+        $mArchRaw = try { $a = ConvertTo-CleanFieldString $M.arch; if ($a) { $a } else { 'any' } } catch { 'any' }
         $mUrl     = try { $s = [string]($M.primary_url);  if ($s.Trim()) { $s } else { '' } } catch { '' }
 
         $mZip = 1
@@ -2042,11 +2089,11 @@ function Invoke-SearchAPI {
                     $mEnabled = try { $m.enabled } catch { $true }
                     if ($null -ne $mEnabled -and $mEnabled -eq $false) { continue }
 
-                    $mArchRaw2 = try { [string]($m.arch) } catch { 'any' }
-                    $mCat2     = try { [string]($m.category) } catch { '' }
+                    $mArchRaw2 = try { ConvertTo-CleanFieldString $m.arch } catch { 'any' }
+                    $mCat2     = try { ConvertTo-CleanFieldString $m.category } catch { '' }
                     $mArch = if ($mArchRaw2.Trim()) { $mArchRaw2.Trim().ToLower() } else { 'any' }
                     $mCat  = $mCat2
-                    $archOk = (-not $Arch) -or ($mArch -eq $Arch.ToLower()) -or ($mArch -in @('any','noarch',''))
+                    $archOk = (-not $Arch) -or ($mArch -match "\b$([regex]::Escape($Arch.ToLower()))\b") -or ($mArch -in @('any','noarch',''))
                     $catOk  = (-not $Category) -or ($mCat -like "*$Category*")
                     if (-not $archOk -or -not $catOk) { continue }
 
@@ -2460,6 +2507,11 @@ function Invoke-DriverSearchEngine {
         if (-not $userInput) { continue }
 
         # ── Command dispatch ──────────────────────────────────────────────
+        # Wrapped in try/catch: a failure in any single command (bad network
+        # response, unexpected data shape, etc.) is reported through this
+        # script's own error format and the search session keeps running,
+        # instead of an unhandled exception escaping all the way out.
+        try {
         switch -Regex ($userInput.ToLower()) {
 
             '^(back|q|quit|exit)$' {
@@ -2518,7 +2570,7 @@ function Invoke-DriverSearchEngine {
                 continue
             }
 
-            '^g(\d+)$' {
+            '^g\s*(\d+)$' {
                 if (@($currentResults).Count -eq 0) { Write-Warn "No search results."; continue }
                 $gPage = [int]($Matches[1])
                 $currentPage = $gPage
@@ -2527,7 +2579,7 @@ function Invoke-DriverSearchEngine {
                 continue
             }
 
-            '^det(\d+)$' {
+            '^det\s*(\d+)$' {
                 $idx = [int]($Matches[1]) - 1
                 if ($idx -ge 0 -and $idx -lt @($currentResults).Count) {
                     Get-SearchResultDetail -Item $currentResults[$idx]
@@ -2535,7 +2587,7 @@ function Invoke-DriverSearchEngine {
                 continue
             }
 
-            '^d(\d+)$' {
+            '^d\s*(\d+)$' {
                 # Download only
                 $idx = [int]($Matches[1]) - 1
                 if ($idx -ge 0 -and $idx -lt @($currentResults).Count) {
@@ -2549,7 +2601,7 @@ function Invoke-DriverSearchEngine {
                 continue
             }
 
-            '^i(\d+)$' {
+            '^i\s*(\d+)$' {
                 # Download + Install
                 $idx = [int]($Matches[1]) - 1
                 if ($idx -ge 0 -and $idx -lt @($currentResults).Count) {
@@ -2643,6 +2695,12 @@ function Invoke-DriverSearchEngine {
                 }
                 continue
             }
+        }
+        } catch {
+            Write-Err -What "Command '$userInput' failed unexpectedly." `
+                      -Reason $_.Exception.Message `
+                      -Fix "Try again, or type 'help' for the command list."
+            continue
         }
     }
 }
@@ -3130,6 +3188,16 @@ function Main {
         Write-Host ""
         Write-Log -Level INFO -Msg "Session complete."
 
+        } catch {
+            # Safety net: without this, ANY unexpected error here (a bad API
+            # response shape, a null we didn't anticipate, etc.) propagates
+            # all the way past Main and out of the script entirely, where it
+            # surfaces as a raw, unformatted PowerShell error instead of this
+            # script's own clean error report.
+            Write-Err -What "Unexpected error during driver detection." `
+                      -Reason $_.Exception.Message `
+                      -Fix "Check the log for details, then re-run the script." `
+                      -Err $_
         } finally {
             # ── Step 9: Contribution prompt — ALWAYS runs ──────────────────
             # Executes on every exit path: success, no drivers found, user
@@ -3144,6 +3212,15 @@ function Main {
             }
         }   # end inner try/finally (auto-detect)
 
+    } catch {
+        # Final safety net for the whole session (mode selection, search
+        # engine, force-update flow). Ensures nothing escapes to the host
+        # as a raw, unhandled error — everything is reported through this
+        # script's own format and cleanup still runs via the finally below.
+        Write-Err -What "DriverDex encountered an unexpected error and had to stop." `
+                  -Reason $_.Exception.Message `
+                  -Fix "Check the log for details, then re-run the script." `
+                  -Err $_
     } finally {
         # Outer finally: scratch-dir cleanup — runs on ALL modes and ALL exits
         Remove-Item -Recurse -Force $Script:scratch -ErrorAction SilentlyContinue
