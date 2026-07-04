@@ -79,14 +79,19 @@ function ConvertTo-CleanFieldString {
     <#
     .SYNOPSIS Normalizes a raw API field into a short, readable string.
     .DESCRIPTION
-        Some DriverDex records bundle multiple devices / OS-versions under one
-        driver_id, so fields like arch, version, provider, or category can come
-        back as JSON ARRAYS instead of plain strings. A naive [string](...) cast
-        on an array silently joins every element with a space via PowerShell's
-        default array-to-string conversion — producing exactly the kind of
-        garbled "x64 x86 x86 x86 x86 x64 x64..." cell seen in search results.
-        This function detects that case, de-duplicates the values, and returns
-        a short, human-readable summary instead.
+        For broad/generic queries, DriverDex sometimes returns a field (arch,
+        version, provider, category, display_name) whose value is a genuinely
+        bundled result covering many devices — and critically, that bundling
+        already happened server-side, so by the time it reaches us it's a
+        plain STRING full of space-separated duplicate tokens
+        (e.g. "x64 x86 x86 x86 x64 x64..."), not a structured JSON array.
+        A raw [string](...) cast just passes that straight through unchanged.
+
+        This function splits on whitespace, de-duplicates (case-insensitive,
+        order-preserving), and only rewrites the value when duplicates were
+        actually found — a real, clean multi-word name like "Atmel Corp" or
+        "Intel Corporation" has no duplicate tokens and is returned as-is,
+        untouched. True JSON arrays are handled the same way, token-by-token.
     .PARAMETER Value      Raw value (string, array, JArray, or $null)
     .PARAMETER Separator  Delimiter used to join distinct values (default ' / ')
     .PARAMETER MaxItems   Max distinct values shown before collapsing to "+N more"
@@ -99,23 +104,37 @@ function ConvertTo-CleanFieldString {
 
     if ($null -eq $Value) { return '' }
 
-    $isArray = ($Value -is [System.Collections.IEnumerable]) -and -not ($Value -is [string])
+    $isRealArray = ($Value -is [System.Collections.IEnumerable]) -and -not ($Value -is [string])
 
-    if (-not $isArray) {
-        try { return ([string]$Value).Trim() } catch { return '' }
+    $rawTokens = [System.Collections.Generic.List[string]]::new()
+    if ($isRealArray) {
+        foreach ($v in @($Value)) {
+            $s = try { ([string]$v).Trim() } catch { '' }
+            if ($s) { $rawTokens.Add($s) }
+        }
+    } else {
+        $s = try { ([string]$Value).Trim() } catch { '' }
+        if ($s) { foreach ($tok in ($s -split '\s+')) { if ($tok) { $rawTokens.Add($tok) } } }
     }
 
-    $items = [System.Collections.Generic.List[string]]::new()
-    $seen  = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($v in @($Value)) {
-        $s = try { ([string]$v).Trim() } catch { '' }
-        if (-not $s -or $seen.Contains($s)) { continue }
-        [void]$seen.Add($s)
-        $items.Add($s)
+    if ($rawTokens.Count -eq 0) { return '' }
+
+    $unique = [System.Collections.Generic.List[string]]::new()
+    $seen   = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($tok in $rawTokens) {
+        if ($seen.Contains($tok)) { continue }
+        [void]$seen.Add($tok)
+        $unique.Add($tok)
     }
-    if ($items.Count -eq 0) { return '' }
-    if ($items.Count -le $MaxItems) { return ($items -join $Separator) }
-    return "$($items[0..($MaxItems-1)] -join $Separator) +$($items.Count - $MaxItems) more"
+
+    # No duplicates collapsed and it wasn't a true array -> this is an ordinary
+    # human-readable value (e.g. "Atmel Corp"); return it exactly as received.
+    if (-not $isRealArray -and $unique.Count -eq $rawTokens.Count) {
+        return ([string]$Value).Trim()
+    }
+
+    if ($unique.Count -le $MaxItems) { return ($unique -join $Separator) }
+    return "$($unique[0..($MaxItems-1)] -join $Separator) +$($unique.Count - $MaxItems) more"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
