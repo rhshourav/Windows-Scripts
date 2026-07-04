@@ -34,9 +34,22 @@ if (-not $Script:ModulePath -or -not (Test-Path "$Script:ModulePath\Modules")) {
     $Script:ModulePath = Split-Path -Parent $PSCommandPath
 }
 
+# Ensure TEMP is always available
 if (-not $env:TEMP -or -not (Test-Path $env:TEMP)) {
-    $env:TEMP = Join-Path $env:LOCALAPPDATA 'Temp'
-    if (-not (Test-Path $env:TEMP)) { New-Item -ItemType Directory -Path $env:TEMP -Force | Out-Null }
+    $candidates = @(
+        $env:LOCALAPPDATA,
+        $env:USERPROFILE,
+        $env:SystemRoot,
+        'C:\Temp'
+    ) | Where-Object { $_ -and (Test-Path $_) }
+    if ($candidates.Count -gt 0) {
+        $env:TEMP = Join-Path $candidates[0] 'Temp'
+    } else {
+        $env:TEMP = Join-Path ([System.IO.Path]::GetTempPath()) 'DriverDex'
+    }
+    if (-not (Test-Path $env:TEMP)) {
+        New-Item -ItemType Directory -Path $env:TEMP -Force -ErrorAction SilentlyContinue | Out-Null
+    }
 }
 
 $modulesDir = if ($Script:ModulePath -and (Test-Path "$Script:ModulePath\Modules")) {
