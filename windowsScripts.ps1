@@ -503,7 +503,11 @@ Write-Host ''
 # --- Execution ---
 try {
     Write-Host '  [>] Downloading and executing...' -ForegroundColor Gray
-    Invoke-Expression (Invoke-RestMethod -Uri '$Url' -UseBasicParsing)
+    `$tmpScript = Join-Path $env:TEMP ('DriverDex-' + [guid]::NewGuid().ToString('N').Substring(0,8) + '.ps1')
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+    (New-Object Net.WebClient).DownloadFile('$Url', `$tmpScript)
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `$tmpScript
+    Remove-Item -LiteralPath `$tmpScript -Force -ErrorAction SilentlyContinue
 } catch {
     Write-Host ''
     Write-Host '  [!] Script execution error:' -ForegroundColor Red
