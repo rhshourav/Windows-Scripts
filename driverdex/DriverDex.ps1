@@ -790,44 +790,166 @@ function Invoke-OfflinePackager {
         Write-Host "  |  USB PREPARATION                                             |" -ForegroundColor Cyan
         Write-Host "  +--------------------------------------------------------------+" -ForegroundColor Cyan
         Write-Host ""
-        Write-Host "  Plug in your USB drive now. I will detect it and copy the" -ForegroundColor White
-        Write-Host "  scanner files to it automatically." -ForegroundColor White
+        Write-Host "  Plug in your USB drive now." -ForegroundColor White
+        Write-Host "  I will scan for it with a 25-second countdown." -ForegroundColor DarkGray
+        Write-Host "  You can press any key to skip waiting." -ForegroundColor DarkGray
         Write-Host ""
 
-        # Detect USB drives
-        $usbDrives = @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=2" -ErrorAction SilentlyContinue |
-                       Where-Object { $_.DeviceID })
+        # ── Countdown with early skip and live USB detection ────────────
+        $usbDrives = @()
+        $countdown = 25
+        $skipCountdown = $false
 
+        while ($countdown -gt 0) {
+            # Check for USB drives
+            $usbDrives = @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=2" -ErrorAction SilentlyContinue |
+                           Where-Object { $_.DeviceID })
+
+            # If USB detected, skip countdown
+            if (@($usbDrives).Count -gt 0) {
+                Write-Host ""
+                Write-Host "  [+] USB drive(s) detected!" -ForegroundColor Green
+                break
+            }
+
+            # Show countdown
+            Write-Host "`r  Scanning... $countdown seconds remaining " -NoNewline -ForegroundColor DarkGray
+
+            # Check for keypress (non-blocking)
+            if ($Host.UI.RawUI.KeyAvailable) {
+                $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+                $skipCountdown = $true
+                break
+            }
+
+            Start-Sleep -Seconds 1
+            $countdown--
+        }
+
+        Write-Host "`r$(' ' * 60)`r" -NoNewline
+
+        # ── If no USB detected after countdown ──────────────────────────
         if (@($usbDrives).Count -eq 0) {
+            Write-Host ""
             Write-Warn "No USB drives detected."
-            Write-Host "  Plug in a USB drive and try again, or choose option 1 instead." -ForegroundColor DarkGray
             Write-Host ""
-        } else {
-            # Show detected USB drives
-            Write-Host "  Detected USB drive(s):" -ForegroundColor Green
-            for ($i = 0; $i -lt @($usbDrives).Count; $i++) {
-                $d = $usbDrives[$i]
-                $freeGB = [math]::Round($d.FreeSpace / 1GB, 1)
-                Write-Host "    [$($i+1)] $($d.DeviceID) $($d.VolumeName)  (${freeGB} GB free)" -ForegroundColor White
-            }
-            Write-Host "    [0]  Enter path manually" -ForegroundColor DarkGray
+            Write-Host "  You can:" -ForegroundColor White
+            Write-Host "    [1]  Plug in a USB and retry detection" -ForegroundColor Cyan
+            Write-Host "    [2]  Save scanner files to a folder on this PC" -ForegroundColor Cyan
+            Write-Host "    [3]  Go back and provide inventory.json directly" -ForegroundColor Cyan
             Write-Host ""
 
-            $driveChoice = Read-Input -Prompt 'Select USB drive' -Default '1' `
-                -Validator { param($v) $v -match '^\d+$' -and [int]$v -le @($usbDrives).Count } `
-                -ErrMsg    'Enter a valid drive number.'
+            $fallback = Read-Input -Prompt 'Select option' -Default '1' `
+                -Validator { param($v) $v -match '^[123]$' } `
+                -ErrMsg    'Enter 1, 2, or 3.'
 
-            $targetRoot = $null
-            if ($driveChoice -eq '0') {
-                $targetRoot = Read-Input -Prompt 'Enter USB drive path (e.g. E:\)' `
-                    -Validator { param($v) $v -match '^[A-Za-z]:\\?$' -and (Test-Path $v) } `
-                    -ErrMsg    'Enter a valid drive path like E:\'
+            if ($fallback -eq '3') {
+                # Go back to main prompt
+                Write-Host ""
+            } elseif ($fallback -eq '2') {
+                # Save to any folder
+                Write-Host ""
+                $savePath = Read-Input -Prompt 'Folder to save scanner files' `
+                    -Default (Join-Path $env:USERPROFILE 'Documents') `
+                    -Validator { param($v) $v -match '^[A-Za-z]:\\' } `
+                    -ErrMsg    'Enter a valid folder path like C:\Users\You\Documents'
+
+                if (-not (Test-Path $savePath)) {
+                    try {
+                        New-Item -ItemType Directory -Path $savePath -Force | Out-Null
+                    } catch {
+                        Write-Err -What "Cannot create folder" `
+                                  -Reason $_.Exception.Message `
+                                  -Fix    "Choose a different location."
+                        return
+                    }
+                }
+
+                $scanSource = Join-Path $PSScriptRoot 'offline-packager'
+                $scanDest   = Join-Path $savePath 'DriverDex-Scanner'
+
+                Write-Step "Copying scanner files to $scanDest..."
+                try {
+                    New-Item -ItemType Directory -Path $scanDest -Force | Out-Null
+                    Copy-Item -Path (Join-Path $scanSource 'scan.cmd')  -Destination $scanDest -Force
+                    Copy-Item -Path (Join-Path $scanSource 'scan.ps1')  -Destination $scanDest -Force
+                    Write-OK "Scanner files saved to: $scanDest"
+                } catch {
+                    Write-Err -What "Failed to copy scanner files" `
+                              -Reason $_.Exception.Message `
+                              -Fix    "Check that the folder is writable."
+                    return
+                }
+
+                # Show instructions for local save
+                Write-Host ""
+                Write-Host "  +--------------------------------------------------------------+" -ForegroundColor Green
+                Write-Host "  |  INSTRUCTIONS                                                |" -ForegroundColor Green
+                Write-Host "  +--------------------------------------------------------------+" -ForegroundColor Green
+                Write-Host ""
+                Write-Host "  Copy the DriverDex-Scanner folder to the air-gapped PC." -ForegroundColor White
+                Write-Host "  (Use a USB drive, network share, or any transfer method)" -ForegroundColor DarkGray
+                Write-Host ""
+                Write-Host "  Then on the air-gapped PC:" -ForegroundColor White
+                Write-Host "    1. Open the DriverDex-Scanner folder" -ForegroundColor DarkGray
+                Write-Host "    2. Double-click scan.cmd" -ForegroundColor DarkGray
+                Write-Host "    3. Wait for inventory.json to be created" -ForegroundColor DarkGray
+                Write-Host "    4. Bring inventory.json back here" -ForegroundColor DarkGray
+                Write-Host ""
+                Write-Host "  +--------------------------------------------------------------+" -ForegroundColor Green
+                Write-Host ""
+                Write-Host "  Press Enter when you have the inventory.json ready..." -ForegroundColor DarkGray
+                $null = Read-Host
             } else {
-                $targetRoot = $usbDrives[[int]$driveChoice - 1].DeviceID
+                # Retry USB detection
+                Write-Host ""
+                Write-Step "Re-scanning for USB drives..."
+                Start-Sleep -Seconds 2
+                $usbDrives = @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=2" -ErrorAction SilentlyContinue |
+                               Where-Object { $_.DeviceID })
+
+                if (@($usbDrives).Count -eq 0) {
+                    Write-Warn "Still no USB drives detected."
+                    Write-Host "  Choose option 2 (save to folder) or option 3 (provide path) instead." -ForegroundColor DarkGray
+                    Write-Host ""
+                }
+            }
+        }
+
+        # ── If USB detected, let user choose which one ──────────────────
+        if (@($usbDrives).Count -gt 0) {
+            Write-Host ""
+            if (@($usbDrives).Count -eq 1) {
+                $d = $usbDrives[0]
+                $freeGB = [math]::Round($d.FreeSpace / 1GB, 1)
+                Write-Host "  Found: $($d.DeviceID) $($d.VolumeName)  (${freeGB} GB free)" -ForegroundColor Green
+                $targetRoot = $d.DeviceID
                 if (-not $targetRoot.EndsWith('\')) { $targetRoot += '\' }
+            } else {
+                Write-Host "  Detected USB drive(s):" -ForegroundColor Green
+                for ($i = 0; $i -lt @($usbDrives).Count; $i++) {
+                    $d = $usbDrives[$i]
+                    $freeGB = [math]::Round($d.FreeSpace / 1GB, 1)
+                    Write-Host "    [$($i+1)] $($d.DeviceID) $($d.VolumeName)  (${freeGB} GB free)" -ForegroundColor White
+                }
+                Write-Host "    [0]  Enter path manually" -ForegroundColor DarkGray
+                Write-Host ""
+
+                $driveChoice = Read-Input -Prompt 'Select USB drive' -Default '1' `
+                    -Validator { param($v) $v -match '^\d+$' -and [int]$v -le @($usbDrives).Count } `
+                    -ErrMsg    'Enter a valid drive number.'
+
+                if ($driveChoice -eq '0') {
+                    $targetRoot = Read-Input -Prompt 'Enter path (e.g. E:\)' `
+                        -Validator { param($v) $v -match '^[A-Za-z]:\\?$' -and (Test-Path $v) } `
+                        -ErrMsg    'Enter a valid path like E:\'
+                } else {
+                    $targetRoot = $usbDrives[[int]$driveChoice - 1].DeviceID
+                    if (-not $targetRoot.EndsWith('\')) { $targetRoot += '\' }
+                }
             }
 
-            # Copy scanner files to USB
+            # Copy scanner files
             $scanSource = Join-Path $PSScriptRoot 'offline-packager'
             $scanDest   = Join-Path $targetRoot 'DriverDex-Scanner'
 
@@ -883,7 +1005,7 @@ function Invoke-OfflinePackager {
     Write-Host ""
 
     $inventoryInput = Read-Input -Prompt 'Path to inventory.json or folder' `
-        -Default (Join-Path $PSScriptRoot 'offline-packager\inventory.json')
+        -Default (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'inventory.json')
 
     # Resolve: if user gave a folder, look for inventory.json inside
     $inventoryPath = $null
