@@ -6,7 +6,7 @@
 
 ## 1. Architecture Overview
 
-`
+```
 +=====================================================================+
 |                        LAUNCHER LAYER                               |
 |  unimasScript.ps1 (v27.5.0)    windowsScripts.ps1 (v27.4.0)       |
@@ -23,10 +23,11 @@
 +=====================================================================+
 |                     DRIVERDEX ENTRY POINTS                          |
 |                                                                     |
-|  DriverDex.ps1 (v2.3.0)         driverrun.ps1 (v2.2.3)            |
-|  MODULAR - 971 lines             MONOLITHIC - 3,251 lines          |
+|  DriverDex.ps1 (v2.4.0)         driverrun.ps1 (v2.2.3)            |
+|  MODULAR - 1,556 lines           MONOLITHIC - 3,251 lines          |
 |  Imports 8 modules               Self-contained, no deps           |
-|  Fallback: downloads from GitHub DO NOT MODIFY                     |
+|  Includes Offline Packager       DO NOT MODIFY                     |
+|  Fallback: downloads from GitHub                                   |
 +=====================================================================+
                               |
                               v
@@ -44,6 +45,19 @@
                               |
                               v
 +=====================================================================+
+|                   OFFLINE PACKAGER                                  |
+|                                                                     |
+|  offline-packager/                                                  |
+|    scan.cmd    - USB launcher with auto-elevation (10 lines)       |
+|    scan.ps1    - Air-gapped hardware scanner (108 lines)           |
+|                                                                     |
+|  Invoke-OfflinePackager (in DriverDex.ps1)                        |
+|    Workflow selection, USB detection, scanner file copy,           |
+|    inventory.json import, dynamic installer generation             |
++=====================================================================+
+                              |
+                              v
++=====================================================================+
 |                      EXTERNAL SERVICES                              |
 |                                                                     |
 |  DriverDex API (Cloudflare Workers)   GitHub (raw + LFS)           |
@@ -52,7 +66,7 @@
 |                                     LFS pointer resolution         |
 |                                     Contribute scripts             |
 +=====================================================================+
-`
+```
 
 ---
 
@@ -60,24 +74,27 @@
 
 | File | Lines | Purpose |
 |---|---|---|
-| DriverDex.ps1 | 971 | Modular entry point (v2.3.0), Search Engine REPL, contribution prompt, Force Windows Update, Main orchestrator |
+| DriverDex.ps1 | 1,556 | Modular entry point (v2.4.0), Search Engine REPL, Offline Packager, contribution prompt, Force Windows Update, Main orchestrator |
 | driverrun.ps1 | 3,251 | Monolithic entry point (v2.2.3), all functions inline, irm/iex target, DO NOT MODIFY |
 | Modules/Utils.psm1 | 444 | Safe property access, array dedup, logging, ANSI detection, TLS, version compare, spinner, elevation, network check |
 | Modules/Formatting.psm1 | 582 | Unicode box-drawing tables, column sizing, CJK-aware truncation, pagination, search table, driver detail, progress bar |
-| Modules/UI.psm1 | 452 | Semantic output (Write-Step/OK/Warn/Err), branded banners, main menu, driver table/menu/panel, search help, output folder |
+| Modules/UI.psm1 | 457 | Semantic output (Write-Step/OK/Warn/Err), branded banners, main menu, driver table/menu/panel, search help, output folder, Offline Packager menu |
 | Modules/Drivers.psm1 | 433 | PnP hardware enumeration, API endpoints, driver classification, record normalization, API calls with retry/fast, installed check |
 | Modules/Download.psm1 | 199 | Multi-part URL builder, Git LFS pointer resolution, file download with progress/retry/SHA-256 |
 | Modules/Install.psm1 | 401 | Extractor runner, driver package installer (pnputil + vendor fallback + rollback), search-mode download+install, reboot prompt |
 | Modules/Cache.psm1 | 300 | HWID cache builder (runspace pool, 16 concurrent, 12s budget), O(1) search index (6 dictionaries) |
 | Modules/Search.psm1 | 558 | Weighted scoring engine, Levenshtein fuzzy matching, query parser (filters/sort), filter/sort engine, main search function |
+| offline-packager/scan.cmd | 10 | USB launcher for air-gapped PCs, auto-elevates, calls scan.ps1 |
+| offline-packager/scan.ps1 | 108 | Standalone hardware scanner, exports inventory.json (HWIDs, vendor IDs, class GUIDs, names) |
 | README.md | 58 | Quick start, feature overview, requirements |
-| KNOWLEDGE_MAP.md | 261 | Developer knowledge base (predecessor to this file) |
+| KNOWLEDGE_MAP.md | ~270 | Developer knowledge base (predecessor to this file) |
+| KNOWLEDGE_GRAPH.md | this file | Comprehensive reference for all components |
 
 ---
 
 ## 3. Module Dependency Graph (Import Order)
 
-`
+```
 Utils.psm1                 [FOUNDATION - no dependencies]
     |
     +---> Formatting.psm1   [depends on: Utils]
@@ -93,12 +110,12 @@ Utils.psm1                 [FOUNDATION - no dependencies]
     |         +---> Install.psm1 [depends on: Utils, Download, UI]
     |
     +---> Search.psm1       [depends on: Utils, Cache]
-`
+```
 
 **Import order (critical):**
-`
+```
 Utils -> Formatting -> UI -> Drivers -> Download -> Install -> Cache -> Search
-`
+```
 
 ---
 
@@ -156,7 +173,7 @@ Utils -> Formatting -> UI -> Drivers -> Download -> Install -> Cache -> Search
 | Write-Err | What, Reason, Fix, Err | Structured error: description, reason, fix, log path |
 | Write-Header | Version | 78-char branded header with ASCII art logo |
 | Write-SearchBanner | (none) | Search Engine branded header |
-| Show-MainMenu | (none) | 4-mode menu: Auto/Search/WinUpdate/Quit |
+| Show-MainMenu | (none) | 5-mode menu: Auto/Search/WinUpdate/OfflinePackager/Quit |
 | Show-DriverTable | Drivers, ProblemHWIDs | Numbered driver table with install-status coloring |
 | Show-DriverMenu | Drivers, ProblemHWIDs | Table + selection prompt (PROBLEMS/UPDATES/ALL/NONE/numbers) |
 | Show-DriverPanel | Driver, Idx, Total | Bordered work panel before driver processing |
@@ -227,7 +244,7 @@ Utils -> Formatting -> UI -> Drivers -> Download -> Install -> Cache -> Search
 | Sort-SearchResults | Results, SortBy, Descending | Sort by name/provider/version/date/score/arch/category |
 | Invoke-WeightedSearch | Query, Arch, Category | Main search: parse -> API -> cache fallback -> score -> filter -> sort |
 
-### DriverDex.ps1 (5 functions + Main)
+### DriverDex.ps1 (6 functions + Main)
 
 | Function | Parameters | Purpose |
 |---|---|---|
@@ -235,7 +252,15 @@ Utils -> Formatting -> UI -> Drivers -> Download -> Install -> Cache -> Search
 | Invoke-SearchEngine | IsAdmin, ScratchDir | Interactive search REPL |
 | Invoke-ContributePrompt | HWIDs, Reason, UnmatchedLocalDrivers | Show contribution pitch + privacy info |
 | Invoke-ForceWindowsUpdate | IsAdmin | Install pending Windows updates |
+| Invoke-OfflinePackager | IsAdmin | Offline Packager: workflow selection, USB prep, inventory import, installer generation |
 | Main | (none) | Top-level orchestrator |
+
+### Offline Packager Files
+
+| File | Lines | Purpose |
+|---|---|---|
+| offline-packager/scan.cmd | 10 | USB launcher with auto-elevation, calls scan.ps1 via PowerShell |
+| offline-packager/scan.ps1 | 108 | Standalone hardware scanner for air-gapped PCs, exports inventory.json |
 
 ---
 
@@ -263,7 +288,7 @@ Utils -> Formatting -> UI -> Drivers -> Download -> Install -> Cache -> Search
 
 ### 6A. Auto-Detect Flow (Main Path)
 
-`
+```
 Main()
   |
   +-> Initialize-Tls()
@@ -312,11 +337,11 @@ Main()
   +-> Show-InstallSummary()                   [Formatting]
   +-> Invoke-RebootPrompt()                   [Install]
   +-> Invoke-ContributePrompt()               [DriverDex.ps1]
-`
+```
 
 ### 6B. Search Engine Flow
 
-`
+```
 Invoke-SearchEngine()
   |
   +-> Set-BlackBackground()
@@ -354,11 +379,11 @@ Invoke-SearchEngine()
                       Sort-SearchResults()
                 |
                 +-> Show-SearchTable()          [Formatting]
-`
+```
 
 ### 6C. Launcher Flow
 
-`
+```
 User selects menu item (L/M/O)
   |
   +-> Start-RemoteScript(Url, Title)
@@ -374,7 +399,63 @@ User selects menu item (L/M/O)
         |     Cleanup temp file
         |
         +-> Start-Process powershell.exe -EncodedCommand <base64>
-`
+```
+
+### 6D. Offline Packager Flow
+
+```
+Invoke-OfflinePackager()
+  |
+  +-> Show workflow menu:
+  |     [1] I already have inventory.json
+  |     [2] Prepare USB for air-gapped PC
+  |
+  +-> If Option 2 (USB Prep):
+  |     Show 25-second countdown (any key to skip)
+  |     Live USB detection during countdown
+  |     If USB detected early -> skip countdown
+  |
+  |     If no USB found:
+  |       [1] Retry detection
+  |       [2] Save scanner files to any folder
+  |       [3] Go back, provide path manually
+  |
+  |     If USB found:
+  |       Single USB -> auto-select
+  |       Multiple USBs -> let user choose
+  |
+  |     Copy scan.cmd + scan.ps1 to USB/DriverDex-Scanner/
+  |     Show 6-step instructions for air-gapped PC
+  |     Wait for user to return with inventory.json
+  |
+  +-> Prompt for inventory.json path (default: Documents)
+  |     Accepts file path or folder path
+  |     Resolves folder -> looks for inventory.json inside
+  |
+  +-> Parse inventory.json
+  |     Validate JSON structure
+  |     Extract HWID list from inventory
+  |
+  +-> Build driver catalog
+  |     Query API for each HWID
+  |     Group by category + architecture
+  |     Rank: problem > missing > outdated > current
+  |
+  +-> Show catalog summary table
+  |
+  +-> Get-OutputFolder()
+  |
+  +-> Download all drivers
+  |     Show-ProgressBar() per driver
+  |     Get-DriverFile() per part
+  |
+  +-> Generate output files:
+  |     Install-Offline.cmd     - Double-click installer (elevation + policy)
+  |     install_offline.ps1     - Recursive pnputil /add-driver /subdirs /install
+  |     inventory.json          - Original scan data
+  |
+  +-> Show final summary
+```
 
 ---
 
@@ -384,7 +465,7 @@ User selects menu item (L/M/O)
 
 | Variable | Value |
 |---|---|
-| VERSION | 2.3.0 |
+| VERSION | 2.4.0 |
 | GITHUB_RAW | https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/driverdex |
 
 ### driverrun.ps1 / Drivers.psm1
@@ -448,6 +529,7 @@ User selects menu item (L/M/O)
 | StrictMode Guard | Get-Prop | Handles both Newtonsoft JObject (PS5.1) and PSCustomObject (PS6+) |
 | Nested try/catch/finally | Main | Outer: session safety net. Inner: auto-detect flow. Finally: always runs contribute prompt + cleanup |
 | Best-Effort Operations | Various | -ErrorAction SilentlyContinue for non-critical: log writes, disk checks, manifest updates |
+| Offline Packager Fallbacks | Invoke-OfflinePackager | USB detection timeout, inventory path resolution, folder-or-file input handling |
 
 ---
 
@@ -486,7 +568,52 @@ User selects menu item (L/M/O)
 
 ---
 
-## 11. Contribute System
+## 11. Offline Packager
+
+### Overview
+For PCs without internet access. Scans hardware on the offline machine, brings the inventory back to an online PC, and generates a driver installation package.
+
+### Menu Entry
+- **Main Menu [P]**: `Show-MainMenu` in UI.psm1 (line ~217)
+- **Function**: `Invoke-OfflinePackager` in DriverDex.ps1
+
+### Workflow Options
+| Option | Description |
+|---|---|
+| 1 - I have inventory.json | User provides path to existing inventory file |
+| 2 - Prepare USB for air-gapped PC | Copies scanner files, shows instructions, waits for return |
+
+### USB Detection Features
+- 25-second countdown with live USB scanning
+- Any key press skips countdown immediately
+- Auto-skip if USB detected before countdown ends
+- Multiple USB drive selection
+- Fallback options if no USB: retry, save to any folder, or go back
+
+### Inventory Path Resolution
+- Default: `Documents\inventory.json` (via `[Environment]::GetFolderPath('MyDocuments')`)
+- Accepts file path (used directly) or folder path (auto-looks for `inventory.json` inside)
+
+### Generated Output Files
+| File | Purpose |
+|---|---|
+| `Install-Offline.cmd` | Double-click batch file, auto-elevates, sets PowerShell execution policy |
+| `install_offline.ps1` | Recursive pnputil install: finds all `.inf` files in subfolders, installs each |
+| `inventory.json` | Original scan data (copied from input) |
+
+### scan.ps1 Inventory Data
+| Field | Source |
+|---|---|
+| computer_name | `$env:COMPUTERNAME` |
+| timestamp | ISO 8601 format |
+| hardwareids | Win32_PnPEntity + pnputil /enum-devices |
+| device_info | ClassGuid, VendorID, DeviceID, Name, InstanceId |
+| windows_version | Win32_OperatingSystem Caption + BuildNumber |
+| architecture | `$env:PROCESSOR_ARCHITECTURE` |
+
+---
+
+## 12. Contribute System
 
 ### Trigger
 - Shown in every exit path of auto-detect flow via finally block
@@ -516,11 +643,11 @@ User selects menu item (L/M/O)
 
 ---
 
-## 12. manifest.json Schema
+## 13. manifest.json Schema
 
 Each installed driver package produces:
 
-`json
+```json
 {
     "driver_id": "...",
     "display_name": "...",
@@ -534,16 +661,42 @@ Each installed driver package produces:
     "install_result": "success|partial|failed",
     "pnputil_exit": 0,
     "reboot_required": false,
-    "generated_by": "DriverDex v2.3.0"
+    "generated_by": "DriverDex v2.4.0"
 }
-`
+```
 
 ---
 
-## 13. Known Issues
+## 14. inventory.json Schema
+
+Produced by `scan.ps1` on air-gapped PCs:
+
+```json
+{
+    "computer_name": "WORKSTATION-01",
+    "timestamp": "2026-07-04T12:00:00.000Z",
+    "hardwareids": ["PCI\\VEN_8086&DEV_1502", "USB\\VID_046D&PID_C52B"],
+    "device_info": [
+        {
+            "ClassGuid": "{4d36e972...}",
+            "VendorID": "8086",
+            "DeviceID": "1502",
+            "Name": "Intel(R) Ethernet Connection",
+            "InstanceId": "PCI\\VEN_8086&DEV_1502&..."
+        }
+    ],
+    "windows_version": "Microsoft Windows 11 Pro",
+    "architecture": "AMD64"
+}
+```
+
+---
+
+## 15. Known Issues
 
 1. **Elevation URL in Utils.psm1** points to driverrun.ps1 (not DriverDex.ps1) for UAC relaunch
 2. **GitHub may cache contributors** from force-pushed commits with Co-authored-By trailers
 3. **DriverDex.ps1 module download** can fail if GitHub is slow; 8 sequential HTTP requests
 4. **Search results can be garbled** if module imports fail silently
 5. **extractor.exe 404** when driver files not uploaded to LFS storage
+6. **scan.ps1 requires PowerShell 5.1+** on the air-gapped PC (standard on Win10/11)

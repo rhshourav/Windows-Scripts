@@ -4,7 +4,7 @@
 
 **DriverDex** is a PowerShell-based automatic hardware driver detector and installer for Windows. It scans PnP devices, queries a REST API for matching drivers, lets the user review/select packages, then downloads (with progress + SHA-256), extracts, and installs via pnputil.
 
-- **Version:** 2.3.0
+- **Version:** 2.4.0
 - **Compatibility:** Windows 7 SP1, 8.1, 10, 11 (x86 and x64)
 - **Requires:** PowerShell 5.1+ (both Windows PowerShell and PowerShell Core)
 - **Author:** https://github.com/rhshourav/driverdex
@@ -14,21 +14,27 @@
 ## File Structure
 
 ```
-New folder/
-├── DriverDex.ps1          (931 lines) — Main entry point, imports all modules
-├── driverrun.ps1           (original monolithic script, ~172KB, DO NOT MODIFY)
+driverdex/
+├── DriverDex.ps1              (1,556 lines) — Main entry point, imports all modules
+├── driverrun.ps1              (3,251 lines) — Original monolithic script, DO NOT MODIFY
 ├── Modules/
-│   ├── Utils.psm1          (444 lines) — Core utilities, logging, safe property access
-│   ├── Formatting.psm1     (582 lines) — Unicode box-drawing tables, CJK support
-│   ├── UI.psm1             (452 lines) — Banners, menus, status messages, error display
-│   ├── Drivers.psm1        (433 lines) — Hardware enumeration, API integration
-│   ├── Download.psm1       (199 lines) — Multi-part downloads, Git LFS, SHA-256
-│   ├── Install.psm1        (401 lines) — Archive extraction, pnputil install, rollback
-│   ├── Cache.psm1          (300 lines) — Runspace pool cache, O(1) search indexes
-│   └── Search.psm1         (558 lines) — Weighted search engine, fuzzy matching
+│   ├── Utils.psm1             (444 lines) — Core utilities, logging, safe property access
+│   ├── Formatting.psm1        (582 lines) — Unicode box-drawing tables, CJK support
+│   ├── UI.psm1                (457 lines) — Banners, menus, status messages, error display
+│   ├── Drivers.psm1           (433 lines) — Hardware enumeration, API integration
+│   ├── Download.psm1          (199 lines) — Multi-part downloads, Git LFS, SHA-256
+│   ├── Install.psm1           (401 lines) — Archive extraction, pnputil install, rollback
+│   ├── Cache.psm1             (300 lines) — Runspace pool cache, O(1) search indexes
+│   └── Search.psm1            (558 lines) — Weighted search engine, fuzzy matching
+├── offline-packager/
+│   ├── scan.cmd               (10 lines) — USB launcher for air-gapped PCs, auto-elevates
+│   └── scan.ps1               (108 lines) — Hardware scanner, exports inventory.json
+├── README.md
+├── KNOWLEDGE_MAP.md
+└── KNOWLEDGE_GRAPH.md
 ```
 
-**Total:** ~4,300 lines across 9 files.
+**Total:** ~6,000+ lines across 12 files.
 
 ---
 
@@ -55,7 +61,7 @@ Utils → Formatting → UI → Drivers → Download → Install → Cache → S
 
 ## Exported Functions by Module
 
-### Utils.psm1 (14 functions)
+### Utils.psm1 (16 functions)
 | Function | Purpose |
 |---|---|
 | `Get-Prop` | Safe property access for PSCustomObject + Newtonsoft JObject (PS 5.1) |
@@ -68,7 +74,7 @@ Utils → Formatting → UI → Drivers → Download → Install → Cache → S
 | `Initialize-Tls` | Sets TLS protocol versions |
 | `Compare-DriverVersion` | Compares version strings (returns -1/0/1) |
 | `Show-Spinner` / `Clear-SpinnerLine` | Animated Braille spinner |
-| `Read-Input` | Reads user input with prompt |
+| `Read-Input` | Reads user input with prompt, default, validation |
 | `Test-Administrator` | Checks admin rights |
 | `Get-OSInfo` / `Request-Elevation` | OS info / UAC elevation |
 | `Test-NetworkConnectivity` | Network test |
@@ -91,7 +97,8 @@ Utils → Formatting → UI → Drivers → Download → Install → Cache → S
 |---|---|
 | `Write-Step/OK/Warn/Info/Sub/Accent/Divider/Err` | Status message functions |
 | `Write-Header` / `Write-SearchBanner` | Branded headers |
-| `Show-MainMenu` / `Show-DriverTable` / `Show-DriverMenu` / `Show-DriverPanel` | Interactive menus |
+| `Show-MainMenu` | 5-mode menu: Auto, Search, WinUpdate, Offline Packager, Quit |
+| `Show-DriverTable` / `Show-DriverMenu` / `Show-DriverPanel` | Interactive menus |
 | `Show-SearchHelp` | Help text |
 | `Get-OutputFolder` | Gets/creates download output folder |
 
@@ -132,15 +139,90 @@ Utils → Formatting → UI → Drivers → Download → Install → Cache → S
 | `Get-HwidCache` / `Get-HwidCacheBuilt` / `Get-IndexBuilt` | Cache state accessors |
 | `Get-CacheByProvider/Category/Arch/DriverId` | Filtered cache lookups |
 
-### Search.psm1 (6 functions)
+### Search.psm1 (7 functions)
 | Function | Purpose |
 |---|---|
 | `Get-RelevanceScore` | Weighted scoring: Exact=100, StartsWith=70, WholeWord=50, Contains=30, HWID=25, Provider=15, Category=10, Version=5 |
 | `Get-FuzzyScore` | Sliding-window Levenshtein fuzzy matching |
+| `Get-LevenshteinDistance` | Edit distance calculation |
 | `Parse-SearchQuery` | Parses `query provider:intel arch:x64 sort:name` |
 | `Test-RecordFilter` | Tests record against structured filters |
 | `Sort-SearchResults` | Sorts by relevance/name/version |
 | `Invoke-WeightedSearch` | Main search entry point (API → cache → fuzzy fallback) |
+
+### DriverDex.ps1 (6 functions + Main)
+| Function | Purpose |
+|---|---|
+| `Set-BlackBackground` | Force black terminal background |
+| `Invoke-SearchEngine` | Interactive search REPL |
+| `Invoke-ContributePrompt` | Contribution pitch + privacy info |
+| `Invoke-ForceWindowsUpdate` | Install pending Windows updates |
+| `Invoke-OfflinePackager` | Offline Packager: USB prep, inventory import, installer generation |
+| `Main` | Top-level orchestrator |
+
+---
+
+## Offline Packager
+
+### Purpose
+For PCs without internet access. Two-step workflow:
+1. Prepare USB with scanner files
+2. Run scan on air-gapped PC, bring inventory back
+3. Generate driver installation package on online PC
+
+### Files
+| File | Lines | Purpose |
+|---|---|---|
+| `offline-packager/scan.cmd` | 10 | USB launcher with auto-elevation, calls scan.ps1 |
+| `offline-packager/scan.ps1` | 108 | Standalone hardware scanner, exports inventory.json |
+
+### Menu Entry
+- **[P] Offline Packager** in `Show-MainMenu` (UI.psm1)
+- **`Invoke-OfflinePackager`** function in DriverDex.ps1
+
+### Workflow Options
+| Option | Description |
+|---|---|
+| 1 - I have inventory.json | User provides path to existing inventory file |
+| 2 - Prepare USB for air-gapped PC | Copies scanner files, shows instructions, waits for return |
+
+### USB Detection Features
+- 25-second countdown with live USB scanning
+- Any key press skips countdown immediately
+- Auto-skip if USB detected before countdown ends
+- Multiple USB drive selection
+- Fallback options if no USB: retry, save to any folder, or go back
+
+### Inventory Path
+- Default: `Documents\inventory.json` (via `[Environment]::GetFolderPath('MyDocuments')`)
+- Accepts file path or folder path (auto-resolves `folder\inventory.json`)
+
+### Generated Output
+| File | Purpose |
+|---|---|
+| `Install-Offline.cmd` | Double-click batch: auto-elevates + sets execution policy |
+| `install_offline.ps1` | Recursive `pnputil /add-driver /subdirs /install` for all `.inf` files |
+| `inventory.json` | Original scan data (copied from input) |
+
+### inventory.json Schema
+```json
+{
+    "computer_name": "WORKSTATION-01",
+    "timestamp": "2026-07-04T12:00:00.000Z",
+    "hardwareids": ["PCI\\VEN_8086&DEV_1502", "USB\\VID_046D&PID_C52B"],
+    "device_info": [
+        {
+            "ClassGuid": "{4d36e972...}",
+            "VendorID": "8086",
+            "DeviceID": "1502",
+            "Name": "Intel(R) Ethernet Connection",
+            "InstanceId": "PCI\\VEN_8086&DEV_1502&..."
+        }
+    ],
+    "windows_version": "Microsoft Windows 11 Pro",
+    "architecture": "AMD64"
+}
+```
 
 ---
 
@@ -148,7 +230,7 @@ Utils → Formatting → UI → Drivers → Download → Install → Cache → S
 
 | Endpoint | URL | Purpose |
 |---|---|---|
-| HWID Lookup | `https://driverdex-check.driverdex.workers.dev/api/hwid` | POST, queries by hardware IDs |
+| HWID Lookup | `https://driverdex-check.driverdex.workers.dev/api/hwid` | GET, queries by hardware IDs |
 | Text Search | `https://driverdex-check.driverdex.workers.dev/api/search` | GET, queries by search term |
 | LFS Batch | `https://github.com/rhshourav/driverdex.git/info/lfs/objects/batch` | Git LFS pointer resolution |
 | Extractor | `https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/extractor/extractor.exe` | Downloaded on first run |
@@ -241,12 +323,13 @@ Set-ExecutionPolicy Bypass -Scope Process
 
 After any code change, verify:
 1. `Import-Module` all 8 modules without errors
-2. All 82 exported functions are available via `Get-Command`
+2. All exported functions are available via `Get-Command`
 3. No `[System.Char] * [System.Int32/Double]` errors (check all `[Math]::` and `[char]` usage)
 4. `Get-PartUrls` returns full URL array (not single char)
 5. `Truncate-Text` uses ASCII `...` (not Unicode ellipsis)
 6. `Get-FuzzyScore` handles typos (e.g., 'intell' vs 'Intel')
 7. Search flow works: type query → results table → select → download → extract
+8. Offline Packager: `[P]` menu option appears, workflows work, inventory.json parses correctly
 
 ---
 
@@ -259,3 +342,4 @@ After any code change, verify:
 - [ ] Improve error messages for network failures
 - [ ] Add proxy support
 - [ ] Add `--json` output mode for scripting
+- [ ] Add progress persistence for large inventory downloads
