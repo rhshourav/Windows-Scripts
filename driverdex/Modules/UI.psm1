@@ -156,18 +156,23 @@ function Show-MainMenu {
     Write-Host "  │        Triggers Windows Update, installs all pending patches,           │" -ForegroundColor DarkGray
     Write-Host "  │        and optional driver updates from Microsoft servers.              │" -ForegroundColor DarkGray
     Write-Host "  │                                                                         │" -ForegroundColor DarkCyan
+    Write-Host "  │   [P]  Offline Packager (Generate Offline Bundle)                       │" -ForegroundColor DarkYellow
+    Write-Host "  │        Reads an inventory.json from an air-gapped PC, downloads          │" -ForegroundColor DarkGray
+    Write-Host "  │        matching drivers, and builds a deployable offline bundle.        │" -ForegroundColor DarkGray
+    Write-Host "  │                                                                         │" -ForegroundColor DarkCyan
     Write-Host "  │   [q]  Quit                                                             │" -ForegroundColor DarkGray
     Write-Host "  │                                                                         │" -ForegroundColor DarkCyan
     Write-Host "  └─────────────────────────────────────────────────────────────────────────┘" -ForegroundColor DarkCyan
     Write-Host ""
 
     $choice = Read-Input -Prompt 'Select mode' -Default '1' `
-        -Validator { param($v) $v -match '^[123qQ]$' } `
-        -ErrMsg    'Enter 1 (Auto-Detect), 2 (Search Engine), 3 (Windows Update), or q to quit.'
+        -Validator { param($v) $v -match '^[123pPqQ]$' } `
+        -ErrMsg    'Enter 1 (Auto-Detect), 2 (Search Engine), 3 (Windows Update), P (Offline Packager), or q to quit.'
 
     if ($choice -match '^[Qq]') { return 'quit' }
     if ($choice -eq '2')        { return 'search' }
     if ($choice -eq '3')        { return 'winupdate' }
+    if ($choice -match '^[Pp]') { return 'packager' }
     return 'auto'
 }
 

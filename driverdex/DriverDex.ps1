@@ -751,6 +751,312 @@ function Invoke-ForceWindowsUpdate {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  OFFLINE PACKAGER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+function Invoke-OfflinePackager {
+    <#
+    .SYNOPSIS Reads an inventory.json from an air-gapped machine, downloads matching
+    drivers, and builds a self-contained offline driver bundle with an installer.
+    #>
+
+    Write-Host ""
+    Write-Host "  +--------------------------------------------------------------+" -ForegroundColor DarkYellow
+    Write-Host "  |  OFFLINE PACKAGER                                            |" -ForegroundColor Yellow
+    Write-Host "  +--------------------------------------------------------------+" -ForegroundColor DarkYellow
+    Write-Host ""
+    Write-Host "  This tool builds an offline driver bundle for an air-gapped PC." -ForegroundColor DarkGray
+    Write-Host "  Run scan.cmd on the target machine first to produce inventory.json." -ForegroundColor DarkGray
+    Write-Host ""
+
+    # ── Prompt for inventory.json path ──────────────────────────────────
+    $inventoryPath = Read-Input -Prompt 'Path to inventory.json' -Default (Join-Path $PSScriptRoot 'offline-packager\inventory.json') `
+        -Validator { param($v) (Test-Path $v) -and ($v -like '*.json') } `
+        -ErrMsg    'File not found or not a .json file. Check the path and try again.'
+
+    Write-Step "Reading inventory from: $inventoryPath"
+
+    try {
+        $inventory = Get-Content -LiteralPath $inventoryPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        Write-Err -What "Failed to parse inventory.json" `
+                  -Reason $_.Exception.Message `
+                  -Fix    "Ensure the file is valid JSON produced by scan.ps1."
+        return
+    }
+
+    # Safely cast HWIDs to array (prevents single-item unwrapping on PS 5.1)
+    $targetHWIDs = @()
+    if ($inventory.HWIDs -is [array]) {
+        $targetHWIDs = @($inventory.HWIDs)
+    } elseif ($inventory.HWIDs) {
+        $targetHWIDs = @($inventory.HWIDs)
+    }
+
+    $targetArch = if ($inventory.Architecture) { $inventory.Architecture } else { 'Am64' }
+
+    if (@($targetHWIDs).Count -eq 0) {
+        Write-Err -What "No hardware IDs found in inventory.json" `
+                  -Reason "The HWIDs array is empty or missing." `
+                  -Fix    "Re-run scan.ps1 on the target machine."
+        return
+    }
+
+    Write-OK "Loaded $(@($targetHWIDs).Count) hardware ID(s) · Arch: $targetArch"
+    Write-Host ""
+
+    # ── Network check ───────────────────────────────────────────────────
+    Write-Divider
+    if (-not (Test-NetworkConnectivity)) { return }
+    Write-Host ""
+
+    # ── Query API for matching drivers ──────────────────────────────────
+    Write-Divider
+    Write-Step "Querying DriverDex API for $(@($targetHWIDs).Count) hardware ID(s)..."
+    $drivers = Search-Drivers -HWIDs $targetHWIDs -SystemArch $targetArch -InstalledSnapshot @{}
+    Write-Host ""
+
+    if (@($drivers).Count -eq 0) {
+        Write-Warn "No matching drivers found in the DriverDex database for this inventory."
+        Write-Host ""
+        return
+    }
+
+    $byCat = $drivers | Group-Object Category
+    $catSummary = ($byCat | ForEach-Object { "$($_.Name): $($_.Count)" }) -join '  ·  '
+    Write-OK "Found $(@($drivers).Count) matching driver(s)  [$catSummary]"
+    Write-Host ""
+
+    # ── Output folder ───────────────────────────────────────────────────
+    Write-Divider
+    $outRoot = Get-OutputFolder
+    Write-Host ""
+
+    $estMB = @($drivers).Count * 200
+    Write-Info "Estimated download: ~${estMB} MB (rough estimate)"
+
+    # ── Download extractor ──────────────────────────────────────────────
+    Write-Divider
+    Write-Step "Downloading DriverDex extractor..."
+    $extractor = Join-Path $Script:scratch 'extractor.exe'
+    try {
+        Get-DriverFile -Url (Get-ExtractorUrl) -Dest $extractor -Label 'extractor.exe'
+    } catch {
+        Write-Err -What "Failed to download extractor." `
+                  -Reason $_.Exception.Message `
+                  -Fix    "Check your internet connection and re-run."
+        return
+    }
+    Write-Host ""
+
+    # ── Download and extract each driver ────────────────────────────────
+    Write-Divider
+    Write-Step "Downloading and extracting driver packages..."
+    Write-Host ""
+
+    $results = [System.Collections.Generic.List[object]]::new()
+    $dIdx    = 0
+
+    foreach ($drv in @($drivers)) {
+        $dIdx++
+        $name = $drv.DisplayName
+        Write-Host "  [$dIdx/$(@($drivers).Count)] $name" -ForegroundColor Cyan
+
+        try {
+            $res = Invoke-SearchDownload `
+                        -Item        $drv `
+                        -OutRoot     $outRoot `
+                        -ScratchDir  $Script:scratch `
+                        -Extractor   $extractor `
+                        -IsAdmin     (Test-Administrator) `
+                        -InstallMode $false
+            $results.Add($res)
+            if ($res.Success) {
+                Write-OK "Downloaded: $name"
+            } else {
+                Write-Warn "Partial failure for: $name"
+            }
+        } catch {
+            Write-Warn "Failed to process ${name}: $($_.Exception.Message)"
+            Write-Log -Level WARN -Msg "Offline packager download failed for '$name': $($_.Exception.Message)"
+        }
+        Write-Host ""
+    }
+
+    # ── Generate deployer scripts ───────────────────────────────────────
+    Write-Step "Generating offline installer scripts..."
+    $deployerCmd  = Join-Path $outRoot 'Install-Offline.cmd'
+    $deployerPs1  = Join-Path $outRoot 'install_offline.ps1'
+
+    $cmdContent = @'
+@echo off
+:: DriverDex Offline Installer - Double-click to install all drivers
+:: Elevates to Admin if needed
+NET SESSION >nul 2>&1
+if %errorLevel% NEQ 0 (
+    powershell -Raw -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList 'am_admin' -Verb RunAs"
+    exit /b
+)
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0install_offline.ps1"
+pause
+'@
+
+    $ps1Content = @'
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+    DriverDex Offline Installer - Installs all drivers from the bundle directory.
+.DESCRIPTION
+    Recursively scans for .inf files and installs them via pnputil.
+    Run Install-Offline.cmd for automatic elevation, or run this script directly.
+#>
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+try {
+    $Host.UI.RawUI.BackgroundColor = 'Black'
+    $Host.UI.RawUI.ForegroundColor = 'White'
+    try { $Host.UI.RawUI.WindowTitle = 'DriverDex Offline Installer' } catch {}
+    Clear-Host
+} catch {}
+
+Write-Host ""
+Write-Host "  +--------------------------------------------------------------+" -ForegroundColor Cyan
+Write-Host "  |  DriverDex Offline Installer                                 |" -ForegroundColor Cyan
+Write-Host "  +--------------------------------------------------------------+" -ForegroundColor Cyan
+Write-Host ""
+
+# ── Locate all .inf files recursively ───────────────────────────────────
+Write-Host "  [>] Scanning for driver packages..." -ForegroundColor Gray
+$infs = @(Get-ChildItem -Path $PSScriptRoot -Recurse -Filter '*.inf' -ErrorAction SilentlyContinue)
+
+if (@($infs).Count -eq 0) {
+    Write-Host "  [!] No .inf files found in this directory." -ForegroundColor Red
+    Write-Host "      Make sure the driver folders are in the same location as this script." -ForegroundColor DarkGray
+    Write-Host ""
+    return
+}
+
+Write-Host "  [+] Found $(@($infs).Count) INF file(s) across driver packages" -ForegroundColor Green
+Write-Host ""
+
+# ── Group INFs by parent directory (driver package) ─────────────────────
+$packages = $infs | Group-Object -Property DirectoryName
+$totalPackages = @($packages).Count
+$installedCount = 0
+$failedCount    = 0
+
+Write-Host "  Installing $totalPackages driver package(s)..." -ForegroundColor Cyan
+Write-Host ""
+
+$pkgIdx = 0
+foreach ($pkg in $packages) {
+    $pkgIdx++
+    $pkgName = Split-Path $pkg.Name -Leaf
+    Write-Host "  [$pkgIdx/$totalPackages] $pkgName" -ForegroundColor White -NoNewline
+    Write-Host "  ($(@($pkg.Group).Count) INF(s))" -ForegroundColor DarkGray
+
+    $infPaths = @($pkg.Group | ForEach-Object { $_.FullName })
+
+    foreach ($infPath in $infPaths) {
+        $infName = Split-Path $infPath -Leaf
+        Write-Host "    -> $infName" -ForegroundColor DarkGray -NoNewline
+
+        try {
+            $output = @(& "$env:SystemRoot\System32\pnputil.exe" /add-driver "$infPath" /subdirs /install 2>&1)
+            $exitCode = $LASTEXITCODE
+
+            if ($exitCode -in @(0, 3010)) {
+                Write-Host "  [OK]" -ForegroundColor Green
+                $installedCount++
+            } else {
+                Write-Host "  [FAIL: exit $exitCode]" -ForegroundColor Red
+                $failedCount++
+                $output | ForEach-Object { Write-Host "         $_" -ForegroundColor DarkRed }
+            }
+        } catch {
+            Write-Host "  [ERROR]" -ForegroundColor Red
+            $failedCount++
+            Write-Host "         $($_.Exception.Message)" -ForegroundColor DarkRed
+        }
+    }
+    Write-Host ""
+}
+
+# ── Summary ─────────────────────────────────────────────────────────────
+Write-Host "  +--------------------------------------------------------------+" -ForegroundColor Cyan
+Write-Host "  |  INSTALL COMPLETE                                            |" -ForegroundColor Cyan
+Write-Host "  +--------------------------------------------------------------+" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  Packages processed : $totalPackages" -ForegroundColor White
+Write-Host "  INFs installed     : $installedCount" -ForegroundColor Green
+if ($failedCount -gt 0) {
+    Write-Host "  INFs failed        : $failedCount" -ForegroundColor Red
+} else {
+    Write-Host "  INFs failed        : 0" -ForegroundColor Green
+}
+Write-Host ""
+
+# ── Reboot check ────────────────────────────────────────────────────────
+$needsReboot = $false
+foreach ($inf in $infs) {
+    try {
+        $drvResult = & "$env:SystemRoot\System32\pnputil.exe" /enum-driver "$($inf.FullName)" 2>&1
+        if ($drvResult -match 'Reboot required') { $needsReboot = $true; break }
+    } catch {}
+}
+
+if ($needsReboot) {
+    Write-Host "  [!] A reboot is recommended to complete driver installation." -ForegroundColor Yellow
+    Write-Host ""
+}
+
+Write-Host "  DriverDex Offline Bundle — https://github.com/rhshourav/driverdex" -ForegroundColor DarkCyan
+Write-Host ""
+'@
+
+    Set-Content -Path $deployerCmd -Value $cmdContent -Encoding ASCII -Force
+    Set-Content -Path $deployerPs1 -Value $ps1Content  -Encoding UTF8 -Force
+    Write-OK "Generated Install-Offline.cmd and install_offline.ps1"
+
+    # ── ZIP prompt ──────────────────────────────────────────────────────
+    Write-Host ""
+    $wantZip = Read-Input -Prompt 'Create a ZIP archive of the bundle? (y/n)' -Default 'n' `
+        -Validator { param($v) $v -match '^[YyNn]$' } `
+        -ErrMsg    'Enter y or n.'
+
+    if ($wantZip -match '^[Yy]') {
+        Write-Step "Creating ZIP archive..."
+        $zipPath = Join-Path (Split-Path $outRoot -Parent) 'DriverDex-Offline-Bundle.zip'
+        try {
+            Compress-Archive -Path "$outRoot\*" -DestinationPath $zipPath -Force -ErrorAction Stop
+            Write-OK "ZIP created: $zipPath"
+        } catch {
+            Write-Err -What "Failed to create ZIP archive" `
+                      -Reason $_.Exception.Message `
+                      -Fix    "Check that the output folder is not read-only."
+        }
+    }
+
+    # ── Final output ────────────────────────────────────────────────────
+    Write-Host ""
+    Write-Host "  +--------------------------------------------------------------+" -ForegroundColor Green
+    Write-Host "  |  OFFLINE BUNDLE READY                                        |" -ForegroundColor Green
+    Write-Host "  +--------------------------------------------------------------+" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  Output folder: $outRoot" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  To deploy on the target PC:" -ForegroundColor Cyan
+    Write-Host "    1. Copy the entire output folder to the air-gapped machine" -ForegroundColor DarkGray
+    Write-Host "    2. Double-click Install-Offline.cmd" -ForegroundColor DarkGray
+    Write-Host "    3. All drivers will be installed automatically" -ForegroundColor DarkGray
+    Write-Host ""
+
+    Write-Log -Level INFO -Msg "Offline Packager complete: $(@($drivers).Count) drivers, output=$outRoot"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  MAIN ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -800,6 +1106,15 @@ function Main {
             $hwidsForContrib = @()
             try { $hwidsForContrib = @(Get-AllHardwareIDs) } catch {}
             Invoke-ContributePrompt -HWIDs $hwidsForContrib -Reason 'partial' -UnmatchedLocalDrivers @()
+            return
+        }
+        if ($mode -eq 'packager') {
+            Invoke-OfflinePackager
+            Write-Host ""
+            Write-Host "  DriverDex — https://github.com/rhshourav/driverdex" -ForegroundColor DarkCyan
+            Write-Info "  Session log: $(Get-LogPath)"
+            Write-Host ""
+            Write-Log -Level INFO -Msg "Offline Packager session complete."
             return
         }
 
