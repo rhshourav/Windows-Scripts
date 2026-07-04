@@ -766,13 +766,161 @@ function Invoke-OfflinePackager {
     Write-Host "  +--------------------------------------------------------------+" -ForegroundColor DarkYellow
     Write-Host ""
     Write-Host "  This tool builds an offline driver bundle for an air-gapped PC." -ForegroundColor DarkGray
-    Write-Host "  Run scan.cmd on the target machine first to produce inventory.json." -ForegroundColor DarkGray
     Write-Host ""
 
+    # ── Step 1: Choose workflow ─────────────────────────────────────────
+    Write-Host "  How would you like to proceed?" -ForegroundColor White
+    Write-Host ""
+    Write-Host "    [1]  I already have inventory.json" -ForegroundColor Cyan
+    Write-Host "         Provide the path to your inventory.json file" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "    [2]  Prepare a USB for an air-gapped PC" -ForegroundColor Cyan
+    Write-Host "         Copy scanner files to USB, get instructions," -ForegroundColor DarkGray
+    Write-Host "         then come back with the inventory.json" -ForegroundColor DarkGray
+    Write-Host ""
+
+    $workflow = Read-Input -Prompt 'Select option' -Default '1' `
+        -Validator { param($v) $v -match '^[12]$' } `
+        -ErrMsg    'Enter 1 or 2.'
+
+    # ── Option 2: USB preparation flow ──────────────────────────────────
+    if ($workflow -eq '2') {
+        Write-Host ""
+        Write-Host "  +--------------------------------------------------------------+" -ForegroundColor Cyan
+        Write-Host "  |  USB PREPARATION                                             |" -ForegroundColor Cyan
+        Write-Host "  +--------------------------------------------------------------+" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "  Plug in your USB drive now. I will detect it and copy the" -ForegroundColor White
+        Write-Host "  scanner files to it automatically." -ForegroundColor White
+        Write-Host ""
+
+        # Detect USB drives
+        $usbDrives = @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=2" -ErrorAction SilentlyContinue |
+                       Where-Object { $_.DeviceID })
+
+        if (@($usbDrives).Count -eq 0) {
+            Write-Warn "No USB drives detected."
+            Write-Host "  Plug in a USB drive and try again, or choose option 1 instead." -ForegroundColor DarkGray
+            Write-Host ""
+        } else {
+            # Show detected USB drives
+            Write-Host "  Detected USB drive(s):" -ForegroundColor Green
+            for ($i = 0; $i -lt @($usbDrives).Count; $i++) {
+                $d = $usbDrives[$i]
+                $freeGB = [math]::Round($d.FreeSpace / 1GB, 1)
+                Write-Host "    [$($i+1)] $($d.DeviceID) $($d.VolumeName)  (${freeGB} GB free)" -ForegroundColor White
+            }
+            Write-Host "    [0]  Enter path manually" -ForegroundColor DarkGray
+            Write-Host ""
+
+            $driveChoice = Read-Input -Prompt 'Select USB drive' -Default '1' `
+                -Validator { param($v) $v -match '^\d+$' -and [int]$v -le @($usbDrives).Count } `
+                -ErrMsg    'Enter a valid drive number.'
+
+            $targetRoot = $null
+            if ($driveChoice -eq '0') {
+                $targetRoot = Read-Input -Prompt 'Enter USB drive path (e.g. E:\)' `
+                    -Validator { param($v) $v -match '^[A-Za-z]:\\?$' -and (Test-Path $v) } `
+                    -ErrMsg    'Enter a valid drive path like E:\'
+            } else {
+                $targetRoot = $usbDrives[[int]$driveChoice - 1].DeviceID
+                if (-not $targetRoot.EndsWith('\')) { $targetRoot += '\' }
+            }
+
+            # Copy scanner files to USB
+            $scanSource = Join-Path $PSScriptRoot 'offline-packager'
+            $scanDest   = Join-Path $targetRoot 'DriverDex-Scanner'
+
+            Write-Host ""
+            Write-Step "Copying scanner files to $scanDest..."
+            try {
+                New-Item -ItemType Directory -Path $scanDest -Force | Out-Null
+                Copy-Item -Path (Join-Path $scanSource 'scan.cmd')  -Destination $scanDest -Force
+                Copy-Item -Path (Join-Path $scanSource 'scan.ps1')  -Destination $scanDest -Force
+                Write-OK "Scanner files copied to: $scanDest"
+            } catch {
+                Write-Err -What "Failed to copy scanner files to USB" `
+                          -Reason $_.Exception.Message `
+                          -Fix    "Check that the USB drive is writable."
+                return
+            }
+
+            # Show instructions
+            Write-Host ""
+            Write-Host "  +--------------------------------------------------------------+" -ForegroundColor Green
+            Write-Host "  |  INSTRUCTIONS FOR THE AIR-GAPPED PC                          |" -ForegroundColor Green
+            Write-Host "  +--------------------------------------------------------------+" -ForegroundColor Green
+            Write-Host ""
+            Write-Host "  1. Safely eject this USB drive" -ForegroundColor White
+            Write-Host ""
+            Write-Host "  2. Plug it into the AIR-GAPPED (offline) PC" -ForegroundColor White
+            Write-Host ""
+            Write-Host "  3. Open the USB drive in File Explorer" -ForegroundColor White
+            Write-Host "     -> Navigate to: DriverDex-Scanner" -ForegroundColor DarkGray
+            Write-Host ""
+            Write-Host "  4. Double-click scan.cmd" -ForegroundColor White
+            Write-Host "     -> A PowerShell window will open" -ForegroundColor DarkGray
+            Write-Host "     -> It scans all hardware and creates inventory.json" -ForegroundColor DarkGray
+            Write-Host "     -> Wait for it to complete (about 10-30 seconds)" -ForegroundColor DarkGray
+            Write-Host ""
+            Write-Host "  5. When done, inventory.json will be in the same folder" -ForegroundColor White
+            Write-Host "     -> You will see: scan.cmd, scan.ps1, inventory.json" -ForegroundColor DarkGray
+            Write-Host ""
+            Write-Host "  6. Safely eject the USB and bring it back here" -ForegroundColor White
+            Write-Host ""
+            Write-Host "  +--------------------------------------------------------------+" -ForegroundColor Green
+            Write-Host ""
+            Write-Host "  Press Enter when you have the inventory.json ready..." -ForegroundColor DarkGray
+            $null = Read-Host
+        }
+    }
+
     # ── Prompt for inventory.json path ──────────────────────────────────
-    $inventoryPath = Read-Input -Prompt 'Path to inventory.json' -Default (Join-Path $PSScriptRoot 'offline-packager\inventory.json') `
-        -Validator { param($v) (Test-Path $v) -and ($v -like '*.json') } `
-        -ErrMsg    'File not found or not a .json file. Check the path and try again.'
+    Write-Host ""
+    Write-Host "  Where is your inventory.json?" -ForegroundColor White
+    Write-Host "    - Type the full path to the file (e.g. E:\DriverDex-Scanner\inventory.json)" -ForegroundColor DarkGray
+    Write-Host "    - Or type the folder path containing it (e.g. E:\DriverDex-Scanner)" -ForegroundColor DarkGray
+    Write-Host ""
+
+    $inventoryInput = Read-Input -Prompt 'Path to inventory.json or folder' `
+        -Default (Join-Path $PSScriptRoot 'offline-packager\inventory.json')
+
+    # Resolve: if user gave a folder, look for inventory.json inside
+    $inventoryPath = $null
+    if (Test-Path $inventoryInput -PathType Container) {
+        # It's a folder - look for inventory.json inside
+        $inventoryPath = Join-Path $inventoryInput 'inventory.json'
+    } elseif (Test-Path $inventoryInput -PathType Leaf) {
+        # It's a file - use directly
+        $inventoryPath = $inventoryInput
+    } else {
+        # Try as-is, maybe they typed a partial path
+        Write-Err -What "Path not found" `
+                  -Reason "The path '$inventoryInput' does not exist." `
+                  -Fix    "Check the path and try again. Use the full path like E:\DriverDex-Scanner\inventory.json"
+        return
+    }
+
+    if (-not (Test-Path $inventoryPath)) {
+        # If folder was given but no inventory.json inside
+        if (Test-Path $inventoryInput -PathType Container) {
+            Write-Err -What "inventory.json not found in folder" `
+                      -Reason "The folder '$inventoryInput' does not contain inventory.json." `
+                      -Fix    "Make sure scan.cmd was run on the target PC."
+        } else {
+            Write-Err -What "File not found" `
+                      -Reason "The file '$inventoryPath' does not exist." `
+                      -Fix    "Check the path and try again."
+        }
+        return
+    }
+
+    if ($inventoryPath -notlike '*.json') {
+        Write-Err -What "Not a JSON file" `
+                  -Reason "The file '$inventoryPath' does not have a .json extension." `
+                  -Fix    "Point to the inventory.json file created by scan.ps1."
+        return
+    }
 
     Write-Step "Reading inventory from: $inventoryPath"
 
