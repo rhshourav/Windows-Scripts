@@ -1,0 +1,19 @@
+2026-07-04 16:50:14 | DEBUG   | MainThread   | Auto thread detection: 8 logical CPUs.
+2026-07-04 16:50:14 | INFO    | MainThread   | Launching 1 job(s) with 1 worker(s).
+2026-07-04 16:50:14 | INFO    | worker_0     | === Job 'logitech-hidc-x86-1.10.86.0.7z.0001' starting ===
+2026-07-04 16:50:14 | INFO    | worker_0     | Volume sequence OK: 1 parts (logitech-hidc-x86-1.10.86.0.7z.0001 - logitech-hidc-x86-1.10.86.0.7z.0001), total 1.94 MB
+2026-07-04 16:50:14 | DEBUG   | worker_0     | Volume 1 OK: logitech-hidc-x86-1.10.86.0.7z.0001 (1.94 MB)
+2026-07-04 16:50:14 | INFO    | worker_0     | Safety check passed: 7.94 MB uncompressed across archive contents.
+2026-07-04 16:50:14 | INFO    | worker_0     | Extracting 7 file(s) to C:\Users\546493.UNIMAS\Downloads\DriverDex\Logitech_HIDClass_1.10.86.0_x86
+2026-07-04 16:50:14 | INFO    | worker_0     | Computing SHA256 for verification...
+2026-07-04 16:50:15 | DEBUG   | worker_0     | SHA256 9def41fe9cdbd295ca877a82667fc0242ef24c64b696394be71b8ab873421360  logitechble.inf
+2026-07-04 16:50:15 | DEBUG   | worker_0     | SHA256 7b12437889b5dc7acb2e35b0baa7bb2515b9d87bb9bf1ac6f8c90cf2bdb90d00  LogitechBLEx64.cat
+2026-07-04 16:50:15 | DEBUG   | worker_0     | SHA256 e1294d9ea171350befe5bd30be39f2aed3da82034be95ed350e8282e79a4a16f  x64/LdaCx2.dll
+2026-07-04 16:50:15 | DEBUG   | worker_0     | SHA256 d6ecb4eeda15bd5aed68cae7c813934343cb638b564270a10f5ef190161ac641  x64/LogiLDA.DLL
+2026-07-04 16:50:15 | DEBUG   | worker_0     | SHA256 7420b9e68117b57d8c9b86a775e2ab5f0a11f1af4409679675e2c9f8da4b73ac  x64/msvcp110.dll
+2026-07-04 16:50:15 | DEBUG   | worker_0     | SHA256 ba19624ccdca4f419c55c9e4e5215e4b926b5571e44b12e5e6154df8722ab156  x64/msvcr110.dll
+2026-07-04 16:50:15 | DEBUG   | worker_0     | SHA256 f454fefcd9bb081e5735ad6fdd267b8b7486e31c8f71f394748336947d63e414  x64/vccorlib110.dll
+2026-07-04 16:50:15 | INFO    | worker_0     | Verification complete: 7 file digests computed.
+2026-07-04 16:50:15 | INFO    | worker_0     | === Job 'logitech-hidc-x86-1.10.86.0.7z.0001' DONE: 7 files in 0.42s ===
+2026-07-04 16:50:15 | INFO    | MainThread   | ------------------------------------------------------------
+2026-07-04 16:50:15 | INFO    | MainThread   | SUMMARY: 1/1 jobs succeeded, 7 files, 0.43s total.
