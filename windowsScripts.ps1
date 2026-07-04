@@ -564,7 +564,7 @@ $Actions = @{
     'M' = @{ Title = 'Install Extracted Drivers'; Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dInstaller.ps1' }
      #'M' = @{ Title = 'RICOH B&W Printer';         Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addRICHO.ps1' }
     'N' = @{ Title = 'ERP Font Install';          Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/font_install.ps1' }
-    'O' = @{ Title = 'DriverDex Auto Driver Installation';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/driverdex/driverrun.ps1' }
+    'O' = @{ Title = 'DriverDex Auto Driver Installation';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/driverdex/DriverDex.ps1' }
     'W' = @{ Title = 'WARDEN [Registry Nexus]';   Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/regBack/WARDEN.ps1' }
     'X' = @{ Title = 'ERP Automate Setup';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/run_Auto-ERP.ps1' }
     'Y' = @{ Title = 'Intel Interrupt Fix';       Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/SystemInterrupt-Fix/Intel-SystemInterrupt-Fix.ps1' }
