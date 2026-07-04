@@ -325,8 +325,8 @@ function Show-Menu {
 
     # ---------- HARDWARE & FIXES ----------
     Write-Section 'HARDWARE & FIXES'
-    Write-Item  'L' 'Extract Drivers'
-    Write-Item  'M' 'Install Extracted Drivers'
+    Write-Item  'L' 'DriverDex Auto Driver Install' 'NEW'
+    Write-Item  'M' 'DriverDex Manual Search & Install' 'NEW'
     
    # Write-Item  'M' 'Ricoh Printer '
     Write-Item  'N' 'ERP Font Install' 'NEW'
@@ -460,8 +460,8 @@ $Actions = @{
     'I' = @{ Title = 'Disable Win Updates';       Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Disable-WindowsUpdate.ps1' }
     'J' = @{ Title = 'Enable Win Updates';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Enable-WindowsUpdate.ps1' }
     'K' = @{ Title = 'Win 10 to 11 Upgrade';      Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/TO-Win11-Auto-Upgrade/Win11-AutoUpgrade.ps1' }
-    'L' = @{ Title = 'Extract Drivers';           Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dExtractor.ps1' }
-    'M' = @{ Title = 'Install Extracted Drivers'; Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dInstaller.ps1' }
+    'L' = @{ Title = 'DriverDex Auto Driver Install';      Url = 'https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/DriverDex.ps1' }
+    'M' = @{ Title = 'DriverDex Manual Search & Install';  Url = 'https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/DriverDex.ps1' }
      #'M' = @{ Title = 'RICOH B&W Printer';         Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addRICHO.ps1' }
     'N' = @{ Title = 'ERP Font Install';          Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/font_install.ps1' }
     'O' = @{ Title = 'Auto Driver Deploy';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/AutoDriverDeploy/AutoDriverDeploy.ps1' }
