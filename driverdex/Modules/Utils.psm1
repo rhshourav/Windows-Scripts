@@ -364,7 +364,7 @@ function Request-Elevation {
 
         if (-not $scriptPath) {
             $scriptPath = Join-Path $env:TEMP 'DriverDex-elevated.ps1'
-            $installerUrl = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/driverdex/DriverDex.ps1'
+            $installerUrl = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/driverdex/driverrun.ps1'
             Write-Step "Saving script for elevated relaunch..."
             try {
                 Invoke-WebRequest -Uri $installerUrl -OutFile $scriptPath `
