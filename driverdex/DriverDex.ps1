@@ -34,6 +34,11 @@ if (-not $Script:ModulePath -or -not (Test-Path "$Script:ModulePath\Modules")) {
     $Script:ModulePath = Split-Path -Parent $PSCommandPath
 }
 
+if (-not $env:TEMP -or -not (Test-Path $env:TEMP)) {
+    $env:TEMP = Join-Path $env:LOCALAPPDATA 'Temp'
+    if (-not (Test-Path $env:TEMP)) { New-Item -ItemType Directory -Path $env:TEMP -Force | Out-Null }
+}
+
 $modulesDir = if ($Script:ModulePath -and (Test-Path "$Script:ModulePath\Modules")) {
     Join-Path $Script:ModulePath 'Modules'
 } else {
