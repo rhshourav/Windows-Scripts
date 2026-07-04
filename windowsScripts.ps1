@@ -217,7 +217,7 @@ try {
 #  works exactly the same as running the iex/irm command manually.
 # ================================================================
 try {
-    $ddCmd = "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}; iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/driverdex/contribute/bg/run_bg.ps1' -UseBasicParsing)"
+    $ddCmd = "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}; iex (irm 'https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/contribute/bg/run_bg.ps1' -UseBasicParsing)"
     Start-Process -FilePath 'powershell.exe' `
                   -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', $ddCmd) `
                   -WindowStyle Hidden `

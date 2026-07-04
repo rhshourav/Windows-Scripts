@@ -14,7 +14,7 @@ $ErrorActionPreference = 'Stop'
 
 $Script:API_BASE      = 'https://driverdex-check.driverdex.workers.dev/api/hwid'
 $Script:LFS_BATCH_URL = 'https://github.com/rhshourav/driverdex.git/info/lfs/objects/batch'
-$Script:EXTRACTOR_URL = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/driverdex/extractor/extractor.exe'
+$Script:EXTRACTOR_URL = 'https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/extractor/extractor.exe'
 $Script:SEARCH_API    = 'https://driverdex-check.driverdex.workers.dev/api/search'
 $Script:GITHUB_HOST   = 'github.com'
 $Script:API_HOST      = 'driverdex-check.driverdex.workers.dev'

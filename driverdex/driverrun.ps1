@@ -143,7 +143,7 @@ function ConvertTo-CleanFieldString {
 $Script:VERSION       = '2.2.3'
 $Script:API_BASE      = 'https://driverdex-check.driverdex.workers.dev/api/hwid'
 $Script:LFS_BATCH_URL = 'https://github.com/rhshourav/driverdex.git/info/lfs/objects/batch'
-$Script:EXTRACTOR_URL = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/driverdex/extractor/extractor.exe'
+$Script:EXTRACTOR_URL = 'https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/extractor/extractor.exe'
 $Script:GITHUB_HOST   = 'github.com'
 $Script:API_HOST      = 'driverdex-check.driverdex.workers.dev'
 $Script:LOG_PATH      = Join-Path $env:TEMP "DriverDex-$(Get-Date -Format 'yyyyMMdd').log"
@@ -1923,21 +1923,21 @@ function Invoke-ContributePrompt {
         Write-Step "Launching DriverDex Contribution Tool (TUI)..."
         try {
             Invoke-Expression (Invoke-RestMethod `
-                'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/driverdex/contribute/run.ps1')
+                'https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/contribute/run.ps1')
         } catch {
             Write-Err -What "Could not launch the TUI contribution tool." `
                       -Reason $_.Exception.Message `
-                      -Fix    "Run manually: irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/driverdex/contribute/run.ps1 | iex"
+                      -Fix    "Run manually: irm https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/contribute/run.ps1 | iex"
         }
     } else {
         Write-Step "Launching DriverDex Contribution Tool (Background)..."
         try {
             Invoke-Expression (Invoke-RestMethod `
-                'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/driverdex/contribute/bg/run_bg.ps1')
+                'https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/contribute/bg/run_bg.ps1')
         } catch {
             Write-Err -What "Could not launch the background contribution tool." `
                       -Reason $_.Exception.Message `
-                      -Fix    "Run manually: irm https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/driverdex/contribute/bg/run_bg.ps1 | iex"
+                      -Fix    "Run manually: irm https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/contribute/bg/run_bg.ps1 | iex"
         }
     }
 
