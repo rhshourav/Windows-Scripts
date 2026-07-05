@@ -3,11 +3,49 @@
    Windows Scripts  -  Main Menu Launcher
    Author  : rhshourav
    GitHub  : https://github.com/rhshourav/Windows-Scripts
-   Version : 27.4.0
+   Version : 27.5.0
    Notes   : iex/irm compatible, auto-elevates, single-key nav,
              launches sub-scripts in new elevated windows,
              temporarily adds LAN IPs to Local Intranet zone,
              real-time system status on every draw.
+
+   v27.5.0 CHANGE LOG (Menu Hierarchy Refactor)
+   ---------------------------------------------
+   - Flat 26-item menu replaced with a 3-level hierarchy:
+       Main Menu (9 critical items + 3 submenu shortcuts)
+         |-- [E] More Applications        (3 items)
+         |-- [S] System & Maintenance     (9 items)
+         `-- [H] Hardware & Drivers       (6 items)
+   - New data-driven $MenuStructure hashtable replaces the old
+     flat $Actions map. Data is now fully separated from logic.
+   - New navigation functions: Set-MenuLevel, Get-ParentMenu,
+     Back-ToParentMenu, Get-ValidKeysForLevel, Resolve-MenuAction.
+   - Show-Menu now renders any menu level, with a breadcrumb and
+     context-aware help text.
+   - Back navigation: '<' or 'B' from any submenu returns to Main.
+   - All 26 original URLs, elevation logic, remote script launcher,
+     system status display, TLS 1.2 enforcement, LAN IP trust, and
+     console customization are unchanged.
+
+   HOW TO ADD A NEW SUBMENU (example - "Network Tools"):
+       $MenuStructure['network'] = @{
+           display_name = 'Network Tools'
+           breadcrumb   = 'Main > Network'
+           parent       = 'main'
+           help_text    = 'Select tool  |  < = Back to Main  |  Q = Quit'
+           items = @{
+               '1' = @{ Title = 'Network Diagnostic'; Url = 'https://...' }
+           }
+       }
+       $MenuStructure.main.submenu_shortcuts += @{
+           Key = 'N'; MenuId = 'network'; Display = 'Network Tools'; Count = 1
+       }
+       # Done. Show-Menu and Resolve-MenuAction pick this up automatically.
+
+   HOW TO ADD A NEW ITEM to an existing submenu (example):
+       $MenuStructure.hardware.items['7'] = @{
+           Title = 'Install CPU-Z'; Url = 'https://...'
+       }
   ================================================================
 #>
 
@@ -29,7 +67,7 @@ $ErrorActionPreference = 'Stop'
 # ================================================================
 #  CONSTANTS
 # ================================================================
-$Script:VER    = '27.4.0'
+$Script:VER    = '27.5.0'
 $Script:AUTHOR = 'rhshourav'
 $Script:GITHUB = 'https://github.com/rhshourav/Windows-Scripts'
 
@@ -372,9 +410,13 @@ Write-Host ''
 }
 
 # ================================================================
-#  FULL MENU DRAW
+#  FULL MENU DRAW  (hierarchy-aware: renders any menu level)
 # ================================================================
 function Show-Menu {
+    param(
+        [string]$MenuLevel = $Script:CurrentMenuLevel
+    )
+
     try { $Host.UI.RawUI.BackgroundColor = 'Black'; $Host.UI.RawUI.ForegroundColor = 'White' } catch {}
     Clear-Host
 
@@ -385,7 +427,7 @@ function Show-Menu {
     Write-Host "  GitHub : $($Script:GITHUB)" -ForegroundColor DarkCyan
     Write-Rule '=' 'Cyan'
 
-    # System status (live multi-line arrays from Get-SystemStatus)
+    # System status (live multi-line arrays from Get-SystemStatus) - shown on every level
     $statusLines = Get-SystemStatus
     foreach ($line in $statusLines) {
         Write-Host "  $line" -ForegroundColor DarkGreen
@@ -395,52 +437,53 @@ function Show-Menu {
     Write-Host "  HOST : $env:COMPUTERNAME   USER : $env:USERNAME @ $env:USERDOMAIN" -ForegroundColor Gray
     Write-Rule '=' 'Cyan'
     Write-Host ''
-    Write-Host '  Single key to launch  |  Q = Quit' -ForegroundColor Green
-    Write-Host ''
 
-    # ---------- APPLICATIONS ----------
-    Write-Section 'APPLICATIONS'
-    Write-Item  '1' 'App Setup Framework'
-    Write-Item  '2' 'Office 365'
-    Write-Item  '3' 'Office LTSC 2021'
-    Write-Item  '4' 'MS Store (LTSC)'
-    Write-Item  '5' 'Install Edge'
-    Write-Item  '6' 'Remove Edge'
-    Write-Item  '7' 'Remove New Outlook'
-    Write-Item  '8' 'RICHO Printer Setup'
+    $menuData = $MenuStructure[$MenuLevel]
+    if (-not $menuData) {
+        # Defensive fallback - should never happen, but never crash the menu
+        $MenuLevel = 'main'
+        $menuData  = $MenuStructure['main']
+    }
 
-    # ---------- SYSTEM & MAINTENANCE ----------
-    Write-Section 'SYSTEM & MAINTENANCE'
-    Write-Item  'A' 'Activation / Edition Change'
-    Write-Item  'B' 'Time Sync & Format'
-    Write-Item  'C' 'Remove Duplicate Files' 
-    Write-Item  'D' 'IP Config'
-    Write-Item  'E' 'Disk Manager'
-    Write-Item  'F' 'Install MediCatUSB'
-    Write-Item  'G' 'Windows Tuner'
-    Write-Item  'H' 'Windows Optimizer'
-    Write-Item  'I' 'Disable Updates'
-    Write-Item  'J' 'Enable Updates'
-    Write-Item  'K' 'Upgrade to Win 11'
+    # Breadcrumb (submenus only)
+    if ($MenuLevel -ne 'main') {
+        Write-Host '  Location : ' -NoNewline -ForegroundColor Cyan
+        Write-Host $menuData.breadcrumb -ForegroundColor Yellow
+        Write-Host ''
+    }
 
-    # ---------- HARDWARE & FIXES ----------
-    Write-Section 'HARDWARE & FIXES'
-    Write-Item  'L' 'Extract Drivers'
-    Write-Item  'M' 'Install Extracted Drivers'
-    
-   # Write-Item  'M' 'Ricoh Printer '
-    Write-Item  'N' 'ERP Font Install' 'NEW'
-    Write-Item  'O' 'DriverDex Auto Driver Installation' 'NEW'
-    Write-Item  'W' 'WARDEN  [Registry Nexus]'
-    Write-Item  'X' 'ERP Setup'
-    Write-Item  'Y' 'Intel Interrupt Fix'
-    Write-Item  'Z' 'WPT Interrupt Fix'
+    # Section title for this level
+    Write-Section ($menuData.display_name.ToUpperInvariant())
+
+    # Back link (submenus only)
+    if ($MenuLevel -ne 'main') {
+        Write-Item '<' 'Back to Main Menu'
+        Write-Host ''
+    }
+
+    # Items for this level (sorted so numeric/alpha keys draw in a stable order)
+    foreach ($key in ($menuData.items.Keys | Sort-Object)) {
+        $item = $menuData.items[$key]
+        $tag  = if ($item.ContainsKey('Tag')) { $item.Tag } else { '' }
+        Write-Item $key $item.Title $tag
+    }
+
+    # Submenu shortcuts (main menu only)
+    if ($MenuLevel -eq 'main' -and $menuData.ContainsKey('submenu_shortcuts')) {
+        Write-Host ''
+        Write-Section 'QUICK ACCESS SUBMENUS'
+        foreach ($submenu in $menuData.submenu_shortcuts) {
+            Write-Item $submenu.Key "$($submenu.Display)" "[>> $($submenu.Count) items]"
+        }
+    }
 
     Write-Host ''
     Write-Rule '=' 'Cyan'
     Write-Host ''
     Write-Host '  Q ' -ForegroundColor Black -BackgroundColor DarkRed -NoNewline
     Write-Host '  Quit' -ForegroundColor Red
+    Write-Host ''
+    Write-Host "  $($menuData.help_text)" -ForegroundColor Green
     Write-Host ''
     Write-Host -NoNewline '  Select > ' -ForegroundColor Green
 }
@@ -542,44 +585,224 @@ Write-Host '  [Done] Press Enter to close this window ...' -ForegroundColor Dark
     }
 }
 # ================================================================
-#  ACTION MAP
+#  HIERARCHICAL MENU STRUCTURE
+#  Data is fully separated from navigation/execution logic.
+#  All 26 original URLs are preserved exactly; only their menu
+#  location and key changed (see v27.5.0 change log above).
 # ================================================================
-$Actions = @{
-    '1' = @{ Title = 'App Setup Framework';       Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Auto-App-Installer-Framework/autoInstallFromLocal.ps1' }
-    '2' = @{ Title = 'Office 365';                Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/office-Install/o365.ps1' }
-    '3' = @{ Title = 'Office LTSC 2021';          Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/office-Install/oLTSC-2021.ps1' }
-    '4' = @{ Title = 'Microsoft Store (LTSC)';    Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/LTSC-ADD-MS_Store-2019/DL-RUN.ps1' }
-    '5' = @{ Title = 'Edge Installer';            Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/MicroSoft-Edge/installEdge.ps1' }
-    '6' = @{ Title = 'Edge Uninstaller';          Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/MicroSoft-Edge/edge-Uninstall.ps1' }
-    '7' = @{ Title = 'New Outlook Uninstaller';   Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/New%20Outlook%20Uninstaller/uninstall-NOU.ps1' }
-    '8' = @{ Title = 'RICHO Printer Setup';       Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/aoRICHO.ps1' }
-    'A' = @{ Title = 'Activation & Edition';      Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/run' }
-    'B' = @{ Title = 'Time / Zone Formatter';     Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/timeZoneFormat/timeZoneFormat.ps1' }
-    'C' = @{ Title = 'Remove Duplicate Files';    Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/DupReaper/drip.ps1' }
-    'D' = @{ Title = 'IP Config Tool';            Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/IPConfig/Ipconfig.ps1' }
-    'E' = @{ Title = 'Disk Manager';              Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/DiskManager/diskmgr.ps1' }
-    'F' = @{ Title = 'Install MediCatUSB';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Install-MediCatUSB/installMUSVB.ps1' }
-    'G' = @{ Title = 'Windows Tuner';             Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/wp-Tuner.ps1' }
-    'H' = @{ Title = 'Windows Optimizer';         Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/Windows-Optimizer.ps1' }
-    'I' = @{ Title = 'Disable Win Updates';       Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Disable-WindowsUpdate.ps1' }
-    'J' = @{ Title = 'Enable Win Updates';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Enable-WindowsUpdate.ps1' }
-    'K' = @{ Title = 'Win 10 to 11 Upgrade';      Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/TO-Win11-Auto-Upgrade/Win11-AutoUpgrade.ps1' }
-    'L' = @{ Title = 'Extract Drivers';           Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dExtractor.ps1' }
-    'M' = @{ Title = 'Install Extracted Drivers'; Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dInstaller.ps1' }
-     #'M' = @{ Title = 'RICOH B&W Printer';         Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/addRICHO.ps1' }
-    'N' = @{ Title = 'ERP Font Install';          Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/font_install.ps1' }
-    'O' = @{ Title = 'DriverDex Auto Driver Installation';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/DriverDex/DriverDex.ps1' }
-    'W' = @{ Title = 'WARDEN [Registry Nexus]';   Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/regBack/WARDEN.ps1' }
-    'X' = @{ Title = 'ERP Automate Setup';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/run_Auto-ERP.ps1' }
-    'Y' = @{ Title = 'Intel Interrupt Fix';       Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/SystemInterrupt-Fix/Intel-SystemInterrupt-Fix.ps1' }
-    'Z' = @{ Title = 'WPT Interrupt Fix';         Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/SystemInterrupt-Fix/wpt_interrupt_fix_plus.ps1' }
+function Initialize-MenuStructure {
+    <#
+    .SYNOPSIS
+        Builds and returns the hierarchical $MenuStructure hashtable.
+    .DESCRIPTION
+        Single source of truth for every menu level: main menu plus
+        the three submenus (applications, system, hardware). Adding
+        a new submenu or item never requires touching navigation or
+        display code - see the header comment for the pattern.
+    #>
+    return @{
+
+        # ============================================================
+        # MAIN MENU  -  9 critical items + 3 submenu shortcuts
+        # ============================================================
+        'main' = @{
+            display_name = 'Windows Scripts Toolkit'
+            breadcrumb   = 'Main'
+            parent       = $null
+            help_text    = 'Single key to launch  |  E/S/H = submenus  |  Q = Quit'
+            items = @{
+                '1' = @{ Title = 'App Setup Framework';              Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Auto-App-Installer-Framework/autoInstallFromLocal.ps1' }
+                '2' = @{ Title = 'Office 365';                       Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/office-Install/o365.ps1' }
+                '3' = @{ Title = 'Office LTSC 2021';                 Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/office-Install/oLTSC-2021.ps1' }
+                '4' = @{ Title = 'Microsoft Store (LTSC)';           Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/LTSC-ADD-MS_Store-2019/DL-RUN.ps1' }
+                '8' = @{ Title = 'RICHO Printer Setup';               Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/aoRICHO.ps1' }
+                'A' = @{ Title = 'Activation / Edition Change';      Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/run' }
+                'B' = @{ Title = 'Time Sync & Format';                Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/timeZoneFormat/timeZoneFormat.ps1' }
+                'O' = @{ Title = 'DriverDex Auto Driver Installation'; Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/DriverDex/DriverDex.ps1'; Tag = 'NEW' }
+                'X' = @{ Title = 'ERP Automate Setup';                Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/run_Auto-ERP.ps1' }
+            }
+            submenu_shortcuts = @(
+                @{ Key = 'E'; MenuId = 'applications'; Display = 'More Applications';        Count = 3 }
+                @{ Key = 'S'; MenuId = 'system';        Display = 'System & Maintenance';     Count = 9 }
+                @{ Key = 'H'; MenuId = 'hardware';       Display = 'Hardware & Drivers';       Count = 6 }
+            )
+        }
+
+        # ============================================================
+        # SUBMENU: MORE APPLICATIONS   (old keys 5, 6, 7)
+        # ============================================================
+        'applications' = @{
+            display_name = 'More Applications'
+            breadcrumb   = 'Main > More Applications'
+            parent       = 'main'
+            help_text    = 'Select tool  |  < or B = Back to Main  |  Q = Quit'
+            items = @{
+                '1' = @{ Title = 'Install Edge';           Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/MicroSoft-Edge/installEdge.ps1' }
+                '2' = @{ Title = 'Remove Edge';             Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/MicroSoft-Edge/edge-Uninstall.ps1' }
+                '3' = @{ Title = 'Remove New Outlook';       Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/New%20Outlook%20Uninstaller/uninstall-NOU.ps1' }
+            }
+        }
+
+        # ============================================================
+        # SUBMENU: SYSTEM & MAINTENANCE   (old keys C-K)
+        # ============================================================
+        'system' = @{
+            display_name = 'System & Maintenance Tools'
+            breadcrumb   = 'Main > System & Maintenance'
+            parent       = 'main'
+            help_text    = 'Select tool  |  < or B = Back to Main  |  Q = Quit'
+            items = @{
+                '1' = @{ Title = 'Remove Duplicate Files'; Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/DupReaper/drip.ps1' }
+                '2' = @{ Title = 'IP Config';                Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/IPConfig/Ipconfig.ps1' }
+                '3' = @{ Title = 'Disk Manager';             Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/DiskManager/diskmgr.ps1' }
+                '4' = @{ Title = 'Install MediCatUSB';       Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/Install-MediCatUSB/installMUSVB.ps1' }
+                '5' = @{ Title = 'Windows Tuner';            Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/wp-Tuner.ps1' }
+                '6' = @{ Title = 'Windows Optimizer';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Optimizer/Windows-Optimizer.ps1' }
+                '7' = @{ Title = 'Disable Updates';          Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Disable-WindowsUpdate.ps1' }
+                '8' = @{ Title = 'Enable Updates';           Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Windows-Update/Enable-WindowsUpdate.ps1' }
+                '9' = @{ Title = 'Upgrade to Win 11';        Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/TO-Win11-Auto-Upgrade/Win11-AutoUpgrade.ps1' }
+            }
+        }
+
+        # ============================================================
+        # SUBMENU: HARDWARE & DRIVERS   (old keys L, M, N, W, Y, Z)
+        # ============================================================
+        'hardware' = @{
+            display_name = 'Hardware & Driver Tools'
+            breadcrumb   = 'Main > Hardware & Drivers'
+            parent       = 'main'
+            help_text    = 'Select tool  |  < or B = Back to Main  |  Q = Quit'
+            items = @{
+                '1' = @{ Title = 'Extract Drivers';            Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dExtractor.ps1' }
+                '2' = @{ Title = 'Install Extracted Drivers';   Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dInstaller.ps1' }
+                '3' = @{ Title = 'ERP Font Install';            Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/font_install.ps1'; Tag = 'NEW' }
+                '4' = @{ Title = 'WARDEN [Registry Nexus]';     Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/regBack/WARDEN.ps1' }
+                '5' = @{ Title = 'Intel Interrupt Fix';         Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/SystemInterrupt-Fix/Intel-SystemInterrupt-Fix.ps1' }
+                '6' = @{ Title = 'WPT Interrupt Fix';           Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/SystemInterrupt-Fix/wpt_interrupt_fix_plus.ps1' }
+            }
+        }
+    }
+}
+
+$MenuStructure = Initialize-MenuStructure
+
+# ================================================================
+#  NAVIGATION STATE MACHINE
+# ================================================================
+$Script:CurrentMenuLevel = 'main'
+$Script:MenuHistory      = @('main')   # stack, ready for deeper nesting later
+
+function Set-MenuLevel {
+    <#
+    .SYNOPSIS
+        Switches the active menu level if it exists in $MenuStructure.
+    #>
+    param([Parameter(Mandatory)][string]$MenuId)
+
+    if ($MenuStructure.ContainsKey($MenuId)) {
+        $Script:CurrentMenuLevel = $MenuId
+        $Script:MenuHistory += $MenuId
+        return $true
+    }
+    return $false
+}
+
+function Get-ParentMenu {
+    <#
+    .SYNOPSIS
+        Returns the parent menu id for the current (or given) level.
+    #>
+    param([string]$MenuLevel = $Script:CurrentMenuLevel)
+    return $MenuStructure[$MenuLevel].parent
+}
+
+function Back-ToParentMenu {
+    <#
+    .SYNOPSIS
+        Navigates from the current submenu back to its parent (Main).
+    #>
+    $parent = Get-ParentMenu
+    if ($parent) {
+        Set-MenuLevel -MenuId $parent
+        return $true
+    }
+    return $false
+}
+
+function Get-ValidKeysForLevel {
+    <#
+    .SYNOPSIS
+        Returns every key that means something at the given menu level -
+        item keys, submenu-shortcut keys, back key(s), and quit - useful
+        for input validation and for building help/error text.
+    #>
+    param([string]$MenuLevel = $Script:CurrentMenuLevel)
+
+    $menuData = $MenuStructure[$MenuLevel]
+    $keys = New-Object System.Collections.Generic.List[string]
+
+    foreach ($k in $menuData.items.Keys) { [void]$keys.Add($k) }
+
+    if ($MenuLevel -eq 'main' -and $menuData.ContainsKey('submenu_shortcuts')) {
+        foreach ($sm in $menuData.submenu_shortcuts) { [void]$keys.Add($sm.Key) }
+    }
+
+    if ($MenuLevel -ne 'main') { [void]$keys.Add('<'); [void]$keys.Add('B') }
+
+    [void]$keys.Add('Q')
+    return $keys
+}
+
+function Resolve-MenuAction {
+    <#
+    .SYNOPSIS
+        Decides what a keypress means for the current menu level.
+    .OUTPUTS
+        One of: 'quit' | 'navigate' | 'execute' | 'invalid'
+        Navigation state ($Script:CurrentMenuLevel) is updated in place
+        for 'navigate' results; the main loop only needs to re-draw.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$UserInput,
+        [string]$CurrentLevel = $Script:CurrentMenuLevel
+    )
+
+    $key      = $UserInput.ToUpperInvariant()
+    $menuData = $MenuStructure[$CurrentLevel]
+
+    # --- Global commands (work at every level) ---
+    if ($key -eq 'Q') { return 'quit' }
+
+    # --- Back navigation (submenus only; '<' or 'B') ---
+    if (($key -eq '<' -or $key -eq 'B') -and $CurrentLevel -ne 'main') {
+        [void](Back-ToParentMenu)
+        return 'navigate'
+    }
+
+    # --- Submenu shortcuts (main menu only) ---
+    if ($CurrentLevel -eq 'main' -and $menuData.ContainsKey('submenu_shortcuts')) {
+        foreach ($submenu in $menuData.submenu_shortcuts) {
+            if ($key -eq $submenu.Key) {
+                [void](Set-MenuLevel -MenuId $submenu.MenuId)
+                return 'navigate'
+            }
+        }
+    }
+
+    # --- Executable item in the current menu ---
+    if ($menuData.items.ContainsKey($key)) {
+        return 'execute'
+    }
+
+    # --- Nothing matched ---
+    return 'invalid'
 }
 
 # ================================================================
 #  MAIN LOOP
 # ================================================================
 while ($true) {
-    Show-Menu
+    Show-Menu -MenuLevel $Script:CurrentMenuLevel
 
     try {
         $key    = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
@@ -594,22 +817,35 @@ while ($true) {
         }
     }
 
-    if ($choice -eq 'Q') {
-        Clear-Host
-        Write-Host ''
-        Write-Host '  Goodbye.' -ForegroundColor Cyan
-        Write-Host ''
-        Start-Sleep -Milliseconds 500
-        break
-    }
+    $action = Resolve-MenuAction -UserInput $choice -CurrentLevel $Script:CurrentMenuLevel
 
-    if ($Actions.ContainsKey($choice)) {
-        $item = $Actions[$choice]
-        Start-RemoteScript -Url $item.Url -Title $item.Title
-    } else {
-        Write-Host ''
-        Write-Host "  [?] No action for key : [$choice]" -ForegroundColor Yellow
-    }
+    switch ($action) {
 
-    Start-Sleep -Milliseconds 700
+        'quit' {
+            Clear-Host
+            Write-Host ''
+            Write-Host '  Goodbye.' -ForegroundColor Cyan
+            Write-Host ''
+            Start-Sleep -Milliseconds 500
+            exit
+        }
+
+        'navigate' {
+            # $Script:CurrentMenuLevel was already updated by Resolve-MenuAction.
+            # No sleep needed - loop immediately redraws the new level.
+        }
+
+        'execute' {
+            $menuData = $MenuStructure[$Script:CurrentMenuLevel]
+            $item     = $menuData.items[$choice]
+            Start-RemoteScript -Url $item.Url -Title $item.Title
+            Start-Sleep -Milliseconds 700
+        }
+
+        'invalid' {
+            Write-Host ''
+            Write-Host "  [?] No action for key : [$choice]" -ForegroundColor Yellow
+            Start-Sleep -Milliseconds 1000
+        }
+    }
 }
