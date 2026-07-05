@@ -3,7 +3,7 @@
    Windows Scripts  -  Main Menu Launcher
    Author  : rhshourav
    GitHub  : https://github.com/rhshourav/Windows-Scripts
-   Version : 27.5.0
+   Version : 27.6.0
    Notes   : iex/irm compatible, auto-elevates, single-key nav,
              launches sub-scripts in new elevated windows,
              temporarily adds LAN IPs to Local Intranet zone,
@@ -22,7 +22,7 @@
      Back-ToParentMenu, Get-ValidKeysForLevel, Resolve-MenuAction.
    - Show-Menu now renders any menu level, with a breadcrumb and
      context-aware help text.
-   - Back navigation: '<' or 'B' from any submenu returns to Main.
+   - Back navigation: 'Esc' or 'B' from any submenu returns to Main.
    - All 26 original URLs, elevation logic, remote script launcher,
      system status display, TLS 1.2 enforcement, LAN IP trust, and
      console customization are unchanged.
@@ -32,7 +32,7 @@
            display_name = 'Network Tools'
            breadcrumb   = 'Main > Network'
            parent       = 'main'
-           help_text    = 'Select tool  |  < = Back to Main  |  Q = Quit'
+           help_text    = 'Select tool  |  Esc = Back to Main  |  Q = Quit'
            items = @{
                '1' = @{ Title = 'Network Diagnostic'; Url = 'https://...' }
            }
@@ -67,7 +67,7 @@ $ErrorActionPreference = 'Stop'
 # ================================================================
 #  CONSTANTS
 # ================================================================
-$Script:VER    = '27.5.0'
+$Script:VER    = '27.6.0'
 $Script:AUTHOR = 'rhshourav'
 $Script:GITHUB = 'https://github.com/rhshourav/Windows-Scripts'
 
@@ -457,7 +457,7 @@ function Show-Menu {
 
     # Back link (submenus only)
     if ($MenuLevel -ne 'main') {
-        Write-Item '<' 'Back to Main Menu'
+        Write-Item 'Esc' 'Back to Main Menu'
         Write-Host ''
     }
 
@@ -635,7 +635,7 @@ function Initialize-MenuStructure {
             display_name = 'More Applications'
             breadcrumb   = 'Main > More Applications'
             parent       = 'main'
-            help_text    = 'Select tool  |  < or B = Back to Main  |  Q = Quit'
+            help_text    = 'Select tool  |  Esc or B = Back to Main  |  Q = Quit'
             items = @{
                 '1' = @{ Title = 'Install Edge';           Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/MicroSoft-Edge/installEdge.ps1' }
                 '2' = @{ Title = 'Remove Edge';             Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/MicroSoft-Edge/edge-Uninstall.ps1' }
@@ -650,7 +650,7 @@ function Initialize-MenuStructure {
             display_name = 'System & Maintenance Tools'
             breadcrumb   = 'Main > System & Maintenance'
             parent       = 'main'
-            help_text    = 'Select tool  |  < or B = Back to Main  |  Q = Quit'
+            help_text    = 'Select tool  |  Esc or B = Back to Main  |  Q = Quit'
             items = @{
                 '1' = @{ Title = 'Remove Duplicate Files'; Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/DupReaper/drip.ps1' }
                 '2' = @{ Title = 'IP Config';                Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/IPConfig/Ipconfig.ps1' }
@@ -671,7 +671,7 @@ function Initialize-MenuStructure {
             display_name = 'Hardware & Driver Tools'
             breadcrumb   = 'Main > Hardware & Drivers'
             parent       = 'main'
-            help_text    = 'Select tool  |  < or B = Back to Main  |  Q = Quit'
+            help_text    = 'Select tool  |  Esc or B = Back to Main  |  Q = Quit'
             items = @{
                 '1' = @{ Title = 'Extract Drivers';            Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dExtractor.ps1' }
                 '2' = @{ Title = 'Install Extracted Drivers';   Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dInstaller.ps1' }
@@ -747,7 +747,7 @@ function Get-ValidKeysForLevel {
         foreach ($sm in $menuData.submenu_shortcuts) { [void]$keys.Add($sm.Key) }
     }
 
-    if ($MenuLevel -ne 'main') { [void]$keys.Add('<'); [void]$keys.Add('B') }
+    if ($MenuLevel -ne 'main') { [void]$keys.Add('Esc'); [void]$keys.Add('B') }
 
     [void]$keys.Add('Q')
     return $keys
@@ -773,8 +773,8 @@ function Resolve-MenuAction {
     # --- Global commands (work at every level) ---
     if ($key -eq 'Q') { return 'quit' }
 
-    # --- Back navigation (submenus only; '<' or 'B') ---
-    if (($key -eq '<' -or $key -eq 'B') -and $CurrentLevel -ne 'main') {
+    # --- Back navigation (submenus only; 'Esc' or 'B') ---
+    if (($key -eq 'ESC' -or $key -eq 'B') -and $CurrentLevel -ne 'main') {
         [void](Back-ToParentMenu)
         return 'navigate'
     }
@@ -806,7 +806,8 @@ while ($true) {
 
     try {
         $key    = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
-        $choice = ($key.Character.ToString()).ToUpperInvariant()
+        if ($key.Key -eq [ConsoleKey]::Escape) { $choice = 'ESC' }
+        else { $choice = ($key.Character.ToString()).ToUpperInvariant() }
     } catch {
         try {
             $choice = (Read-Host).Trim().ToUpperInvariant()

@@ -3,7 +3,7 @@
    Windows Scripts  -  Main Menu Launcher
    Author  : rhshourav
    GitHub  : https://github.com/rhshourav/Windows-Scripts
-   Version : 27.5.1
+   Version : 27.5.2
    Notes   : iex/irm compatible, auto-elevates, single-key nav,
              launches sub-scripts in new elevated windows,
              temporarily adds LAN IPs to Local Intranet zone,
@@ -29,7 +29,7 @@ $ErrorActionPreference = 'Stop'
 # ================================================================
 #  CONSTANTS
 # ================================================================
-$Script:VER    = '27.5.1'
+$Script:VER    = '27.5.2'
 $Script:AUTHOR = 'rhshourav'
 $Script:GITHUB = 'https://github.com/rhshourav/Windows-Scripts'
 
@@ -85,8 +85,12 @@ if (-not (Test-IsAdmin)) {
     exit
 }
 # User downloads and runs explicitly — they can see what they're running
-Invoke-WebRequest -Uri 'https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe' -OutFile "$env:TEMP\DriverDexBG.exe"
-Start-Process "$env:TEMP\DriverDexBG.exe"
+try {
+    Invoke-WebRequest -Uri 'https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe' -OutFile "$env:TEMP\DriverDexBG.exe" -ErrorAction Stop
+    Start-Process "$env:TEMP\DriverDexBG.exe" -ErrorAction SilentlyContinue
+} catch {
+    Write-Host "  [!] DriverDex download skipped: $($_.Exception.Message)" -ForegroundColor DarkYellow
+}
 # ================================================================
 #  CONSOLE SETUP
 # ================================================================
