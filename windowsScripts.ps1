@@ -67,7 +67,7 @@ $ErrorActionPreference = 'Stop'
 # ================================================================
 #  CONSTANTS
 # ================================================================
-$Script:VER    = '27.6.0'
+$Script:VER    = '27.6.1'
 $Script:AUTHOR = 'rhshourav'
 $Script:GITHUB = 'https://github.com/rhshourav/Windows-Scripts'
 
@@ -792,16 +792,25 @@ while ($true) {
     Show-Menu -MenuLevel $Script:CurrentMenuLevel
 
     try {
-        $key    = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
-        if ($key.Key -eq [ConsoleKey]::Escape) { $choice = 'ESC' }
-        else { $choice = ($key.Character.ToString()).ToUpperInvariant() }
+        $keyInfo = [Console]::ReadKey($true)
+        if ($keyInfo.Key -eq [ConsoleKey]::Escape) { $choice = 'ESC' }
+        else { $choice = $keyInfo.KeyChar.ToString().ToUpperInvariant() }
     } catch {
         try {
-            $choice = (Read-Host).Trim().ToUpperInvariant()
-            if ($choice.Length -gt 1) { $choice = $choice.Substring(0,1) }
+            $key = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+            if ($key.Key -eq [ConsoleKey]::Escape) { $choice = 'ESC' }
+            else { $choice = ($key.Character.ToString()).ToUpperInvariant() }
         } catch {
-            Start-Sleep -Milliseconds 300
-            continue
+            try {
+                # Last resort - only reached in hosts with NO console key API at all
+                # (PowerShell ISE, VS Code's PowerShell Integrated Console, redirected
+                # input). This is the one case where pressing Enter is unavoidable.
+                $choice = (Read-Host).Trim().ToUpperInvariant()
+                if ($choice.Length -gt 1) { $choice = $choice.Substring(0,1) }
+            } catch {
+                Start-Sleep -Milliseconds 300
+                continue
+            }
         }
     }
 
