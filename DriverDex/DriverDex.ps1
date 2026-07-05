@@ -75,6 +75,7 @@ $modulesDir = if ($Script:ModulePath -and (Test-Path "$Script:ModulePath\Modules
     $modDir
 }
 
+
 # Import all modules
 foreach ($mod in @('Utils','Formatting','UI','Drivers','Download','Install','Cache','Search')) {
     $modPath = Join-Path $modulesDir "$mod.psm1"
@@ -871,8 +872,14 @@ function Invoke-OfflinePackager {
                 Write-Step "Copying scanner files to $scanDest..."
                 try {
                     New-Item -ItemType Directory -Path $scanDest -Force | Out-Null
-                    Copy-Item -Path (Join-Path $scanSource 'scan.cmd')  -Destination $scanDest -Force
-                    Copy-Item -Path (Join-Path $scanSource 'scan.ps1')  -Destination $scanDest -Force
+                    if (Test-Path (Join-Path $scanSource 'scan.cmd')) {
+                        Copy-Item -Path (Join-Path $scanSource 'scan.cmd')  -Destination $scanDest -Force
+                        Copy-Item -Path (Join-Path $scanSource 'scan.ps1')  -Destination $scanDest -Force
+                    } else {
+                        $githubBase = "$Script:GITHUB_RAW/offline-packager"
+                        Invoke-WebRequest -Uri "$githubBase/scan.cmd" -OutFile (Join-Path $scanDest 'scan.cmd') -UseBasicParsing
+                        Invoke-WebRequest -Uri "$githubBase/scan.ps1" -OutFile (Join-Path $scanDest 'scan.ps1') -UseBasicParsing
+                    }
                     Write-OK "Scanner files saved to: $scanDest"
                 } catch {
                     Write-Err -What "Failed to copy scanner files" `
@@ -957,8 +964,14 @@ function Invoke-OfflinePackager {
             Write-Step "Copying scanner files to $scanDest..."
             try {
                 New-Item -ItemType Directory -Path $scanDest -Force | Out-Null
-                Copy-Item -Path (Join-Path $scanSource 'scan.cmd')  -Destination $scanDest -Force
-                Copy-Item -Path (Join-Path $scanSource 'scan.ps1')  -Destination $scanDest -Force
+                if (Test-Path (Join-Path $scanSource 'scan.cmd')) {
+                    Copy-Item -Path (Join-Path $scanSource 'scan.cmd')  -Destination $scanDest -Force
+                    Copy-Item -Path (Join-Path $scanSource 'scan.ps1')  -Destination $scanDest -Force
+                } else {
+                    $githubBase = "$Script:GITHUB_RAW/offline-packager"
+                    Invoke-WebRequest -Uri "$githubBase/scan.cmd" -OutFile (Join-Path $scanDest 'scan.cmd') -UseBasicParsing
+                    Invoke-WebRequest -Uri "$githubBase/scan.ps1" -OutFile (Join-Path $scanDest 'scan.ps1') -UseBasicParsing
+                }
                 Write-OK "Scanner files copied to: $scanDest"
             } catch {
                 Write-Err -What "Failed to copy scanner files to USB" `
