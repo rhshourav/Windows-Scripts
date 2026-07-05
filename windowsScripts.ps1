@@ -678,6 +678,7 @@ $MenuStructure = Initialize-MenuStructure
 # ================================================================
 $Script:CurrentMenuLevel = 'main'
 $Script:MenuHistory      = @('main')   # stack, ready for deeper nesting later
+$Script:NeedsRedraw      = $true       # only Show-Menu when something actually changed
 
 function Set-MenuLevel {
     <#
@@ -789,7 +790,10 @@ function Resolve-MenuAction {
 #  MAIN LOOP
 # ================================================================
 while ($true) {
-    Show-Menu -MenuLevel $Script:CurrentMenuLevel
+    if ($Script:NeedsRedraw) {
+        Show-Menu -MenuLevel $Script:CurrentMenuLevel
+        $Script:NeedsRedraw = $false
+    }
 
     try {
         $keyInfo = [Console]::ReadKey($true)
@@ -829,7 +833,7 @@ while ($true) {
 
         'navigate' {
             # $Script:CurrentMenuLevel was already updated by Resolve-MenuAction.
-            # No sleep needed - loop immediately redraws the new level.
+            $Script:NeedsRedraw = $true
         }
 
         'execute' {
@@ -837,12 +841,13 @@ while ($true) {
             $item     = $menuData.items[$choice]
             Start-RemoteScript -Url $item.Url -Title $item.Title
             Start-Sleep -Milliseconds 700
+            $Script:NeedsRedraw = $true
         }
 
         'invalid' {
-            Write-Host ''
-            Write-Host "  [?] No action for key : [$choice]" -ForegroundColor Yellow
-            Start-Sleep -Milliseconds 1000
+            # Key isn't mapped to anything on this menu level - ignore it
+            # completely. No message, no sleep, no redraw; just go back
+            # to waiting for the next keypress.
         }
     }
 }
