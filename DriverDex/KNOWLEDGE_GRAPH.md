@@ -272,10 +272,10 @@ Utils -> Formatting -> UI -> Drivers -> Download -> Install -> Cache -> Search
 | Text Search | https://driverdex-check.driverdex.workers.dev/api/search?q={query}&arch={arch}&category={cat} | GET | Query drivers by keyword |
 | LFS Batch | https://github.com/rhshourav/driverdex.git/info/lfs/objects/batch | POST | Resolve Git LFS pointers to real downloads |
 | Extractor Binary | https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/extractor/extractor.exe | GET | Downloaded on first run (13MB) |
-| Elevation Script | https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/driverdex/driverrun.ps1 | GET | Downloaded for UAC elevation relaunch |
+| Elevation Script | https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/DriverDex/driverrun.ps1 | GET | Downloaded for UAC elevation relaunch |
 | Contribute TUI | https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/contribute/run.ps1 | GET | Interactive contribution walkthrough |
 | Contribute BG | https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/contribute/bg/run_bg.ps1 | GET | Silent background contribution |
-| Module Downloads | https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/driverdex/Modules/{mod}.psm1 | GET | Downloaded when run via irm/iex |
+| Module Downloads | https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/DriverDex/Modules/{mod}.psm1 | GET | Downloaded when run via irm/iex |
 | DriverDexBG EXE | https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe | GET | Background driver installer, launched by launchers |
 
 ### DNS Check Targets
@@ -466,7 +466,7 @@ Invoke-OfflinePackager()
 | Variable | Value |
 |---|---|
 | VERSION | 2.4.0 |
-| GITHUB_RAW | https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/driverdex |
+| GITHUB_RAW | https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/DriverDex |
 
 ### driverrun.ps1 / Drivers.psm1
 

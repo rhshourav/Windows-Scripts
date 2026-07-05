@@ -14,7 +14,7 @@
 ## File Structure
 
 ```
-driverdex/
+DriverDex/
 ├── DriverDex.ps1              (1,556 lines) — Main entry point, imports all modules
 ├── driverrun.ps1              (3,251 lines) — Original monolithic script, DO NOT MODIFY
 ├── Modules/
@@ -233,7 +233,7 @@ For PCs without internet access. Two-step workflow:
 | HWID Lookup | `https://driverdex-check.driverdex.workers.dev/api/hwid` | GET, queries by hardware IDs |
 | Text Search | `https://driverdex-check.driverdex.workers.dev/api/search` | GET, queries by search term |
 | LFS Batch | `https://github.com/rhshourav/driverdex.git/info/lfs/objects/batch` | Git LFS pointer resolution |
-| Extractor | `https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/extractor/extractor.exe` | Downloaded on first run |
+| Extractor | `https://raw.githubusercontent.com/rhshourav/DriverDex/refs/heads/main/extractor/extractor.exe` | Downloaded on first run |
 
 ---
 

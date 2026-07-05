@@ -27,7 +27,7 @@ $ProgressPreference    = 'SilentlyContinue'
 # ═══════════════════════════════════════════════════════════════════════════════
 
 $Script:VERSION = '2.3.0'
-$Script:GITHUB_RAW = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/driverdex'
+$Script:GITHUB_RAW = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/DriverDex'
 $Script:ModulePath = $PSScriptRoot
 
 if (-not $Script:ModulePath -or -not (Test-Path "$Script:ModulePath\Modules")) {

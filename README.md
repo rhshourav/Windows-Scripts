@@ -84,6 +84,7 @@ Run a specific tool immediately — no need to open the main menu.
 | **Disk Manager** | `iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/DiskManager/diskmgr.ps1')` |
 | **Extract Drivers** | `iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dExtractor.ps1')` |
 | **Install Extracted Drivers** | `iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Driver-Extractor/dInstaller.ps1')` |
+| **DriverDex (Auto Driver Install)** | `iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/DriverDex/DriverDex.ps1')` |
 | **Auto Driver Deploy** | `iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/main/AutoDriverDeploy/AutoDriverDeploy.ps1')` |
 | **ERP Font Install** | `iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/font_install.ps1')` |
 | **ERP Automate Setup** | `iex (irm 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/run_Auto-ERP.ps1')` |
