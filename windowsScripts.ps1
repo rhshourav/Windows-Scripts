@@ -602,16 +602,16 @@ function Initialize-MenuStructure {
                 '2' = @{ Title = 'Office 365';                       Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/office-Install/o365.ps1' }
                 '3' = @{ Title = 'Office LTSC 2021';                 Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/office-Install/oLTSC-2021.ps1' }
                 '4' = @{ Title = 'Microsoft Store (LTSC)';           Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/LTSC-ADD-MS_Store-2019/DL-RUN.ps1' }
-                '8' = @{ Title = 'RICHO Printer Setup';               Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/aoRICHO.ps1' }
-                'A' = @{ Title = 'Activation / Edition Change';      Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/run' }
-                'B' = @{ Title = 'Time Sync & Format';                Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/timeZoneFormat/timeZoneFormat.ps1' }
-                'O' = @{ Title = 'DriverDex Auto Driver Installation'; Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/DriverDex/DriverDex.ps1'; Tag = 'NEW' }
-                'X' = @{ Title = 'ERP Automate Setup';                Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/run_Auto-ERP.ps1' }
+                '5' = @{ Title = 'RICHO Printer Setup';               Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/AddPrinterRICHO/aoRICHO.ps1' }
+                '6' = @{ Title = 'Activation / Edition Change';      Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/Add_Active/run' }
+                '7' = @{ Title = 'Time Sync & Format';                Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/timeZoneFormat/timeZoneFormat.ps1' }
+                '8' = @{ Title = 'DriverDex Auto Driver Installation'; Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/DriverDex/DriverDex.ps1'; Tag = 'NEW' }
+                '9' = @{ Title = 'ERP Automate Setup';                Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/run_Auto-ERP.ps1' }
             }
             submenu_shortcuts = @(
                 @{ Key = 'E'; MenuId = 'applications'; Display = 'More Applications';        Count = 3 }
-                @{ Key = 'S'; MenuId = 'system';        Display = 'System & Maintenance';     Count = 9 }
                 @{ Key = 'H'; MenuId = 'hardware';       Display = 'Hardware & Drivers';       Count = 6 }
+                @{ Key = 'S'; MenuId = 'system';        Display = 'System & Maintenance';     Count = 9 }
             )
         }
 
