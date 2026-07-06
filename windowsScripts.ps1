@@ -536,6 +536,13 @@ try {
     `$tmpScript = Join-Path $env:TEMP ('DriverDex-' + [guid]::NewGuid().ToString('N').Substring(0,8) + '.ps1')
     try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
     (New-Object Net.WebClient).DownloadFile('$Url', `$tmpScript)
+    # Re-save with UTF-8 BOM so PS 5.1 on Windows 10 parses Unicode correctly
+    `$dBytes = [IO.File]::ReadAllBytes(`$tmpScript)
+    `$bom = [byte[]]@(0xEF, 0xBB, 0xBF)
+    `$out = New-Object byte[] (`$bom.Length + `$dBytes.Length)
+    [Array]::Copy(`$bom, 0, `$out, 0, `$bom.Length)
+    [Array]::Copy(`$dBytes, 0, `$out, `$bom.Length, `$dBytes.Length)
+    [IO.File]::WriteAllBytes(`$tmpScript, `$out)
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `$tmpScript
     Remove-Item -LiteralPath `$tmpScript -Force -ErrorAction SilentlyContinue
 } catch {
