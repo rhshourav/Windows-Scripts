@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    DriverDex — Automatic Hardware Driver Detector & Installer  v2.3.0
+    DriverDex — Automatic Hardware Driver Detector & Installer  v2.3.1
     Run via: irm https://your-url/DriverDex-Installer.ps1 | iex
 
 .DESCRIPTION
@@ -12,21 +12,75 @@
     resolved transparently. Multi-part archives are reassembled automatically.
 
 .NOTES
-    Compatible : Windows 7 SP1 · 8.1 · 10 · 11  (x86 & x64)
+    Compatible : Windows 7 SP1 · 8.1 · 10 (incl. 1909/19H2) · 11  (x86 & x64)
+    Bootstrap  : TLS 1.2+ is forced and PowerShell version is verified BEFORE any
+                 network call, so `irm <url> | iex` works the same on old and new builds.
     Requires   : PowerShell 5.1+
     Elevation  : Recommended (auto-elevates on request)
     Author     : DriverDex — https://github.com/rhshourav/driverdex
 #>
 
+# Capture the caller's original preferences so that when this script is run
+# via `irm <url> | iex` (which executes in the CALLER's scope, not a child
+# scope like a saved .ps1 file would), we can restore them on exit instead of
+# permanently changing the user's interactive shell.
+$Script:__DDxPriorEAP      = $ErrorActionPreference
+$Script:__DDxPriorProgress = $ProgressPreference
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  COMPATIBILITY BOOTSTRAP — must run before ANY network call
+# ═════════════════════════════════════════════════════════════════════════════
+# Fixes "works on Windows 11 / newer 10 builds but fails on Windows 10 1909
+# (19H2) and earlier when launched via `irm <url> | iex`":
+#
+#   1. #Requires is silently IGNORED when script text is piped into
+#      Invoke-Expression (it only works for a saved .ps1 file launched
+#      directly), so the PowerShell version is checked by hand below and the
+#      script exits cleanly with a clear message instead of failing with a
+#      confusing parser/runtime error partway through.
+#
+#   2. Older Windows builds (7 SP1 / 8.1 / 10 pre-2004) commonly have the
+#      .NET Framework's default SecurityProtocol set to SSL3/TLS 1.0 only.
+#      GitHub requires TLS 1.2+, so the very FIRST download below (the module
+#      bootstrap) would fail with "Could not create SSL/TLS secure channel"
+#      unless TLS 1.2 is forced here — doing it later inside Main() (as the
+#      previous version did) is too late, since the modules are fetched
+#      before Main() ever runs.
+# ═════════════════════════════════════════════════════════════════════════════
+
+$Script:__DDxPSVer = $PSVersionTable.PSVersion
+if ($Script:__DDxPSVer.Major -lt 5 -or ($Script:__DDxPSVer.Major -eq 5 -and $Script:__DDxPSVer.Minor -lt 1)) {
+    Write-Host ""
+    Write-Host "  DriverDex requires PowerShell 5.1 or later." -ForegroundColor Red
+    Write-Host "  Detected: PowerShell $($PSVersionTable.PSVersion)" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Install Windows Management Framework 5.1, then try again:" -ForegroundColor Yellow
+    Write-Host "  https://www.microsoft.com/download/details.aspx?id=54616" -ForegroundColor Cyan
+    Write-Host ""
+    return
+}
+
+try {
+    [Net.ServicePointManager]::SecurityProtocol =
+        [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+} catch {
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    } catch {
+        Write-Host "  ⚠ Could not enable TLS 1.2 on this system — downloads below may fail." -ForegroundColor Yellow
+        Write-Host "    Consider installing .NET Framework 4.7.2+ or the WMF 5.1 update." -ForegroundColor Yellow
+    }
+}
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  MODULE IMPORT
 # ═══════════════════════════════════════════════════════════════════════════════
 
-$Script:VERSION = '2.3.0'
+$Script:VERSION = '2.3.1'
 $Script:GITHUB_RAW = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/DriverDex'
 $Script:ModulePath = $PSScriptRoot
 
@@ -61,22 +115,48 @@ $modulesDir = if ($Script:ModulePath -and (Test-Path "$Script:ModulePath\Modules
     $modDir = Join-Path $tempDir 'Modules'
     New-Item -ItemType Directory -Path $modDir -Force | Out-Null
     Write-Host "  Downloading DriverDex modules from GitHub..." -ForegroundColor Cyan
+    $Script:__DDxBootstrapFailed = $false
     foreach ($mod in @('Utils','Formatting','UI','Drivers','Download','Install','Cache','Search')) {
-        $url = "$Script:GITHUB_RAW/Modules/$mod.psm1"
+        $url  = "$Script:GITHUB_RAW/Modules/$mod.psm1"
         $dest = Join-Path $modDir "$mod.psm1"
-        try {
-            Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
-        } catch {
-            Write-Host "  ✘ Failed to download module '$mod.psm1': $($_.Exception.Message)" -ForegroundColor Red
-            exit 1
+
+        $lastError = $null
+        $ok = $false
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+                Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
+                $ok = $true
+                break
+            } catch {
+                $lastError = $_
+                if ($attempt -lt 3) { Start-Sleep -Milliseconds (500 * $attempt) }
+            }
+        }
+
+        if (-not $ok) {
+            Write-Host "  ✘ Failed to download module '$mod.psm1' after 3 attempts: $($lastError.Exception.Message)" -ForegroundColor Red
+            Write-Host "    This is usually caused by one of:" -ForegroundColor Yellow
+            Write-Host "      • No internet connection, or a proxy/firewall blocking raw.githubusercontent.com" -ForegroundColor Yellow
+            Write-Host "      • TLS 1.2 unavailable on this system (see .NOTES in the script header for a fix)" -ForegroundColor Yellow
+            Write-Host "      • GitHub is temporarily unreachable — try again in a moment" -ForegroundColor Yellow
+            $Script:__DDxBootstrapFailed = $true
+            break
         }
     }
+
+    if ($Script:__DDxBootstrapFailed) {
+        # 'return' (not 'exit') so a script run via `irm <url> | iex` doesn't
+        # close the user's whole PowerShell window/session — it just stops here.
+        return
+    }
+
     Write-Host "  ✅ Modules downloaded." -ForegroundColor Green
     $modDir
 }
 
 
 # Import all modules
+$Script:__DDxImportFailed = $false
 foreach ($mod in @('Utils','Formatting','UI','Drivers','Download','Install','Cache','Search')) {
     $modPath = Join-Path $modulesDir "$mod.psm1"
     if (Test-Path $modPath) {
@@ -84,8 +164,13 @@ foreach ($mod in @('Utils','Formatting','UI','Drivers','Download','Install','Cac
     } else {
         Write-Host "  ✘ Required module '$mod.psm1' not found at: $modPath" -ForegroundColor Red
         Write-Host "  Ensure the Modules/ folder is in the same directory as DriverDex.ps1" -ForegroundColor Yellow
-        exit 1
+        $Script:__DDxImportFailed = $true
+        break
     }
+}
+if ($Script:__DDxImportFailed) {
+    # Same reasoning as above: never use 'exit' in code that may run via iex.
+    return
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1177,7 +1262,7 @@ function Invoke-OfflinePackager {
 :: Elevates to Admin if needed
 NET SESSION >nul 2>&1
 if %errorLevel% NEQ 0 (
-    powershell -Raw -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList 'am_admin' -Verb RunAs"
+    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList 'am_admin' -Verb RunAs"
     exit /b
 )
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0install_offline.ps1"
@@ -1565,5 +1650,17 @@ function Main {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-Main
+try {
+    Main
+} finally {
+    # Restore the caller's original session settings — important when this
+    # script is run via `irm <url> | iex`, since it then executes in the
+    # caller's own scope and would otherwise leave their interactive shell
+    # permanently in StrictMode/ErrorActionPreference='Stop'.
+    $ErrorActionPreference = $Script:__DDxPriorEAP
+    $ProgressPreference    = $Script:__DDxPriorProgress
+    Set-StrictMode -Off
+    Remove-Variable -Name __DDxPriorEAP, __DDxPriorProgress, __DDxBootstrapFailed, __DDxImportFailed, __DDxPSVer `
+        -Scope Script -ErrorAction SilentlyContinue
+}
 # ═══════════════════════════════════════════════════════════════════════════════
