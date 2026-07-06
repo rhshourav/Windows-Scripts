@@ -3,7 +3,7 @@
    Windows Scripts  -  Main Menu Launcher
    Author  : rhshourav
    GitHub  : https://github.com/rhshourav/Windows-Scripts
-   Version : 27.6.0
+    Version : 27.6.2
    Notes   : iex/irm compatible, auto-elevates, single-key nav,
              launches sub-scripts in new elevated windows,
              temporarily adds LAN IPs to Local Intranet zone,
@@ -13,7 +13,7 @@
    ---------------------------------------------
    - Flat 26-item menu replaced with a 3-level hierarchy:
        Main Menu (9 critical items + 3 submenu shortcuts)
-         |-- [E] More Applications        (3 items)
+          |-- [E] More Applications        (5 items)
          |-- [S] System & Maintenance     (9 items)
          `-- [H] Hardware & Drivers       (6 items)
    - New data-driven $MenuStructure hashtable replaces the old
@@ -67,7 +67,7 @@ $ErrorActionPreference = 'Stop'
 # ================================================================
 #  CONSTANTS
 # ================================================================
-$Script:VER    = '27.6.1'
+$Script:VER    = '27.6.2'
 $Script:AUTHOR = 'rhshourav'
 $Script:GITHUB = 'https://github.com/rhshourav/Windows-Scripts'
 
@@ -609,7 +609,7 @@ function Initialize-MenuStructure {
                 '9' = @{ Title = 'ERP Automate Setup';                Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/ERP-Automate/run_Auto-ERP.ps1' }
             }
             submenu_shortcuts = @(
-                @{ Key = 'E'; MenuId = 'applications'; Display = 'More Applications';        Count = 3 }
+                @{ Key = 'E'; MenuId = 'applications'; Display = 'More Applications';        Count = 5 }
                 @{ Key = 'H'; MenuId = 'hardware';       Display = 'Hardware & Drivers';       Count = 6 }
                 @{ Key = 'S'; MenuId = 'system';        Display = 'System & Maintenance';     Count = 9 }
             )
@@ -627,6 +627,8 @@ function Initialize-MenuStructure {
                 '1' = @{ Title = 'Install Edge';           Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/MicroSoft-Edge/installEdge.ps1' }
                 '2' = @{ Title = 'Remove Edge';             Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/MicroSoft-Edge/edge-Uninstall.ps1' }
                 '3' = @{ Title = 'Remove New Outlook';       Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/New%20Outlook%20Uninstaller/uninstall-NOU.ps1' }
+                '4' = @{ Title = 'File Ops (Delete/Move)';   Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/fileOps/fileOps.ps1'; Tag = 'NEW' }
+                '5' = @{ Title = 'PyForge (Python→EXE)';     Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/PyForge/PyForge.ps1'; Tag = 'NEW' }
             }
         }
 
