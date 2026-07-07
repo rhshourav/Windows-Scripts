@@ -99,9 +99,16 @@ if (-not (Test-IsAdmin)) {
         if ([string]::IsNullOrEmpty($PSCommandPath)) {
             $tmpPath = Join-Path $env:TEMP 'WinScripts_Launcher.ps1'
             try {
-                # DownloadString returns a .NET Unicode string; WriteAllText with Encoding.UTF8
-                # writes a UTF-8 BOM so PS5 always reads the temp file as UTF-8, not Windows-1252.
-                $rawText = (New-Object Net.WebClient).DownloadString($Script:SELF_URL)
+                # Force UTF-8 decoding explicitly: WebClient falls back to the system ANSI
+                # codepage whenever it can't cleanly read charset from response headers
+                # (e.g. behind a proxy/AV that strips or rewrites them), which silently
+                # mangles any non-ASCII character before it ever reaches WriteAllText.
+                # WriteAllText with Encoding.UTF8 then writes a UTF-8 BOM so PS5 always
+                # reads the temp file as UTF-8, not Windows-1252 -- but only if $rawText
+                # was decoded correctly in the first place.
+                $webClient = New-Object Net.WebClient
+                $webClient.Encoding = [Text.Encoding]::UTF8
+                $rawText = $webClient.DownloadString($Script:SELF_URL)
                 [IO.File]::WriteAllText($tmpPath, $rawText, [Text.Encoding]::UTF8)
                 $launchArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-File', "`"$tmpPath`"")
             } catch {
@@ -635,7 +642,7 @@ function Initialize-MenuStructure {
                 '2' = @{ Title = 'Remove Edge';             Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/MicroSoft-Edge/edge-Uninstall.ps1' }
                 '3' = @{ Title = 'Remove New Outlook';       Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/New%20Outlook%20Uninstaller/uninstall-NOU.ps1' }
                 '4' = @{ Title = 'File Ops (Delete/Move)';   Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/fileOps/fileOps.ps1'; Tag = 'NEW' }
-                '5' = @{ Title = 'PyForge (Python→EXE)';     Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/PyForge/PyForge.ps1'; Tag = 'NEW' }
+                '5' = @{ Title = 'PyForge (Python to EXE)';  Url = 'https://raw.githubusercontent.com/rhshourav/Windows-Scripts/refs/heads/main/PyForge/PyForge.ps1'; Tag = 'NEW' }
             }
         }
 
