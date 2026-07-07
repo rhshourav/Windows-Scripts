@@ -1,11 +1,13 @@
 #Requires -Version 3.0
 <#
 .SYNOPSIS
-    Creates a self-signed code-signing certificate and signs all .ps1 scripts.
+    Creates a self-signed code-signing certificate and signs all scripts.
 .DESCRIPTION
     Generates a free internal code-signing cert (valid 3 years), installs it
     into the local trust stores, exports the public key for distribution,
-    and signs every .ps1 file in the repo.
+    and signs every .ps1, .bat, and .cmd file in the repo.
+    .ps1 files are signed with PowerShell's Set-AuthenticodeSignature.
+    .bat/.cmd files are signed with osslsigncode (installed via winget).
 .NOTES
     Run as Administrator from the repo root.
 #>
@@ -16,6 +18,7 @@ $ErrorActionPreference = 'Stop'
 $Subject         = 'CN=RHSHOURAV-IT-Ops'
 $RepoRoot        = $PSScriptRoot
 $TimestampServer = 'http://timestamp.digicert.com'
+$PfxPassword     = 'TempPfx123!'
 
 # ---------------------------------------------------------------------------
 # 1. Get or create the code-signing certificate
@@ -66,31 +69,52 @@ $pubStore.Close()
 Write-Host "  [+] Trusted Publishers" -ForegroundColor Green
 
 # ---------------------------------------------------------------------------
-# 3. Export public key for distribution
+# 3. Export public key (.cer) and PFX for osslsigncode
 # ---------------------------------------------------------------------------
 $exportDir  = Join-Path $RepoRoot 'certs'
-$exportPath = Join-Path $exportDir 'RHSHOURAV-IT-Ops.cer'
-
 if (-not (Test-Path $exportDir)) {
     New-Item -ItemType Directory -Path $exportDir -Force | Out-Null
 }
 
-Export-Certificate -Cert $cert -FilePath $exportPath -Force
-Write-Host "  [+] Public key exported: $exportPath" -ForegroundColor Green
+$cerPath = Join-Path $exportDir 'RHSHOURAV-IT-Ops.cer'
+Export-Certificate -Cert $cert -FilePath $cerPath -Force
+Write-Host "  [+] Public key exported: $cerPath" -ForegroundColor Green
+
+$pfxPath     = Join-Path $exportDir 'RHSHOURAV-IT-Ops.pfx'
+$pfxPassword = ConvertTo-SecureString -String $PfxPassword -Force -AsPlainText
+Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $pfxPassword -Force
+Write-Host "  [+] PFX exported: $pfxPath" -ForegroundColor Green
 
 # ---------------------------------------------------------------------------
-# 4. Sign all .ps1 files
+# 4. Find osslsigncode (for .bat/.cmd signing)
+# ---------------------------------------------------------------------------
+$osslsigncode = Get-ChildItem 'C:\Users\*\AppData\Local\Microsoft\WinGet\Packages\*\bin\osslsigncode.exe' -ErrorAction SilentlyContinue |
+                Select-Object -First 1 -ExpandProperty FullName
+
+if (-not $osslsigncode) {
+    $osslsigncode = (Get-Command osslsigncode -ErrorAction SilentlyContinue).Source
+}
+
+if ($osslsigncode) {
+    Write-Host "  [+] osslsigncode found: $osslsigncode" -ForegroundColor Green
+} else {
+    Write-Host "  [!] osslsigncode not found. .bat/.cmd files will be skipped." -ForegroundColor Yellow
+    Write-Host "      Install with: winget install osslsigncode" -ForegroundColor Yellow
+}
+
+# ---------------------------------------------------------------------------
+# 5. Sign all .ps1 files
 # ---------------------------------------------------------------------------
 Write-Host "`n  [-] Scanning for .ps1 files..." -ForegroundColor Cyan
 
-$scripts = Get-ChildItem -Path $RepoRoot -Filter '*.ps1' -Recurse -File |
-           Where-Object { $_.FullName -notlike '*\certs\*' }
+$ps1Scripts = Get-ChildItem -Path $RepoRoot -Filter '*.ps1' -Recurse -File |
+              Where-Object { $_.FullName -notlike '*\certs\*' }
 
-Write-Host "  [-] Found $($scripts.Count) script(s) to sign.`n" -ForegroundColor Cyan
+Write-Host "  [-] Found $($ps1Scripts.Count) .ps1 file(s) to sign.`n" -ForegroundColor Cyan
 
-$ok = 0; $fail = 0
+$ps1Ok = 0; $ps1Fail = 0
 
-foreach ($script in $scripts) {
+foreach ($script in $ps1Scripts) {
     $relPath = $script.FullName.Substring($RepoRoot.Length + 1)
     try {
         $sig = Set-AuthenticodeSignature -FilePath $script.FullName `
@@ -99,21 +123,62 @@ foreach ($script in $scripts) {
                                          -ErrorAction Stop
         if ($sig.Status -eq 'Valid') {
             Write-Host "  [+] $relPath" -ForegroundColor Green
-            $ok++
+            $ps1Ok++
         } else {
             Write-Host "  [!] $relPath  ->  $($sig.Status)" -ForegroundColor Yellow
-            $fail++
+            $ps1Fail++
         }
     } catch {
         Write-Host "  [X] $relPath  ->  $_" -ForegroundColor Red
-        $fail++
+        $ps1Fail++
     }
 }
 
 # ---------------------------------------------------------------------------
-# 5. Summary
+# 6. Sign all .bat and .cmd files (via osslsigncode)
+# ---------------------------------------------------------------------------
+$batCmdOk = 0; $batCmdFail = 0
+
+if ($osslsigncode) {
+    Write-Host "`n  [-] Scanning for .bat and .cmd files..." -ForegroundColor Cyan
+
+    $batCmdFiles = Get-ChildItem -Path $RepoRoot -Include '*.bat','*.cmd' -Recurse -File |
+                   Where-Object { $_.FullName -notlike '*\certs\*' }
+
+    Write-Host "  [-] Found $($batCmdFiles.Count) .bat/.cmd file(s) to sign.`n" -ForegroundColor Cyan
+
+    foreach ($file in $batCmdFiles) {
+        $relPath = $file.FullName.Substring($RepoRoot.Length + 1)
+        $outFile = "$($file.FullName).signed"
+        try {
+            & $osslsigncode sign -pkcs12 $pfxPath -pass $PfxPassword `
+                           -h sha256 -ts $TimestampServer `
+                           -in $file.FullName -out $outFile 2>&1 | Out-Null
+
+            if (Test-Path $outFile) {
+                Remove-Item $file.FullName -Force
+                Rename-Item $outFile $file.FullName
+                Write-Host "  [+] $relPath" -ForegroundColor Green
+                $batCmdOk++
+            } else {
+                Write-Host "  [X] $relPath" -ForegroundColor Red
+                $batCmdFail++
+            }
+        } catch {
+            Write-Host "  [X] $relPath  ->  $_" -ForegroundColor Red
+            $batCmdFail++
+            if (Test-Path $outFile) { Remove-Item $outFile -Force }
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# 7. Summary
 # ---------------------------------------------------------------------------
 Write-Host "`n  ===========================================" -ForegroundColor Cyan
-Write-Host "  Signed   : $ok" -ForegroundColor Green
-if ($fail -gt 0) { Write-Host "  Failed   : $fail" -ForegroundColor Red }
+Write-Host "  .ps1      : $ps1Ok signed" -ForegroundColor Green
+Write-Host "  .bat/.cmd : $batCmdOk signed" -ForegroundColor Green
+if ($ps1Fail -gt 0 -or $batCmdFail -gt 0) {
+    Write-Host "  Failed    : $($ps1Fail + $batCmdFail)" -ForegroundColor Red
+}
 Write-Host "  ===========================================`n" -ForegroundColor Cyan
