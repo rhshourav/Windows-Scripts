@@ -1,4 +1,4 @@
-# DriverDex - Knowledge Graph
+﻿# DriverDex - Knowledge Graph
 
 > Auto-generated comprehensive reference. Covers every file, function, API, data flow, dependency, and integration point.
 
