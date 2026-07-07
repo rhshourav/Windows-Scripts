@@ -194,13 +194,14 @@ function Read-YN {
 # PATTERN TYPE SELECTION  (interactive, shown to user every run)
 # ---------------------------------------------------------------------------
 function Read-PatternType {
+    param([int]$DefaultIdx = -1)
     # Returns 0-3
     return (Read-Menu 'What type of pattern will you enter?' @(
         'Wildcard   -- match by shell glob      e.g.  *.log  temp*  report?.txt'
         'Extension  -- match by file extension  e.g.  .tmp   .bak   .log'
         'Exact      -- match full name exactly  e.g.  old_data.csv   cache'
         'Regex      -- match by regular expr    e.g.  ^log\d+\.txt$  .*backup.*'
-    ))
+    ) -DefaultIdx $DefaultIdx)
 }
 
 # ---------------------------------------------------------------------------
@@ -438,7 +439,7 @@ function Start-FileOps {
         $recurse = (Read-Menu 'How deep should the search go?' @(
             'Current folder only  (non-recursive)'
             'All subdirectories   (recursive)'
-        )) -eq 1
+        ) -DefaultIdx 1) -eq 1
 
         # ----------------------------------------------------------------
         # 3. TARGET KIND
@@ -448,14 +449,14 @@ function Start-FileOps {
             'Files only'
             'Folders only'
             'Both files and folders'
-        )
+        ) -DefaultIdx 0
         $targetKind = @('Files','Folders','Both')[$kindIdx]
 
         # ----------------------------------------------------------------
         # 4. PATTERN TYPE  (always shown interactively)
         # ----------------------------------------------------------------
         Write-Section 'PATTERN TYPE'
-        $patternType = Read-PatternType
+        $patternType = Read-PatternType -DefaultIdx 0
 
         # ----------------------------------------------------------------
         # 5. PATTERN INPUT  (validated per type)
@@ -473,7 +474,7 @@ function Start-FileOps {
 
         $pattern = ''
         while ($true) {
-            $pattern = Read-Input 'Enter pattern'
+            $pattern = Read-Input 'Enter pattern' '*SamLa*'
 
             if ([string]::IsNullOrWhiteSpace($pattern)) {
                 Write-ERR 'Pattern cannot be empty.'
