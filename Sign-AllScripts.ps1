@@ -6,6 +6,10 @@
     Generates a free internal code-signing cert (valid 3 years), installs it
     into the local trust stores, exports the public key for distribution,
     and signs every .ps1 file in the repo.
+
+    NOTE: .bat and .cmd files cannot be reliably code-signed on Windows.
+    Consider converting critical batch scripts to PowerShell (.ps1) if
+    code signing is required.
 .NOTES
     Run as Administrator from the repo root.
 #>
@@ -69,14 +73,13 @@ Write-Host "  [+] Trusted Publishers" -ForegroundColor Green
 # 3. Export public key for distribution
 # ---------------------------------------------------------------------------
 $exportDir  = Join-Path $RepoRoot 'certs'
-$exportPath = Join-Path $exportDir 'RHSHOURAV-IT-Ops.cer'
-
 if (-not (Test-Path $exportDir)) {
     New-Item -ItemType Directory -Path $exportDir -Force | Out-Null
 }
 
-Export-Certificate -Cert $cert -FilePath $exportPath -Force
-Write-Host "  [+] Public key exported: $exportPath" -ForegroundColor Green
+$cerPath = Join-Path $exportDir 'RHSHOURAV-IT-Ops.cer'
+Export-Certificate -Cert $cert -FilePath $cerPath -Force
+Write-Host "  [+] Public key exported: $cerPath" -ForegroundColor Green
 
 # ---------------------------------------------------------------------------
 # 4. Sign all .ps1 files
