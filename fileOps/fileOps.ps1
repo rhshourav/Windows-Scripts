@@ -416,14 +416,16 @@ function Start-FileOps {
 
     Write-Header
 
+    $searchRoot = (Get-Location).Path
+
     while ($true) {
 
         # ----------------------------------------------------------------
         # 1. SEARCH ROOT
         # ----------------------------------------------------------------
         Write-Section 'SEARCH ROOT'
-        Write-DIM 'Enter the folder to search in. Press Enter to use the current directory.'
-        $searchRoot = Read-Input 'Search path' ((Get-Location).Path)
+        Write-DIM 'Enter the folder to search in. Press Enter to keep the current location.'
+        $searchRoot = Read-Input 'Search path' $searchRoot
 
         if (-not (Test-Path -LiteralPath $searchRoot -PathType Container)) {
             Write-ERR "Not found or not a folder: $searchRoot"
@@ -449,7 +451,7 @@ function Start-FileOps {
             'Files only'
             'Folders only'
             'Both files and folders'
-        ) -DefaultIdx 0
+        ) -DefaultIdx 2
         $targetKind = @('Files','Folders','Both')[$kindIdx]
 
         # ----------------------------------------------------------------
