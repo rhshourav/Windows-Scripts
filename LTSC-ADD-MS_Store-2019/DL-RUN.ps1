@@ -113,7 +113,7 @@ function Send-Telemetry {
             token = 'shourav'
             text  = "MS Store install on LTSC v$Script:VER`nUser: $env:USERNAME  PC: $env:COMPUTERNAME  Domain: $env:USERDOMAIN  IP: $($ips -join ', ')"
         } | ConvertTo-Json
-        Invoke-RestMethod -Uri 'https://cryocore.rhshourav02.workers.dev/message' `
+        Invoke-RestMethod -Uri 'https://cryocore.rhshourav.workers.dev/message' `
                           -Method Post -ContentType 'application/json' -Body $body `
                           -EA SilentlyContinue | Out-Null
     } catch {}

@@ -244,7 +244,7 @@ function Send-Telemetry { param($pkg)
             token = 'shourav'
             text  = "Office Installer v$SCRIPT_VER | $($pkg.Short)`nUser:$env:USERNAME PC:$env:COMPUTERNAME IP:$ips"
         } | ConvertTo-Json)
-        Invoke-RestMethod -Uri 'https://cryocore.rhshourav02.workers.dev/message' `
+        Invoke-RestMethod -Uri 'https://cryocore.rhshourav.workers.dev/message' `
             -Method Post -ContentType 'application/json' `
             -Body $body -TimeoutSec 5 -EA SilentlyContinue | Out-Null
     } catch {}

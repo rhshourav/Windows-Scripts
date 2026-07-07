@@ -10,7 +10,7 @@
 #>
 
 $Global:TelemetryEnabled = $true
-$Global:TelemetryEndpoint = "https://cryocore.rhshourav02.workers.dev/message"
+$Global:TelemetryEndpoint = "https://cryocore.rhshourav.workers.dev/message"
 $Global:TelemetryToken = "shourav"
 
 # Persistent opt-out check
