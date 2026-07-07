@@ -1145,21 +1145,53 @@ function Invoke-OfflinePackager {
     Write-Step "Reading inventory from: $inventoryPath"
 
     try {
-        $inventory = Get-Content -LiteralPath $inventoryPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $rawJsonText = Get-Content -LiteralPath $inventoryPath -Raw -Encoding UTF8
     } catch {
-        Write-Err -What "Failed to parse inventory.json" `
+        Write-Err -What "Failed to read inventory.json" `
                   -Reason $_.Exception.Message `
-                  -Fix    "Ensure the file is valid JSON produced by scan.ps1."
+                  -Fix    "Check that the file isn't open in another program and that you have permission to read it."
         return
     }
 
-    # Safely cast HWIDs to array (prevents single-item unwrapping on PS 5.1)
-    $targetHWIDs = @()
-    if ($inventory.HWIDs -is [array]) {
-        $targetHWIDs = @($inventory.HWIDs)
-    } elseif ($inventory.HWIDs) {
-        $targetHWIDs = @($inventory.HWIDs)
+    $inventory  = $null
+    $parseError = $null
+    try {
+        $inventory = $rawJsonText | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        $parseError = $_
     }
+
+    if (-not $inventory) {
+        # Older scan.ps1 builds could emit a small set of invalid escape
+        # sequences (see: HID\VEN_... bug). Try a targeted, conservative
+        # repair before giving up, so a file from an older scanner still
+        # works instead of dumping a wall of raw JSON at the user.
+        $parseErrorMsg = if ($parseError) { $parseError.Exception.Message } else { 'ConvertFrom-Json returned no object (empty or null content).' }
+        Write-Log -Level WARN -Msg "Initial JSON parse failed for $inventoryPath : $parseErrorMsg"
+        Write-Warn "inventory.json didn't parse as-is — attempting automatic repair..."
+
+        $repairedText = Repair-JsonText -Text $rawJsonText
+        try {
+            $inventory = $repairedText | ConvertFrom-Json -ErrorAction Stop
+            Write-OK "Repaired and parsed inventory.json (it had minor formatting issues, likely from an older scanner build)."
+        } catch {
+            Write-Log -Level ERROR -Msg "Repair attempt also failed for $inventoryPath : $($_.Exception.Message)" -Err $_
+            Write-Err -What "Failed to parse inventory.json" `
+                      -Reason "The file isn't valid JSON, even after an automatic repair attempt." `
+                      -Fix    "Re-run scan.ps1 on the target PC for a fresh inventory.json. Full details are in the log: $(Get-LogPath)"
+            return
+        }
+    }
+
+    # Flatten HWIDs into a flat string array. Tolerates the legacy
+    # nested-array bug from older scan.ps1 builds (pre-fix files may contain
+    # "HWIDs": [[...]] instead of [...]), and both PSCustomObject (PS 6+) and
+    # Newtonsoft JArray (PS 5.1) element types.
+    $rawHWIDs = @($inventory.HWIDs)
+    if ($rawHWIDs.Count -eq 1 -and $rawHWIDs[0] -is [System.Collections.IEnumerable] -and -not ($rawHWIDs[0] -is [string])) {
+        $rawHWIDs = @($rawHWIDs[0])
+    }
+    $targetHWIDs = @($rawHWIDs | ForEach-Object { [string]$_ } | Where-Object { $_ })
 
     $targetArch = if ($inventory.Architecture) { $inventory.Architecture } else { 'Am64' }
 
