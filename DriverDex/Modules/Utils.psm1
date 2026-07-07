@@ -60,6 +60,52 @@ function Get-Prop {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# JSON REPAIR (defensive parsing for inventory.json from older/foreign scanners)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Matches, at every backslash: either (a) a COMPLETE valid JSON escape
+# sequence, or (b) a lone backslash that cannot start one. Alternative (a) is
+# tried first at each position, so already-valid escapes are never touched.
+$Script:__DDxInvalidEscapePattern = '\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4})|\\'
+
+function Repair-JsonText {
+    <#
+    .SYNOPSIS
+        Conservatively repairs unescaped backslashes in otherwise-plausible
+        JSON text, without touching escapes that are already valid.
+    .DESCRIPTION
+        Some inventory.json files (produced by older scan.ps1 builds, or by
+        hand-editing) contain hardware IDs with a lone backslash instead of
+        the required "\\" JSON escape - e.g. "HID\VEN_ATML&DEV_1000&COL01"
+        instead of "HID\\VEN_ATML&DEV_1000&COL01". A naive fix that doubles
+        EVERY backslash would also corrupt backslashes that are already part
+        of a valid escape (turning a correct "\\" into an incorrect "\\\\",
+        or mangling "\n", "\t", "\uXXXX", etc).
+
+        This function matches a complete valid JSON escape sequence first and
+        leaves it untouched; only a backslash that cannot start a valid
+        escape gets doubled. This is a best-effort repair for a narrow, known
+        failure mode - it is not a general JSON-repair tool and cannot fix
+        missing braces/commas, truncated files, or wrong data types.
+    .PARAMETER Text
+        Raw JSON text to repair.
+    .OUTPUTS
+        [string] The repaired text. Text with no invalid escapes is returned
+        unchanged.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+
+    $evaluator = [System.Text.RegularExpressions.MatchEvaluator] {
+        param($Match)
+        if ($Match.Value.Length -gt 1) { return $Match.Value }  # already valid - leave alone
+        return '\\'                                             # lone backslash - escape it
+    }
+
+    return [System.Text.RegularExpressions.Regex]::Replace(
+        $Text, $Script:__DDxInvalidEscapePattern, $evaluator)
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # ARRAY-SAFE FIELD FLATTENING (prevents duplicate display bugs)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -426,6 +472,7 @@ function Test-NetworkConnectivity {
 
 Export-ModuleMember -Function @(
     'Get-Prop'
+    'Repair-JsonText'
     'ConvertTo-CleanFieldString'
     'Join-Unique'
     'Write-Log'
