@@ -133,7 +133,7 @@ if (-not $args) {
     $response = $response.TrimEnd() + "`r`n`r`n"
 
     # Optional integrity check
-    $expectedHash = 'D83F5CCD1DFAEBD0F18A06ADED9484FFFC11F633DF8C5584BBE9AEF0FF17B0A7'
+    $expectedHash = '5BAAF3839EA8A389382A163A6C54EA7F8A05F2ACAEBCD3CDAC320EFA162062B9'
     $ms = New-Object IO.MemoryStream
     $sw = New-Object IO.StreamWriter($ms)
     $sw.Write($response)
