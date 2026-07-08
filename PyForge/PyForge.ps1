@@ -21,7 +21,7 @@ $ErrorActionPreference = 'Stop'
 # ─────────────────────────────────────────────────────────────
 #  GLOBALS
 # ─────────────────────────────────────────────────────────────
-$PYFORGE_VERSION = '1.0.0'
+$PYFORGE_VERSION = '1.0.1'
 $PYFORGE_AUTHOR  = 'rhshourav'
 $BUILD_TEMP      = Join-Path $env:TEMP "PyForge_$(Get-Random)"
 $ORIGINAL_DIR    = Get-Location
