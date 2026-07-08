@@ -630,7 +630,7 @@ function Invoke-Sign {
 function Copy-Output {
     param([string[]]$ExePaths)
 
-    $outDir = Join-Path $ORIGINAL_DIR 'PyForge_Output'
+    $outDir = Split-Path $script:CFG_SCRIPT -Parent
     New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
     C '  COPYING OUTPUT' 'Yellow'
