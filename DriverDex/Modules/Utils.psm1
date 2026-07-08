@@ -268,6 +268,58 @@ function Get-ConsoleWidth {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# ENCODING SELF-HEAL
+# ═══════════════════════════════════════════════════════════════════════════════
+
+function Repair-ScriptEncoding {
+    <#
+    .SYNOPSIS Ensures a .ps1/.psm1 file on disk has a UTF-8 byte-order-mark (BOM).
+    .DESCRIPTION
+        Windows PowerShell 5.1 only auto-detects UTF-8 when a BOM is present. Without
+        one it falls back to the system's ANSI code page (commonly Windows-1252),
+        which mangles this tool's non-ASCII formatting characters (box-drawing
+        banners, em-dashes, checkmarks). Confirmed mechanism: an em-dash's UTF-8
+        bytes split under cp1252 can produce a Unicode "smart quote" character,
+        and PowerShell's tokenizer accepts smart quotes as real string delimiters —
+        so a stray one INSIDE a string literal silently closes it early and desyncs
+        the parser for everything after it, surfacing as "Unexpected token '}'"
+        errors far from the actual cause.
+        Idempotent and conservative: a file that already has a BOM, or that isn't
+        valid UTF-8, is left untouched rather than risk corrupting it further.
+    .PARAMETER Path  Full path to the file to check/repair.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+    } catch { return $false }
+
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        return $true  # already has a BOM
+    }
+
+    try {
+        $strict = New-Object System.Text.UTF8Encoding($false, $true)  # throw on invalid bytes
+        [void]$strict.GetString($bytes)
+    } catch {
+        return $false  # not valid UTF-8 — leave it alone
+    }
+
+    try {
+        $withBom = New-Object byte[] ($bytes.Length + 3)
+        [Array]::Copy(([byte[]](0xEF,0xBB,0xBF)), 0, $withBom, 0, 3)
+        [Array]::Copy($bytes, 0, $withBom, 3, $bytes.Length)
+        [System.IO.File]::WriteAllBytes($Path, $withBom)
+        Write-Log -Level INFO -Msg "Repair-ScriptEncoding: added UTF-8 BOM to $Path"
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # TLS BOOTSTRAP
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -413,6 +465,7 @@ function Request-Elevation {
             try {
                 Invoke-WebRequest -Uri $installerUrl -OutFile $scriptPath `
                     -UseBasicParsing -ErrorAction Stop
+                Repair-ScriptEncoding -Path $scriptPath | Out-Null
                 Write-OK "Script saved to temp file."
             } catch {
                 Write-Warn "Could not save script for relaunch: $($_.Exception.Message)"
@@ -471,6 +524,7 @@ function Test-NetworkConnectivity {
 Export-ModuleMember -Function @(
     'Get-Prop'
     'ConvertTo-NormalizedArch'
+    'Repair-ScriptEncoding'
     'ConvertTo-CleanFieldString'
     'Join-Unique'
     'Write-Log'
