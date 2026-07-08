@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    PyForge v1.0.0 - Universal Python to EXE Compiler
+    PyForge v1.0.1 - Universal Python to EXE Compiler
 .DESCRIPTION
     Compiles any Python script into a standalone Windows EXE.
     Supports PyInstaller & Nuitka engines, icon branding,
