@@ -366,7 +366,7 @@ VSVersionInfo(
          StringStruct(u'FileDescription',  u'$($script:CFG_DESC)'),
          StringStruct(u'FileVersion',      u'$($script:CFG_VERSION)'),
          StringStruct(u'InternalName',     u'$($script:CFG_NAME)'),
-         StringStruct(u'OriginalFilename', u'$($script:CFG_NAME).exe'),
+         StringStruct(u'OriginalFilename', u'$([System.IO.Path]::GetFileNameWithoutExtension($script:CFG_SCRIPT)).exe'),
          StringStruct(u'ProductName',      u'$($script:CFG_NAME)'),
          StringStruct(u'ProductVersion',   u'$($script:CFG_VERSION)')])
     ]),
@@ -394,7 +394,7 @@ function Invoke-PyInstaller {
     $args = @(
         '--onefile',
         '--clean',
-        "--name=$($script:CFG_NAME)",
+        "--name=$([System.IO.Path]::GetFileNameWithoutExtension($script:CFG_SCRIPT))",
         "--version-file=$versionFile",
         "--target-arch=$pyArch",
         "--distpath=$(Join-Path $BUILD_TEMP 'dist_pyinstaller')",
@@ -456,7 +456,8 @@ function Invoke-PyInstaller {
     }
 
     Finish-Bar 'Compilation complete'
-    $exePath = Join-Path $BUILD_TEMP "dist_pyinstaller\$($script:CFG_NAME).exe"
+    $scriptExeName = [System.IO.Path]::GetFileNameWithoutExtension($script:CFG_SCRIPT)
+    $exePath = Join-Path $BUILD_TEMP "dist_pyinstaller\$scriptExeName.exe"
     if (-not (Test-Path $exePath)) {
         ERR "Output EXE not found at: $exePath"
         exit 1
@@ -480,7 +481,7 @@ function Invoke-Nuitka {
         '-m', 'nuitka',
         '--onefile',
         "--output-dir=$nuitkaOut",
-        "--output-filename=$($script:CFG_NAME).exe",
+        "--output-filename=$([System.IO.Path]::GetFileNameWithoutExtension($script:CFG_SCRIPT)).exe",
         '--assume-yes-for-downloads',
         '--windows-product-name=' + $script:CFG_NAME,
         '--windows-product-version=' + $script:CFG_VERSION,
@@ -510,7 +511,8 @@ function Invoke-Nuitka {
 
     Finish-Bar 'Nuitka build complete'
 
-    $exePath = Join-Path $nuitkaOut "$($script:CFG_NAME).exe"
+    $scriptExeName = [System.IO.Path]::GetFileNameWithoutExtension($script:CFG_SCRIPT)
+    $exePath = Join-Path $nuitkaOut "$scriptExeName.exe"
     if (-not (Test-Path $exePath)) {
         ERR "Nuitka EXE not found. Output:"
         $output | Select-Object -Last 20 | ForEach-Object { C "    $_" 'DarkGray' }
