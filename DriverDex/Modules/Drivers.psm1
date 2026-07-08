@@ -312,6 +312,12 @@ function Search-Drivers {
     #>
     param([string[]]$HWIDs, [string]$SystemArch, [hashtable]$InstalledSnapshot = @{})
 
+    # Defense-in-depth: normalize here too, in case a caller passes a raw arch string
+    # (WMI spelling, a typo'd inventory.json value, etc.) directly without routing it
+    # through ConvertTo-NormalizedArch first. An un-normalized value here silently
+    # discards every arch-specific match below — see ConvertTo-NormalizedArch in Utils.psm1.
+    $SystemArch = ConvertTo-NormalizedArch -Value $SystemArch -Source 'Search-Drivers:SystemArch'
+
     Write-Step "Querying DriverDex API for $(@($HWIDs).Count) hardware IDs..."
     $results = [System.Collections.Generic.List[object]]::new()
     $seen    = [System.Collections.Generic.HashSet[string]]::new()
