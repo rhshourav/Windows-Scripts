@@ -428,6 +428,42 @@ function Test-WpsFileIdentity {
 #endregion
 
 #region ------------------------------- Core Helper Utilities --------------------------------------
+function Get-WpsSafeProperty {
+    <#
+    .SYNOPSIS
+        Strict-mode-safe property reader. Returns $DefaultValue instead of throwing when the
+        named property does not exist on the given object.
+
+    .DESCRIPTION
+        Under Set-StrictMode -Version Latest (in effect for this whole script), dereferencing a
+        property that doesn't exist on an object - e.g. $obj.Foo when $obj has no 'Foo' member -
+        throws a terminating "The property 'Foo' cannot be found on this object" error instead of
+        quietly returning $null. This bites on any object whose shape varies per-instance, most
+        notably:
+          - Get-ItemProperty results: only values that actually exist under a given registry key
+            become NoteProperties, so optional values (Publisher, InstallLocation, the unnamed
+            '(default)' value, etc.) are simply absent on many real-world entries.
+          - Scheduled task action CIM instances: MSFT_TaskExecAction has Execute/Arguments, but
+            MSFT_TaskComHandlerAction (ClassId/Data) and other action types do not - and Windows
+            ships plenty of built-in ComHandler-action tasks, so this is hit on virtually every
+            real machine, not just an edge case.
+        Checking for the member via .PSObject.Properties[...] first (rather than dereferencing
+        directly) is safe under strict mode and lets every call site read optional
+        properties/values without needing its own try/catch.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowNull()][object]$InputObject,
+        [Parameter(Mandatory)][string]$Name,
+        $DefaultValue = $null
+    )
+
+    if ($null -eq $InputObject) { return $DefaultValue }
+    $prop = $InputObject.PSObject.Properties[$Name]
+    if ($null -eq $prop) { return $DefaultValue }
+    return $prop.Value
+}
+
 function Invoke-WpsAction {
     <#
     .SYNOPSIS
@@ -476,7 +512,11 @@ function Get-WpsUserProfiles {
             if ($sid -match '^S-1-5-(18|19|20)$') { return }
             if ($sid -match '_Classes$') { return }
 
-            $imagePath = (Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue).ProfileImagePath
+            # ProfileImagePath is virtually always present, but orphaned/corrupt ProfileList SIDs
+            # do exist in the wild without it - read it safely rather than risking the same
+            # missing-property crash under Set-StrictMode -Version Latest.
+            $profileProps = Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue
+            $imagePath = Get-WpsSafeProperty -InputObject $profileProps -Name 'ProfileImagePath'
             if ([string]::IsNullOrWhiteSpace($imagePath)) { return }
             if (-not (Test-Path -LiteralPath $imagePath)) { return }
 
@@ -828,7 +868,18 @@ function Get-WpsScheduledTasks {
     }
 
     foreach ($task in $tasks) {
-        $actionText = (($task.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments)" }) -join ' ')
+        # Task actions are CIM instances and are NOT all the same type - MSFT_TaskExecAction has
+        # Execute/Arguments, but MSFT_TaskComHandlerAction (ClassId/Data) and the deprecated
+        # MSFT_TaskEmailAction / MSFT_TaskShowMessageAction do not. Windows ships many built-in
+        # tasks (Defender, Edge/Office update tasks, etc.) using ComHandler actions, so
+        # dereferencing $_.Execute directly WILL hit a non-existent property under
+        # Set-StrictMode -Version Latest and throw "The property 'Execute' cannot be found on
+        # this object." Get-WpsSafeProperty reads it without assuming it exists.
+        $actionText = (($task.Actions | ForEach-Object {
+            $exec = Get-WpsSafeProperty -InputObject $_ -Name 'Execute'   -DefaultValue ''
+            $args = Get-WpsSafeProperty -InputObject $_ -Name 'Arguments' -DefaultValue ''
+            "$exec $args"
+        }) -join ' ')
         $identityText = "$($task.TaskName) $($task.TaskPath) $actionText"
         if (Test-WpsTextIdentity -Text $identityText) {
             $found.Add($task) | Out-Null
@@ -1019,18 +1070,26 @@ function Get-WpsUninstallEntriesUnder {
         $props = $null
         try { $props = Get-ItemProperty -LiteralPath $itemPath -ErrorAction Stop } catch { return }
 
-        $displayName = $props.DisplayName
+        # Get-ItemProperty only creates a NoteProperty for values that actually exist under the
+        # key - DisplayName/UninstallString are near-universal, but Publisher, InstallLocation,
+        # QuietUninstallString, and DisplayVersion are all optional and frequently absent.
+        # Dereferencing a missing one directly ($props.Publisher) throws under
+        # Set-StrictMode -Version Latest, so every optional value is read via Get-WpsSafeProperty.
+        $displayName = Get-WpsSafeProperty -InputObject $props -Name 'DisplayName'
         if ([string]::IsNullOrWhiteSpace($displayName)) { return }
 
-        $identityText = "$displayName $($props.Publisher) $($props.InstallLocation)"
+        $publisher       = Get-WpsSafeProperty -InputObject $props -Name 'Publisher'
+        $installLocation = Get-WpsSafeProperty -InputObject $props -Name 'InstallLocation'
+
+        $identityText = "$displayName $publisher $installLocation"
         if (Test-WpsTextIdentity -Text $identityText) {
             $results.Add([PSCustomObject]@{
                 DisplayName          = $displayName
-                Publisher            = $props.Publisher
-                DisplayVersion       = $props.DisplayVersion
-                UninstallString      = $props.UninstallString
-                QuietUninstallString = $props.QuietUninstallString
-                InstallLocation      = $props.InstallLocation
+                Publisher            = $publisher
+                DisplayVersion       = Get-WpsSafeProperty -InputObject $props -Name 'DisplayVersion'
+                UninstallString      = Get-WpsSafeProperty -InputObject $props -Name 'UninstallString'
+                QuietUninstallString = Get-WpsSafeProperty -InputObject $props -Name 'QuietUninstallString'
+                InstallLocation      = $installLocation
                 RegistryPath         = $itemPath
                 ProductCode          = $_.PSChildName
             }) | Out-Null
