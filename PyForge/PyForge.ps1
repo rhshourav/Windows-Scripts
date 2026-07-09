@@ -13,6 +13,24 @@
     Compatible with: iex (irm <url>)
     Requires:        Python 3.8+ on PATH
     Supports:        Windows 10+ (PowerShell 5.1 / PS7+)
+    CHANGELOG (1.0.3):
+      - Fixed: icon normalization silently dropped every requested .ico size
+        larger than the source image (confirmed Pillow behaviour: "sizes
+        bigger than the original ... will be ignored", no warning, no
+        error). Any source under 256x256 -- the common case -- lost its
+        largest frames with zero indication. The source is now padded to
+        square and upscaled before saving, so all 16-256px sizes always
+        land in the file, and the log now prints the sizes actually
+        embedded.
+      - Fixed: PyInstaller's own build output (including icon-related
+        WARNING lines) was being discarded on a "successful" build because
+        the failure check relied on $LASTEXITCODE, which Start-Job never
+        actually propagates back to the calling session. Icon/warning/error
+        lines from PyInstaller are now always shown.
+      - Added: the exact normalized icon file used for the build is now
+        copied next to the EXE (<name>_icon_debug.ico) so it can be
+        inspected directly, since BUILD_TEMP is deleted before the user
+        ever sees it.
     CHANGELOG (1.0.2):
       - Fixed: icon paths pasted with surrounding quotes (Explorer "Copy as
         path") were silently rejected. Paths are now sanitized on input.
@@ -42,7 +60,7 @@ $ErrorActionPreference = 'Stop'
 # ─────────────────────────────────────────────────────────────
 #  GLOBALS
 # ─────────────────────────────────────────────────────────────
-$PYFORGE_VERSION = '1.0.2'
+$PYFORGE_VERSION = '1.0.3'
 $PYFORGE_AUTHOR  = 'rhshourav'
 $BUILD_TEMP      = Join-Path $env:TEMP "PyForge_$(Get-Random)"
 $ORIGINAL_DIR    = Get-Location
@@ -197,8 +215,32 @@ from PIL import Image
 src, dest = sys.argv[1], sys.argv[2]
 sizes = [16, 24, 32, 48, 64, 128, 256]
 img = Image.open(src).convert("RGBA")
+
+# Pillow's ICO writer silently DROPS any requested size that is bigger than
+# the source image: "Any sizes bigger than the original size ... will be
+# ignored" (Pillow docs). A source under 256x256 -- extremely common for a
+# logo, screenshot, or favicon -- therefore loses its largest frames with
+# NO warning and NO error. That's a fully "successful" build that just
+# never got a usable icon resource, which looks identical to this bug
+# report. Force the source up to the largest requested size first so every
+# requested size is guaranteed to actually land in the file.
+max_size = max(sizes)
+if img.width != img.height:
+    # Pad to square on a transparent canvas first so upscaling doesn't
+    # stretch/distort non-square artwork.
+    side = max(img.width, img.height)
+    canvas = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    canvas.paste(img, ((side - img.width) // 2, (side - img.height) // 2))
+    img = canvas
+if img.width < max_size:
+    img = img.resize((max_size, max_size), Image.LANCZOS)
+
 img.save(dest, format="ICO", sizes=[(s, s) for s in sizes])
-print("OK")
+
+# Read the file back and report exactly which sizes made it in, so a
+# truncated icon is visible in the build log instead of failing silently.
+check = Image.open(dest)
+print(f"OK sizes={check.info.get('sizes')}")
 '@
     $pyScriptPath = Join-Path $WorkDir 'normalize_icon.py'
     $pyScript | Out-File -FilePath $pyScriptPath -Encoding utf8
@@ -207,6 +249,8 @@ print("OK")
         $result = & python $pyScriptPath $SourcePath $destIco 2>&1
         if ($LASTEXITCODE -eq 0 -and (Test-Path $destIco)) {
             OK "Icon normalized to multi-resolution .ico: $destIco"
+            $sizesLine = $result | Where-Object { $_ -match '^OK sizes=' } | Select-Object -Last 1
+            if ($sizesLine) { INFO "  Embedded $sizesLine" }
             return $destIco
         } else {
             WARN "Icon normalization failed — using original file as-is."
@@ -547,18 +591,32 @@ function Invoke-PyInstaller {
     $output = Receive-Job $job -Wait
     Remove-Job $job
 
-    if ($LASTEXITCODE -ne 0 -and ($output -join '') -match 'Error|error') {
-        Write-Host ''
-        ERR "PyInstaller failed. Output:"
-        $output | ForEach-Object { C "    $_" 'DarkGray' }
-        exit 1
+    # NOTE: $LASTEXITCODE here reflects the calling session's last *direct*
+    # native call -- Start-Job/Receive-Job never bridges the background
+    # process's exit code back to it. The old check below (`$LASTEXITCODE
+    # -ne 0 -and ...`) was effectively dead: it almost never fired, which
+    # meant PyInstaller's own icon-related WARNINGs (e.g. an icon it
+    # couldn't parse, or fell back on) were silently discarded even on a
+    # "successful" build. Surface them unconditionally instead.
+    if ($script:CFG_ICON) {
+        $iconLines = $output | Where-Object { $_ -match 'icon' }
+        if ($iconLines) {
+            INFO 'PyInstaller icon-related log lines:'
+            $iconLines | ForEach-Object { C "    $_" 'DarkGray' }
+        }
+    }
+    $warnErrLines = $output | Where-Object { $_ -match '^\s*(WARNING|ERROR):' }
+    if ($warnErrLines) {
+        WARN 'PyInstaller warnings/errors:'
+        $warnErrLines | ForEach-Object { C "    $_" 'DarkGray' }
     }
 
     Finish-Bar 'Compilation complete'
     $scriptExeName = [System.IO.Path]::GetFileNameWithoutExtension($script:CFG_SCRIPT)
     $exePath = Join-Path $BUILD_TEMP "dist_pyinstaller\$scriptExeName.exe"
     if (-not (Test-Path $exePath)) {
-        ERR "Output EXE not found at: $exePath"
+        ERR "PyInstaller did not produce an EXE. Full output:"
+        $output | ForEach-Object { C "    $_" 'DarkGray' }
         exit 1
     }
     OK "PyInstaller EXE: $exePath"
@@ -870,6 +928,23 @@ function Main {
     Invoke-Sign -ExePaths $builtExes
 
     $outDir = Copy-Output -ExePaths $builtExes
+
+    if ($script:CFG_ICON -and (Test-Path $script:CFG_ICON)) {
+        # The normalized icon only ever existed inside BUILD_TEMP, which
+        # Invoke-Cleanup deletes a few lines below -- so today there is no
+        # way to inspect the exact file that was actually embedded. Copy it
+        # next to the EXE so it can be double-clicked / Properties-checked
+        # directly, independent of anything PyInstaller or Explorer did.
+        $iconDebugPath = Join-Path $outDir "$($script:CFG_NAME)_icon_debug.ico"
+        try {
+            Copy-Item -Path $script:CFG_ICON -Destination $iconDebugPath -Force
+            INFO "Saved the exact icon file used for this build: $iconDebugPath"
+            INFO "  Check its Properties/thumbnail first -- if IT looks wrong, the"
+            INFO "  problem is upstream of PyInstaller (source image or normalization)."
+        } catch {
+            INFO "Could not save a debug copy of the icon (non-fatal): $_"
+        }
+    }
 
     if ($script:CFG_ICON -and $script:IS_WINDOWS) {
         # The EXE's icon resource can be 100% correct while Windows Explorer
