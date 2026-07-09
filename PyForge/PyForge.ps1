@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    PyForge v1.0.1 - Universal Python to EXE Compiler
+    PyForge v1.0.2 - Universal Python to EXE Compiler
 .DESCRIPTION
     Compiles any Python script into a standalone Windows EXE.
     Supports PyInstaller & Nuitka engines, icon branding,
@@ -13,6 +13,27 @@
     Compatible with: iex (irm <url>)
     Requires:        Python 3.8+ on PATH
     Supports:        Windows 10+ (PowerShell 5.1 / PS7+)
+    CHANGELOG (1.0.2):
+      - Fixed: icon paths pasted with surrounding quotes (Explorer "Copy as
+        path") were silently rejected. Paths are now sanitized on input.
+      - Fixed: non-native icon files (e.g. a .png/.jpg renamed to .ico) built
+        successfully but silently produced NO custom icon, because Pillow
+        (required by PyInstaller to convert/normalize icons) was never
+        installed. Pillow is now installed and every icon is normalized into
+        a proper multi-resolution .ico before compiling, so both engines
+        embed it reliably at every size Windows needs (16-256px).
+      - Fixed: malformed/invalid .ico files are now detected up front via
+        signature check, instead of failing silently mid-build.
+      - Fixed: '--upx-dir=.' forced UPX lookup into the current directory
+        only, contradicting the "ensure upx.exe is on PATH" message and
+        silently disabling compression. Now honours PATH as documented.
+      - Fixed: a failure while copying the finished EXE to the output folder
+        was caught by the global cleanup trap, which deleted the temp build
+        before the user ever saw the file. The EXE is now preserved and its
+        location reported if the copy step fails.
+      - Added: automatic, non-destructive Windows icon-cache refresh after
+        an icon-branded build, since a stale Explorer icon cache is the most
+        common reason a *correctly* embedded icon appears not to show.
 #>
 
 Set-StrictMode -Version Latest
@@ -21,7 +42,7 @@ $ErrorActionPreference = 'Stop'
 # ─────────────────────────────────────────────────────────────
 #  GLOBALS
 # ─────────────────────────────────────────────────────────────
-$PYFORGE_VERSION = '1.0.1'
+$PYFORGE_VERSION = '1.0.2'
 $PYFORGE_AUTHOR  = 'rhshourav'
 $BUILD_TEMP      = Join-Path $env:TEMP "PyForge_$(Get-Random)"
 $ORIGINAL_DIR    = Get-Location
@@ -132,6 +153,72 @@ function YesNo {
     return $r -match '^[Yy]'
 }
 
+# Strip stray wrapping quotes/whitespace from pasted paths. Windows Explorer's
+# "Copy as path" wraps the result in literal double quotes, which otherwise
+# makes Test-Path fail silently and the icon/cert get dropped without a clear
+# reason.
+function Clean-PathInput {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $Path }
+    return $Path.Trim().Trim('"').Trim("'").Trim()
+}
+
+# ─────────────────────────────────────────────────────────────
+#  ICON HELPERS
+# ─────────────────────────────────────────────────────────────
+# A real Windows .ico file always starts with the 4-byte signature
+# 00 00 01 00. Files from "png to ico" web converters, or a plain
+# renamed .png/.jpg, usually fail this check — which is the single
+# most common reason a supplied "icon" never shows up on the EXE.
+function Test-IsRealIco {
+    param([string]$Path)
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+        if ($bytes.Length -lt 4) { return $false }
+        return ($bytes[0] -eq 0 -and $bytes[1] -eq 0 -and $bytes[2] -eq 1 -and $bytes[3] -eq 0)
+    } catch {
+        return $false
+    }
+}
+
+# Normalizes whatever image the user provided into a proper multi-resolution
+# .ico (16/24/32/48/64/128/256 px) using Pillow, so the icon looks crisp in
+# the taskbar, Explorer list view, and desktop shortcuts alike. Returns the
+# path to the normalized icon, or the original path if normalization fails
+# (build continues with whatever PyInstaller/Nuitka can make of the source).
+function New-NormalizedIcon {
+    param([string]$SourcePath, [string]$WorkDir)
+
+    $destIco = Join-Path $WorkDir 'app_icon.ico'
+    $pyScript = @'
+import sys
+from PIL import Image
+
+src, dest = sys.argv[1], sys.argv[2]
+sizes = [16, 24, 32, 48, 64, 128, 256]
+img = Image.open(src).convert("RGBA")
+img.save(dest, format="ICO", sizes=[(s, s) for s in sizes])
+print("OK")
+'@
+    $pyScriptPath = Join-Path $WorkDir 'normalize_icon.py'
+    $pyScript | Out-File -FilePath $pyScriptPath -Encoding utf8
+
+    try {
+        $result = & python $pyScriptPath $SourcePath $destIco 2>&1
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $destIco)) {
+            OK "Icon normalized to multi-resolution .ico: $destIco"
+            return $destIco
+        } else {
+            WARN "Icon normalization failed — using original file as-is."
+            WARN ($result -join ' ')
+            return $SourcePath
+        }
+    } catch {
+        WARN "Icon normalization failed — using original file as-is: $_"
+        return $SourcePath
+    }
+}
+
 # ─────────────────────────────────────────────────────────────
 #  PREFLIGHT CHECKS
 # ─────────────────────────────────────────────────────────────
@@ -191,10 +278,10 @@ function Get-BuildConfig {
     Blank
 
     # Script path
-    $script:CFG_SCRIPT = Ask 'Python script path (.py)'
+    $script:CFG_SCRIPT = Clean-PathInput (Ask 'Python script path (.py)')
     while (-not (Test-Path $script:CFG_SCRIPT -PathType Leaf)) {
         ERR "File not found: $($script:CFG_SCRIPT)"
-        $script:CFG_SCRIPT = Ask 'Python script path (.py)'
+        $script:CFG_SCRIPT = Clean-PathInput (Ask 'Python script path (.py)')
     }
     $script:CFG_SCRIPT = Resolve-Path $script:CFG_SCRIPT | Select-Object -ExpandProperty Path
     OK "Script: $($script:CFG_SCRIPT)"
@@ -217,13 +304,20 @@ function Get-BuildConfig {
     Blank
 
     # Icon (optional)
-    $script:CFG_ICON = Ask 'Icon path (.ico)  [leave blank to skip]' ''
-    if ($script:CFG_ICON -and -not (Test-Path $script:CFG_ICON)) {
+    $script:CFG_ICON = Clean-PathInput (Ask 'Icon path (.ico, .png, .jpg or .bmp)  [leave blank to skip]' '')
+    if ($script:CFG_ICON -and -not (Test-Path $script:CFG_ICON -PathType Leaf)) {
         WARN "Icon not found — will compile without icon"
+        WARN "(Tip: if you pasted this via 'Copy as path', check for a typo — quotes are handled automatically now.)"
         $script:CFG_ICON = ''
     } elseif ($script:CFG_ICON) {
         $script:CFG_ICON = Resolve-Path $script:CFG_ICON | Select-Object -ExpandProperty Path
-        OK "Icon: $($script:CFG_ICON)"
+        if (Test-IsRealIco $script:CFG_ICON) {
+            OK "Icon: $($script:CFG_ICON)"
+        } else {
+            WARN "File is not a native Windows .ico (likely a renamed image, e.g. from a web converter)."
+            WARN "PyForge will auto-convert it into a proper multi-resolution .ico before compiling."
+            OK  "Icon (will be converted): $($script:CFG_ICON)"
+        }
     } else {
         INFO "No icon specified — using default"
     }
@@ -254,10 +348,10 @@ function Get-BuildConfig {
 
     if ($script:CFG_SIGN -match 'Real PFX') {
         Blank
-        $script:CFG_PFX_PATH = Ask 'Path to your .pfx certificate file'
+        $script:CFG_PFX_PATH = Clean-PathInput (Ask 'Path to your .pfx certificate file')
         while (-not (Test-Path $script:CFG_PFX_PATH)) {
             ERR "PFX not found: $($script:CFG_PFX_PATH)"
-            $script:CFG_PFX_PATH = Ask 'Path to your .pfx certificate file'
+            $script:CFG_PFX_PATH = Clean-PathInput (Ask 'Path to your .pfx certificate file')
         }
         $script:CFG_PFX_PATH = Resolve-Path $script:CFG_PFX_PATH | Select-Object -ExpandProperty Path
         $script:CFG_PFX_PASS = Read-Host '  └▶ PFX password (hidden)' -AsSecureString
@@ -331,6 +425,7 @@ function Install-Deps {
 
     if ($needsPyInstaller) { pip-install 'pyinstaller'    20 'PyInstaller...' }
     if ($needsNuitka)      { pip-install 'nuitka ordered-set zstandard' 60 'Nuitka...' }
+    if ($script:CFG_ICON)  { pip-install 'pillow' 75 'Pillow (icon support)...' }
     if ($script:CFG_UPX)  { INFO 'UPX: ensure upx.exe is on PATH (download from upx.github.io)' }
     Finish-Bar 'All deps ready'
     Blank
@@ -404,7 +499,11 @@ function Invoke-PyInstaller {
 
     if ($script:CFG_NOCONSOLE) { $args += '--noconsole' }
     if ($script:CFG_ICON)      { $args += "--icon=$($script:CFG_ICON)" }
-    if ($script:CFG_UPX)       { $args += '--upx-dir=.' } else { $args += '--noupx' }
+    # PyInstaller already searches $env:PATH for upx.exe by default — passing
+    # --upx-dir=. previously overrode that and restricted the search to the
+    # current directory only, so UPX was silently never found. Omit the flag
+    # entirely and let PyInstaller use its documented PATH-based lookup.
+    if (-not $script:CFG_UPX)  { $args += '--noupx' }
 
     # Manifest for UAC + Windows 10 compat
     $manifest = @"
@@ -630,17 +729,39 @@ function Invoke-Sign {
 function Copy-Output {
     param([string[]]$ExePaths)
 
+    # Always the folder the original .py script lives in — not %TEMP%,
+    # not the current working directory the script happened to be launched
+    # from.
     $outDir = Split-Path $script:CFG_SCRIPT -Parent
-    New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
     C '  COPYING OUTPUT' 'Yellow'
     Ruler
+    INFO "Destination (folder of the source .py): $outDir"
+
+    try {
+        New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+    } catch {
+        ERR "Could not create/access output folder: $outDir"
+        ERR "$_"
+        WARN "Your built EXE(s) are safe here (not deleted): $BUILD_TEMP"
+        foreach ($exe in $ExePaths) { WARN "  $exe" }
+        exit 1
+    }
 
     $i = 0
     foreach ($exe in $ExePaths) {
         $i++
         $dest = Join-Path $outDir (Split-Path $exe -Leaf)
-        Copy-Item -Path $exe -Destination $dest -Force
+        try {
+            Copy-Item -Path $exe -Destination $dest -Force -ErrorAction Stop
+        } catch {
+            Write-Host ''
+            ERR "Failed to copy $(Split-Path $exe -Leaf) to $outDir"
+            ERR "$_"
+            WARN "(Often the destination file is locked because a previous build is still running.)"
+            WARN "Your build was NOT lost — it's still here: $exe"
+            exit 1
+        }
         $pct = [math]::Round($i / $ExePaths.Count * 100)
         Show-Bar $pct "Copying $(Split-Path $exe -Leaf)..."
         Start-Sleep -Milliseconds 200
@@ -681,6 +802,13 @@ function Show-Summary {
     if ($script:CFG_COMPILER -match 'PyInstaller') {
         INFO '  PyInstaller EXE extracts to %TEMP% on first run (normal behaviour).'
     }
+    if ($script:CFG_ICON) {
+        WARN '  Icon still looks wrong/default? The icon in the file is almost'
+        WARN '  always correct even when Explorer shows the old one — that''s a'
+        WARN '  stale icon cache. Try: right-click the EXE > Properties (confirms'
+        WARN '  the real icon), or reboot / run "ie4uinit.exe -show" again.'
+        WARN '  Renaming the EXE once also forces Explorer to redraw it.'
+    }
     Blank
     Ruler
     C "  PyForge v$PYFORGE_VERSION  ·  $PYFORGE_AUTHOR" 'DarkGray'
@@ -710,6 +838,13 @@ function Main {
 
     New-Item -ItemType Directory -Path $BUILD_TEMP -Force | Out-Null
 
+    if ($script:CFG_ICON) {
+        C '  PREPARING ICON' 'Yellow'
+        Ruler
+        $script:CFG_ICON = New-NormalizedIcon -SourcePath $script:CFG_ICON -WorkDir $BUILD_TEMP
+        Blank
+    }
+
     $builtExes = @()
 
     $effectiveCompiler = $script:CFG_COMPILER
@@ -736,6 +871,19 @@ function Main {
 
     $outDir = Copy-Output -ExePaths $builtExes
 
+    if ($script:CFG_ICON -and $script:IS_WINDOWS) {
+        # The EXE's icon resource can be 100% correct while Windows Explorer
+        # still shows a stale cached icon (especially when re-using the same
+        # filename across builds). This is a harmless, reversible refresh —
+        # it does not touch or restart Explorer.
+        try {
+            & ie4uinit.exe -show 2>&1 | Out-Null
+            OK 'Windows icon cache refreshed (ie4uinit.exe -show).'
+        } catch {
+            INFO 'Could not auto-refresh the icon cache; see NOTES below if the icon looks wrong.'
+        }
+    }
+
     # Cleanup build artefacts
     Show-Bar 95 'Cleaning up...'
     Invoke-Cleanup
@@ -747,155 +895,3 @@ function Main {
 }
 
 Main
-
-# SIG # Begin signature block
-# MIIb1AYJKoZIhvcNAQcCoIIbxTCCG8ECAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
-# gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUBLzsPVBDtYhq42bgo8xPeqnu
-# bCCgghZEMIIDBjCCAe6gAwIBAgIQEL8pRoGkFYRO4LQqey1D4DANBgkqhkiG9w0B
-# AQsFADAbMRkwFwYDVQQDDBBSSFNIT1VSQVYtSVQtT3BzMB4XDTI2MDcwNzA4MDE1
-# N1oXDTI5MDcwNzA4MTE1N1owGzEZMBcGA1UEAwwQUkhTSE9VUkFWLUlULU9wczCC
-# ASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALFj11KDAqN3fhbDT9fvgrLF
-# VemPYmcud3qA+9Sc4RojOjElODGXyaOlBSVmDGpmCkNRC+dnkGCLB8bYb3gsnHey
-# Ud99DA8tvkTgb06+B1pigTZUmhyAwyPiu77+h224c8SsZFkmgQ/Dh2Sc2ynNocZe
-# 773d6a/B4DRg7/K9xV8jFap6BP1fjaM3Do40GSL+OVnXl2ssvfFk4FyP5fc8Czz5
-# MJ5IJKRFrnHv3kNcmyz5mnz0LoBQs/JtHpWg3BogIalJ2tyCiZgk0xIsz5j5UjhA
-# /KepfnWGpCowJ/NJWnmOZcikFlDPggI27QNc/IbxZ035ht+Zgc7b1Cf68GmL/8UC
-# AwEAAaNGMEQwDgYDVR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0G
-# A1UdDgQWBBRJ+13W7/PcqVgZXZf87/JdXvGqxjANBgkqhkiG9w0BAQsFAAOCAQEA
-# MDUJsw0AephOCByoLTFSm8hnB4I7s8ddA64vDTv4QF2TcXdrd/glByhEQexUEDpw
-# lPCSbzHAmRM5X71QYNoB/CDlCoAO8BQnbegqkhAx8ubRyciwsLA4ZPp+/GFbgZaV
-# khkOWpL6v6fmU3kSB5px+roqOuMjmqvbtCDlC4JH25WuDEgGJQhqpgdQSZdomWjH
-# le/GnQKt4Y18ysVFvgE1lRO8x6gkJ5IJbZPJ0Q//2xCvtM0WpjXmQl1RHV/7tqDS
-# fqprCQxuKiTPC64VfafzeS7IUNJMgQS73H6wuaKdeT85PIxreleNwNXfbr4O/FY3
-# eqlSEZAqzKtZXfNFWPmHazCCBY0wggR1oAMCAQICEA6bGI750C3n79tQ4ghAGFow
-# DQYJKoZIhvcNAQEMBQAwZTELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0
-# IEluYzEZMBcGA1UECxMQd3d3LmRpZ2ljZXJ0LmNvbTEkMCIGA1UEAxMbRGlnaUNl
-# cnQgQXNzdXJlZCBJRCBSb290IENBMB4XDTIyMDgwMTAwMDAwMFoXDTMxMTEwOTIz
-# NTk1OVowYjELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcG
-# A1UECxMQd3d3LmRpZ2ljZXJ0LmNvbTEhMB8GA1UEAxMYRGlnaUNlcnQgVHJ1c3Rl
-# ZCBSb290IEc0MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAv+aQc2je
-# u+RdSjwwIjBpM+zCpyUuySE98orYWcLhKac9WKt2ms2uexuEDcQwH/MbpDgW61bG
-# l20dq7J58soR0uRf1gU8Ug9SH8aeFaV+vp+pVxZZVXKvaJNwwrK6dZlqczKU0RBE
-# EC7fgvMHhOZ0O21x4i0MG+4g1ckgHWMpLc7sXk7Ik/ghYZs06wXGXuxbGrzryc/N
-# rDRAX7F6Zu53yEioZldXn1RYjgwrt0+nMNlW7sp7XeOtyU9e5TXnMcvak17cjo+A
-# 2raRmECQecN4x7axxLVqGDgDEI3Y1DekLgV9iPWCPhCRcKtVgkEy19sEcypukQF8
-# IUzUvK4bA3VdeGbZOjFEmjNAvwjXWkmkwuapoGfdpCe8oU85tRFYF/ckXEaPZPfB
-# aYh2mHY9WV1CdoeJl2l6SPDgohIbZpp0yt5LHucOY67m1O+SkjqePdwA5EUlibaa
-# RBkrfsCUtNJhbesz2cXfSwQAzH0clcOP9yGyshG3u3/y1YxwLEFgqrFjGESVGnZi
-# fvaAsPvoZKYz0YkH4b235kOkGLimdwHhD5QMIR2yVCkliWzlDlJRR3S+Jqy2QXXe
-# eqxfjT/JvNNBERJb5RBQ6zHFynIWIgnffEx1P2PsIV/EIFFrb7GrhotPwtZFX50g
-# /KEexcCPorF+CiaZ9eRpL5gdLfXZqbId5RsCAwEAAaOCATowggE2MA8GA1UdEwEB
-# /wQFMAMBAf8wHQYDVR0OBBYEFOzX44LScV1kTN8uZz/nupiuHA9PMB8GA1UdIwQY
-# MBaAFEXroq/0ksuCMS1Ri6enIZ3zbcgPMA4GA1UdDwEB/wQEAwIBhjB5BggrBgEF
-# BQcBAQRtMGswJAYIKwYBBQUHMAGGGGh0dHA6Ly9vY3NwLmRpZ2ljZXJ0LmNvbTBD
-# BggrBgEFBQcwAoY3aHR0cDovL2NhY2VydHMuZGlnaWNlcnQuY29tL0RpZ2lDZXJ0
-# QXNzdXJlZElEUm9vdENBLmNydDBFBgNVHR8EPjA8MDqgOKA2hjRodHRwOi8vY3Js
-# My5kaWdpY2VydC5jb20vRGlnaUNlcnRBc3N1cmVkSURSb290Q0EuY3JsMBEGA1Ud
-# IAQKMAgwBgYEVR0gADANBgkqhkiG9w0BAQwFAAOCAQEAcKC/Q1xV5zhfoKN0Gz22
-# Ftf3v1cHvZqsoYcs7IVeqRq7IviHGmlUIu2kiHdtvRoU9BNKei8ttzjv9P+Aufih
-# 9/Jy3iS8UgPITtAq3votVs/59PesMHqai7Je1M/RQ0SbQyHrlnKhSLSZy51PpwYD
-# E3cnRNTnf+hZqPC/Lwum6fI0POz3A8eHqNJMQBk1RmppVLC4oVaO7KTVPeix3P0c
-# 2PR3WlxUjG/voVA9/HYJaISfb8rbII01YBwCA8sgsKxYoA5AY8WYIsGyWfVVa88n
-# q2x2zm8jLfR+cWojayL/ErhULSd+2DrZ8LaHlv1b0VysGMNNn3O3AamfV6peKOK5
-# lDCCBrQwggScoAMCAQICEA3HrFcF/yGZLkBDIgw6SYYwDQYJKoZIhvcNAQELBQAw
-# YjELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0IEluYzEZMBcGA1UECxMQ
-# d3d3LmRpZ2ljZXJ0LmNvbTEhMB8GA1UEAxMYRGlnaUNlcnQgVHJ1c3RlZCBSb290
-# IEc0MB4XDTI1MDUwNzAwMDAwMFoXDTM4MDExNDIzNTk1OVowaTELMAkGA1UEBhMC
-# VVMxFzAVBgNVBAoTDkRpZ2lDZXJ0LCBJbmMuMUEwPwYDVQQDEzhEaWdpQ2VydCBU
-# cnVzdGVkIEc0IFRpbWVTdGFtcGluZyBSU0E0MDk2IFNIQTI1NiAyMDI1IENBMTCC
-# AiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBALR4MdMKmEFyvjxGwBysdduj
-# Rmh0tFEXnU2tjQ2UtZmWgyxU7UNqEY81FzJsQqr5G7A6c+Gh/qm8Xi4aPCOo2N8S
-# 9SLrC6Kbltqn7SWCWgzbNfiR+2fkHUiljNOqnIVD/gG3SYDEAd4dg2dDGpeZGKe+
-# 42DFUF0mR/vtLa4+gKPsYfwEu7EEbkC9+0F2w4QJLVSTEG8yAR2CQWIM1iI5PHg6
-# 2IVwxKSpO0XaF9DPfNBKS7Zazch8NF5vp7eaZ2CVNxpqumzTCNSOxm+SAWSuIr21
-# Qomb+zzQWKhxKTVVgtmUPAW35xUUFREmDrMxSNlr/NsJyUXzdtFUUt4aS4CEeIY8
-# y9IaaGBpPNXKFifinT7zL2gdFpBP9qh8SdLnEut/GcalNeJQ55IuwnKCgs+nrpuQ
-# NfVmUB5KlCX3ZA4x5HHKS+rqBvKWxdCyQEEGcbLe1b8Aw4wJkhU1JrPsFfxW1gao
-# u30yZ46t4Y9F20HHfIY4/6vHespYMQmUiote8ladjS/nJ0+k6MvqzfpzPDOy5y6g
-# qztiT96Fv/9bH7mQyogxG9QEPHrPV6/7umw052AkyiLA6tQbZl1KhBtTasySkuJD
-# psZGKdlsjg4u70EwgWbVRSX1Wd4+zoFpp4Ra+MlKM2baoD6x0VR4RjSpWM8o5a6D
-# 8bpfm4CLKczsG7ZrIGNTAgMBAAGjggFdMIIBWTASBgNVHRMBAf8ECDAGAQH/AgEA
-# MB0GA1UdDgQWBBTvb1NK6eQGfHrK4pBW9i/USezLTjAfBgNVHSMEGDAWgBTs1+OC
-# 0nFdZEzfLmc/57qYrhwPTzAOBgNVHQ8BAf8EBAMCAYYwEwYDVR0lBAwwCgYIKwYB
-# BQUHAwgwdwYIKwYBBQUHAQEEazBpMCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5k
-# aWdpY2VydC5jb20wQQYIKwYBBQUHMAKGNWh0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0
-# LmNvbS9EaWdpQ2VydFRydXN0ZWRSb290RzQuY3J0MEMGA1UdHwQ8MDowOKA2oDSG
-# Mmh0dHA6Ly9jcmwzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydFRydXN0ZWRSb290RzQu
-# Y3JsMCAGA1UdIAQZMBcwCAYGZ4EMAQQCMAsGCWCGSAGG/WwHATANBgkqhkiG9w0B
-# AQsFAAOCAgEAF877FoAc/gc9EXZxML2+C8i1NKZ/zdCHxYgaMH9Pw5tcBnPw6O6F
-# TGNpoV2V4wzSUGvI9NAzaoQk97frPBtIj+ZLzdp+yXdhOP4hCFATuNT+ReOPK0mC
-# efSG+tXqGpYZ3essBS3q8nL2UwM+NMvEuBd/2vmdYxDCvwzJv2sRUoKEfJ+nN57m
-# QfQXwcAEGCvRR2qKtntujB71WPYAgwPyWLKu6RnaID/B0ba2H3LUiwDRAXx1Neq9
-# ydOal95CHfmTnM4I+ZI2rVQfjXQA1WSjjf4J2a7jLzWGNqNX+DF0SQzHU0pTi4dB
-# wp9nEC8EAqoxW6q17r0z0noDjs6+BFo+z7bKSBwZXTRNivYuve3L2oiKNqetRHdq
-# fMTCW/NmKLJ9M+MtucVGyOxiDf06VXxyKkOirv6o02OoXN4bFzK0vlNMsvhlqgF2
-# puE6FndlENSmE+9JGYxOGLS/D284NHNboDGcmWXfwXRy4kbu4QFhOm0xJuF2EZAO
-# k5eCkhSxZON3rGlHqhpB/8MluDezooIs8CVnrpHMiD2wL40mm53+/j7tFaxYKIqL
-# 0Q4ssd8xHZnIn/7GELH3IdvG2XlM9q7WP/UwgOkw/HQtyRN62JK4S1C8uw3PdBun
-# vAZapsiI5YKdvlarEvf8EA+8hcpSM9LHJmyrxaFtoza2zNaQ9k+5t1wwggbtMIIE
-# 1aADAgECAhAKgO8YS43xBYLRxHanlXRoMA0GCSqGSIb3DQEBCwUAMGkxCzAJBgNV
-# BAYTAlVTMRcwFQYDVQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNl
-# cnQgVHJ1c3RlZCBHNCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBD
-# QTEwHhcNMjUwNjA0MDAwMDAwWhcNMzYwOTAzMjM1OTU5WjBjMQswCQYDVQQGEwJV
-# UzEXMBUGA1UEChMORGlnaUNlcnQsIEluYy4xOzA5BgNVBAMTMkRpZ2lDZXJ0IFNI
-# QTI1NiBSU0E0MDk2IFRpbWVzdGFtcCBSZXNwb25kZXIgMjAyNSAxMIICIjANBgkq
-# hkiG9w0BAQEFAAOCAg8AMIICCgKCAgEA0EasLRLGntDqrmBWsytXum9R/4ZwCgHf
-# yjfMGUIwYzKomd8U1nH7C8Dr0cVMF3BsfAFI54um8+dnxk36+jx0Tb+k+87H9WPx
-# NyFPJIDZHhAqlUPt281mHrBbZHqRK71Em3/hCGC5KyyneqiZ7syvFXJ9A72wzHpk
-# BaMUNg7MOLxI6E9RaUueHTQKWXymOtRwJXcrcTTPPT2V1D/+cFllESviH8YjoPFv
-# ZSjKs3SKO1QNUdFd2adw44wDcKgH+JRJE5Qg0NP3yiSyi5MxgU6cehGHr7zou1zn
-# OM8odbkqoK+lJ25LCHBSai25CFyD23DZgPfDrJJJK77epTwMP6eKA0kWa3osAe8f
-# cpK40uhktzUd/Yk0xUvhDU6lvJukx7jphx40DQt82yepyekl4i0r8OEps/FNO4ah
-# fvAk12hE5FVs9HVVWcO5J4dVmVzix4A77p3awLbr89A90/nWGjXMGn7FQhmSlIUD
-# y9Z2hSgctaepZTd0ILIUbWuhKuAeNIeWrzHKYueMJtItnj2Q+aTyLLKLM0MheP/9
-# w6CtjuuVHJOVoIJ/DtpJRE7Ce7vMRHoRon4CWIvuiNN1Lk9Y+xZ66lazs2kKFSTn
-# nkrT3pXWETTJkhd76CIDBbTRofOsNyEhzZtCGmnQigpFHti58CSmvEyJcAlDVcKa
-# cJ+A9/z7eacCAwEAAaOCAZUwggGRMAwGA1UdEwEB/wQCMAAwHQYDVR0OBBYEFOQ7
-# /PIx7f391/ORcWMZUEPPYYzoMB8GA1UdIwQYMBaAFO9vU0rp5AZ8esrikFb2L9RJ
-# 7MtOMA4GA1UdDwEB/wQEAwIHgDAWBgNVHSUBAf8EDDAKBggrBgEFBQcDCDCBlQYI
-# KwYBBQUHAQEEgYgwgYUwJAYIKwYBBQUHMAGGGGh0dHA6Ly9vY3NwLmRpZ2ljZXJ0
-# LmNvbTBdBggrBgEFBQcwAoZRaHR0cDovL2NhY2VydHMuZGlnaWNlcnQuY29tL0Rp
-# Z2lDZXJ0VHJ1c3RlZEc0VGltZVN0YW1waW5nUlNBNDA5NlNIQTI1NjIwMjVDQTEu
-# Y3J0MF8GA1UdHwRYMFYwVKBSoFCGTmh0dHA6Ly9jcmwzLmRpZ2ljZXJ0LmNvbS9E
-# aWdpQ2VydFRydXN0ZWRHNFRpbWVTdGFtcGluZ1JTQTQwOTZTSEEyNTYyMDI1Q0Ex
-# LmNybDAgBgNVHSAEGTAXMAgGBmeBDAEEAjALBglghkgBhv1sBwEwDQYJKoZIhvcN
-# AQELBQADggIBAGUqrfEcJwS5rmBB7NEIRJ5jQHIh+OT2Ik/bNYulCrVvhREafBYF
-# 0RkP2AGr181o2YWPoSHz9iZEN/FPsLSTwVQWo2H62yGBvg7ouCODwrx6ULj6hYKq
-# dT8wv2UV+Kbz/3ImZlJ7YXwBD9R0oU62PtgxOao872bOySCILdBghQ/ZLcdC8cbU
-# UO75ZSpbh1oipOhcUT8lD8QAGB9lctZTTOJM3pHfKBAEcxQFoHlt2s9sXoxFizTe
-# HihsQyfFg5fxUFEp7W42fNBVN4ueLaceRf9Cq9ec1v5iQMWTFQa0xNqItH3CPFTG
-# 7aEQJmmrJTV3Qhtfparz+BW60OiMEgV5GWoBy4RVPRwqxv7Mk0Sy4QHs7v9y69NB
-# qycz0BZwhB9WOfOu/CIJnzkQTwtSSpGGhLdjnQ4eBpjtP+XB3pQCtv4E5UCSDag6
-# +iX8MmB10nfldPF9SVD7weCC3yXZi/uuhqdwkgVxuiMFzGVFwYbQsiGnoa9F5AaA
-# yBjFBtXVLcKtapnMG3VH3EmAp/jsJ3FVF3+d1SVDTmjFjLbNFZUWMXuZyvgLfgyP
-# ehwJVxwC+UpX2MSey2ueIu9THFVkT+um1vshETaWyQo8gmBto/m3acaP9QsuLj3F
-# NwFlTxq25+T4QwX9xa6ILs84ZPvmpovq90K8eWyG2N01c4IhSOxqt81nMYIE+jCC
-# BPYCAQEwLzAbMRkwFwYDVQQDDBBSSFNIT1VSQVYtSVQtT3BzAhAQvylGgaQVhE7g
-# tCp7LUPgMAkGBSsOAwIaBQCgeDAYBgorBgEEAYI3AgEMMQowCKACgAChAoAAMBkG
-# CSqGSIb3DQEJAzEMBgorBgEEAYI3AgEEMBwGCisGAQQBgjcCAQsxDjAMBgorBgEE
-# AYI3AgEVMCMGCSqGSIb3DQEJBDEWBBRlE3zY03pz3whPtzondCoMpmK2KjANBgkq
-# hkiG9w0BAQEFAASCAQCUIoFBy58SMs934wFa7U5mI44nlYmc4osJbUajSQJP+TB8
-# N5jM1ZWn6+JIvLhd2eeGbyFGDxiCTnVAlVX1Na1PUtQjmkuB5fAyMRNw7PVaccPS
-# PWGn76brQa+QUzIa/Yt/BIY+3J+xaVfops6t3Fprg0Sgls1b0MkNFtjY5jLYZEjO
-# z6GHqefUlmsBkcSPbEm1UhLvBsl8U/63/PL6h6z6eHeaAM5RB7+/rW+L5i4TvHhJ
-# WN/4t0asrgKXjBCjvaS7gIFjmivDsPCd/qylm5KWQwXd1QgcZSybHYW6rXiJ3qUG
-# rM421j2+ww5ZLqpORYDg0yvtSuiU0NTYeCOmE3gEoYIDJjCCAyIGCSqGSIb3DQEJ
-# BjGCAxMwggMPAgEBMH0waTELMAkGA1UEBhMCVVMxFzAVBgNVBAoTDkRpZ2lDZXJ0
-# LCBJbmMuMUEwPwYDVQQDEzhEaWdpQ2VydCBUcnVzdGVkIEc0IFRpbWVTdGFtcGlu
-# ZyBSU0E0MDk2IFNIQTI1NiAyMDI1IENBMQIQCoDvGEuN8QWC0cR2p5V0aDANBglg
-# hkgBZQMEAgEFAKBpMBgGCSqGSIb3DQEJAzELBgkqhkiG9w0BBwEwHAYJKoZIhvcN
-# AQkFMQ8XDTI2MDcwNzA4NDQ1MFowLwYJKoZIhvcNAQkEMSIEILPofV6LE44OfNTk
-# cKkO9N7KMuNitJh1iTIWuz9yAnNDMA0GCSqGSIb3DQEBAQUABIICAE42cvqVqgnW
-# oWnSJXVpZDZgLTL7P8WDvXxaiU3VY5axqB6w08EM3Wnegw6CXu4LhAjPcKDgi3sl
-# o3SaSsUfPnHWTHS7aw1zfui3V28DrQIZ4Mi7EwprFecpewwFFsIKfOlSCUCp1hGF
-# 5JNhbrnc30XEiDsAqXesmGlxmvFGIaZXSu2TELSPRtvSW501ma/1j+hLZZqIILJx
-# 6NabxcHb/cPKiKaBy0CyQPnlvBWJb54lh2X6poLEEL94nS50fo13LAJvhOCC4y7J
-# eOUssTyhoWIpzT9xnlxH5Ia3JBB2gS5+xQCAy3k7kvbVBagV32mm8fGfjxMq1K1j
-# HvuLgwQmIO9mYEIXSC5RewmyII+nwziVtEN9wvJENmy1Wpv0jaWmgBtngEyUeT3D
-# L8DA34qFpYXagsPM9Pp9Ep0svt4KVAaPDARTRcf6oBg6res+h9vaGfZWwMO3+F28
-# FtmVLdAlJ9UHvoxE8MIJIgfLiSvf0JFRW9/vstDi3Scl6q0kbGl7pb1neOP0cSbZ
-# Lk2U1CDUvBr3U5yZR399uvAn5HxEZ1mXHWuz2FYJv2+tAjJdMSODuYhyJLYzabi2
-# AFFBMMEoJtskRzUVQACoSEYIe99zbAFLVsfJxFpfPYvNofC4m/QtRVszhLd7xitt
-# I3Zvj4PH/w0t6n/w+kttYYBzpdEgG/ya
-# SIG # End signature block
