@@ -1,7 +1,12 @@
 @echo off
 
 
+::============================================================================
+::
 ::  Check-Activation-Status
+::  Written by @rhshourav
+::
+::============================================================================
 
 
 ::  Set Environment variables, it helps if they are misconfigured in the system
@@ -21,6 +26,18 @@ set "Path=%SystemRoot%\Sysnative;%SystemRoot%;%SystemRoot%\Sysnative\Wbem;%Syste
 set "ComSpec=%SysPath%\cmd.exe"
 set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SysPath%\WindowsPowerShell\v1.0\Modules"
 
+cd /d "%SysPath%"
+
+:: Workaround for https://github.com/microsoft/terminal/issues/15212, when %0 starts with a quote %0 parameter expansion is not specialcased.
+:: Changing %0 to something that is not quoted bypasses the issue.
+goto arg_workaround_end
+:arg_workaround
+set "_cmdf=%~f0"
+exit /b
+:arg_workaround_end
+
+call :arg_workaround
+
 set "ps=%SysPath%\WindowsPowerShell\v1.0\powershell.exe"
 set "_psc=%ps% -nop -c"
 set "_err===== ERROR ===="
@@ -37,7 +54,7 @@ goto :E_Exit
 set "_batf=%~f0"
 set "_batp=%_batf:'=''%"
 setlocal EnableDelayedExpansion
-%_psc% "$f=[System.IO.File]::ReadAllText('!_batp!') -split ':sppmgr\:.*';. ([scriptblock]::Create($f[1]))"
+%_psc% "$f=[IO.File]::ReadAllText('!_batp!') -split ':sppmgr\:.*';. ([scriptblock]::Create($f[1]))"
 
 :E_Exit
 echo.
