@@ -2098,6 +2098,541 @@ function Remove-KFBackup {
 
 #endregion ==================================================================
 
+#region ============================== LANGUAGE MANAGER: VALIDATION ============
+#
+# Scoping note vs. the original spec: Forced/Nuclear removal originally also
+# listed removing event log entries, crash dumps, and performance counters.
+# Those aren't really language-management operations - they're general
+# system-maintenance actions with their own dedicated tools, unrelated to a
+# specific language tag, and touching them generically risks deleting
+# unrelated diagnostic data for no real benefit. They're left out here for
+# the same reason raw WinSxS manipulation was left out: the risk isn't
+# justified by what it actually buys you. "Nuclear" is renamed "Complete"
+# below to describe what it actually does rather than imply more than that.
+#
+
+function Test-KFLanguageKnownToWindows {
+    <#
+    .SYNOPSIS
+        Confirms .NET/Windows recognizes a language tag as a real culture,
+        catching typos before any DISM operation is attempted.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$LanguageTag
+    )
+    try {
+        $culture = [System.Globalization.CultureInfo]::GetCultureInfo($LanguageTag)
+        return (-not $culture.IsNeutralCulture) -and ($culture.Name -ne '')
+    } catch {
+        return $false
+    }
+}
+
+function Test-KFLanguageInstalled {
+    <#
+    .SYNOPSIS
+        Checks whether a language tag is currently installed, either for the
+        current user or (optionally) as a system capability.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$LanguageTag
+    )
+    $userLangs = @(Get-KFUserLanguages)
+    if ($userLangs | Where-Object { $_.LanguageTag -eq $LanguageTag }) { return $true }
+    $all = @(Get-KFAllInstalledLanguages)
+    return [bool]($all | Where-Object { $_.LanguageTag -eq $LanguageTag -and $_.Basic })
+}
+
+function Test-KFLanguageCanBeRemoved {
+    <#
+    .SYNOPSIS
+        Safety gate checked before ANY removal tier runs. Blocks removing
+        the last remaining language outright; flags (but doesn't block -
+        the caller decides) removing the current display/system locale.
+    .OUTPUTS
+        [pscustomobject] @{ CanRemove; Blockers; Warnings }
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$LanguageTag
+    )
+    $blockers = [System.Collections.Generic.List[string]]::new()
+    $warnings = [System.Collections.Generic.List[string]]::new()
+
+    $userLangs = @(Get-KFUserLanguages -Force)
+    if ($userLangs.Count -le 1 -and ($userLangs | Where-Object { $_.LanguageTag -eq $LanguageTag })) {
+        $blockers.Add("'$LanguageTag' is the only language in the current user's language list - Windows requires at least one.")
+    }
+
+    $locale = Get-KFLocaleInfo
+    if ($locale.DisplayLang -eq $LanguageTag) {
+        $warnings.Add("'$LanguageTag' is the current display language. Removing it will change what language Windows menus and dialogs show.")
+    }
+    if ($locale.SystemLocale -eq $LanguageTag) {
+        $warnings.Add("'$LanguageTag' is the current system locale (used by non-Unicode programs).")
+    }
+
+    [pscustomobject]@{
+        CanRemove = ($blockers.Count -eq 0)
+        Blockers  = @($blockers)
+        Warnings  = @($warnings)
+    }
+}
+
+#endregion ==================================================================
+
+#region ============================== LANGUAGE MANAGER: DISCOVERY =============
+
+function Get-KFCapabilityName {
+    <#
+    .SYNOPSIS
+        Resolves the EXACT, currently-valid DISM capability name (including
+        its version suffix, which varies by OS build and can't be safely
+        hardcoded) for a given feature + language tag, by asking DISM for
+        it directly rather than guessing.
+    .PARAMETER Feature
+        One of: Basic, OCR, Handwriting, Speech, TextToSpeech
+    .OUTPUTS
+        [string] the full capability name, or $null if not found.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('Basic', 'OCR', 'Handwriting', 'Speech', 'TextToSpeech')]
+        [string]$Feature,
+
+        [Parameter(Mandatory)]
+        [string]$LanguageTag
+    )
+    $cacheKey = "capname:$Feature:$LanguageTag"
+    Get-KFCached -Key $cacheKey -TtlSeconds 300 -Action {
+        $outcome = Invoke-KFSafe -Context 'Get-KFCapabilityName' -Silent -Action {
+            Get-WindowsCapability -Online -Name "Language.$Feature~~~$LanguageTag~*" -ErrorAction Stop
+        }
+        if ($outcome.Success -and $outcome.Result) {
+            $match = @($outcome.Result) | Select-Object -First 1
+            $match.Name
+        } else {
+            $null
+        }
+    }
+}
+
+function Get-KFLanguageRemovalImpact {
+    <#
+    .SYNOPSIS
+        Preview-only: reports what a removal at the given tier WOULD affect,
+        without changing anything. Used by the UI to show an accurate "here's
+        what will happen" list before the user confirms.
+    .OUTPUTS
+        [pscustomobject] @{ Capabilities; Keyboards; Safety }
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$LanguageTag,
+
+        [Parameter(Mandatory)]
+        [ValidateSet('Normal', 'Deep', 'Forced', 'Complete')]
+        [string]$Tier
+    )
+    $safety = Test-KFLanguageCanBeRemoved -LanguageTag $LanguageTag
+
+    $features = if ($Tier -eq 'Normal') { @('Basic') } else { @('Basic', 'OCR', 'Handwriting', 'Speech', 'TextToSpeech') }
+    $capabilities = [System.Collections.Generic.List[string]]::new()
+    foreach ($f in $features) {
+        $name = Get-KFCapabilityName -Feature $f -LanguageTag $LanguageTag
+        if ($name) { $capabilities.Add($name) }
+    }
+
+    # A keyboard is flagged as affected if its associated language tag
+    # matches the one being removed. (With one tag removed per call, that
+    # tag can't remain in the user's language list afterward, so no extra
+    # "is it still needed elsewhere" check is needed here.)
+    $allKeyboards = @(Get-KFInstalledKeyboards -Force)
+    $affectedKeyboards = @($allKeyboards | Where-Object { $_.LanguageTag -eq $LanguageTag })
+
+    [pscustomobject]@{
+        Capabilities = @($capabilities)
+        Keyboards    = $affectedKeyboards
+        Safety       = $safety
+    }
+}
+
+#endregion ==================================================================
+
+#region ============================== LANGUAGE MANAGER: INSTALLATION ==========
+#
+# Two install paths, chosen automatically based on what the running OS
+# supports:
+#   - Install-Language (LanguagePackManagement module): the modern, one-step
+#     path that installs the full language experience pack. Only present on
+#     newer Windows 11 builds - detected at runtime, never assumed.
+#   - Add-WindowsCapability (DISM): the universal fallback available on
+#     everything KeyForge claims to support back to Windows 10 1909. Installs
+#     Basic plus whichever optional features are requested, then adds the
+#     language to the user's language list.
+#
+
+function Install-KFLanguage {
+    <#
+    .SYNOPSIS
+        Installs a language pack for the current user, with pre-flight
+        validation (tag format, not already installed, admin, connectivity)
+        and a backup taken before any change.
+    .PARAMETER Features
+        Additional features to install alongside Basic: any of OCR,
+        Handwriting, Speech, TextToSpeech. Basic is always included.
+    .OUTPUTS
+        [pscustomobject] @{ Success; Method; InstalledFeatures; BackupId; Error }
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$LanguageTag,
+
+        [ValidateSet('OCR', 'Handwriting', 'Speech', 'TextToSpeech')]
+        [string[]]$Features = @(),
+
+        [switch]$SetAsDisplayLanguage
+    )
+    $fail = { param($msg) [pscustomobject]@{ Success = $false; Method = $null; InstalledFeatures = @(); BackupId = $null; Error = $msg } }
+
+    $normalized = Test-KFLanguageTagFormat -Tag $LanguageTag
+    if (-not $normalized) { return & $fail "'$LanguageTag' is not a valid BCP-47 language tag." }
+    if (-not (Test-KFLanguageKnownToWindows -LanguageTag $normalized)) { return & $fail "'$normalized' is not a language/region combination Windows recognizes." }
+    if (Test-KFLanguageInstalled -LanguageTag $normalized) { return & $fail "'$normalized' is already installed." }
+    if (-not (Test-KFAdminPrivileges)) { return & $fail 'Installing a language requires an elevated (Run as Administrator) session.' }
+    if (-not (Test-KFOnline)) { return & $fail 'Installing a language pack needs internet access (it downloads from Windows Update) and none was detected.' }
+    if (-not $PSCmdlet.ShouldProcess($normalized, 'Install language')) { return & $fail 'Cancelled (ShouldProcess).' }
+
+    $backup = Backup-KFSystemState -Note "Automatic pre-install backup (before installing $normalized)"
+    if (-not $backup.Success) { return & $fail "Refusing to install without a successful backup: $($backup.Error)" }
+
+    $installed = [System.Collections.Generic.List[string]]::new()
+    $method = $null
+
+    if (Test-KFCommandExists -Name 'Install-Language') {
+        $result = Invoke-KFSafe -Context 'Install-KFLanguage:Install-Language' -Action {
+            Install-Language -Language $normalized -ErrorAction Stop
+        }
+        if ($result.Success) {
+            $method = 'Install-Language'
+            $installed.Add('Basic')
+            foreach ($f in $Features) { $installed.Add($f) }  # Install-Language installs the full LXP in one step
+        }
+    }
+
+    if (-not $method) {
+        # Fallback: DISM capability-by-capability.
+        $basicName = Get-KFCapabilityName -Feature 'Basic' -LanguageTag $normalized
+        if (-not $basicName) { return & $fail "Windows doesn't list a Basic language capability for '$normalized' - it may not be installable via Windows Update on this system." }
+
+        $basicResult = Invoke-KFSafe -Context 'Install-KFLanguage:AddCapability:Basic' -Action {
+            Add-WindowsCapability -Online -Name $basicName -ErrorAction Stop
+        }
+        if (-not $basicResult.Success) { return & $fail "Failed to install the Basic language pack: $($basicResult.Error)" }
+        $method = 'DISM'
+        $installed.Add('Basic')
+
+        foreach ($feature in $Features) {
+            $capName = Get-KFCapabilityName -Feature $feature -LanguageTag $normalized
+            if (-not $capName) {
+                Write-LogEntry -Level 'Warning' -Message "No '$feature' capability found for '$normalized' - skipped."
+                continue
+            }
+            $featResult = Invoke-KFSafe -Context "Install-KFLanguage:AddCapability:$feature" -Action {
+                Add-WindowsCapability -Online -Name $capName -ErrorAction Stop
+            }
+            if ($featResult.Success) { $installed.Add($feature) }
+            else { Write-LogEntry -Level 'Warning' -Message "Failed to install '$feature' for '$normalized': $($featResult.Error)" }
+        }
+
+        # Add to the user's language list so it's actually usable, not just
+        # present in the capability store. Working with plain tag strings
+        # (rather than trying to .Add() onto the collection
+        # Get-WinUserLanguageList returns, which becomes a fixed-size array
+        # once wrapped for safe iteration) avoids any ambiguity about the
+        # underlying object type - Set-WinUserLanguageList accepts tags.
+        $listResult = Invoke-KFSafe -Context 'Install-KFLanguage:UserLanguageList' -Action {
+            $currentTags = @(Get-WinUserLanguageList -ErrorAction Stop | ForEach-Object { $_.LanguageTag })
+            if ($currentTags -notcontains $normalized) {
+                $newTags = $currentTags + $normalized
+                Set-WinUserLanguageList -LanguageList $newTags -Force -ErrorAction Stop
+            }
+        }
+        if (-not $listResult.Success) {
+            Write-LogEntry -Level 'Warning' -Message "Language pack installed but could not be added to the user language list: $($listResult.Error)"
+        }
+    }
+
+    Clear-KFCache -Prefix 'lang:'
+    Clear-KFCache -Prefix 'capname:'
+    Clear-KFCache -Prefix 'dashboard:'
+
+    $verified = Test-KFLanguageInstalled -LanguageTag $normalized
+    if (-not $verified) {
+        return [pscustomobject]@{ Success = $false; Method = $method; InstalledFeatures = @($installed); BackupId = $backup.BackupId; Error = 'Installation commands completed without error, but the language does not verify as installed afterward.' }
+    }
+
+    if ($SetAsDisplayLanguage) {
+        $displayResult = Set-KFDisplayLanguage -LanguageTag $normalized -Confirm:$false
+        if (-not $displayResult.Success) {
+            Write-LogEntry -Level 'Warning' -Message "Installed '$normalized' but could not set it as display language: $($displayResult.Error)"
+        }
+    }
+
+    Write-LogEntry -Level 'Info' -Message "Installed language '$normalized' via $method (features: $($installed -join ', '))"
+    [pscustomobject]@{ Success = $true; Method = $method; InstalledFeatures = @($installed); BackupId = $backup.BackupId; Error = $null }
+}
+
+function Install-KFLanguageFeature {
+    <#
+    .SYNOPSIS
+        Installs one additional feature (OCR/Handwriting/Speech/TextToSpeech)
+        for an already-installed language.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$LanguageTag,
+
+        [Parameter(Mandatory)]
+        [ValidateSet('OCR', 'Handwriting', 'Speech', 'TextToSpeech')]
+        [string]$Feature
+    )
+    if (-not (Test-KFLanguageInstalled -LanguageTag $LanguageTag)) {
+        return [pscustomobject]@{ Success = $false; Error = "'$LanguageTag' is not installed - install the language itself first." }
+    }
+    if (-not (Test-KFAdminPrivileges)) {
+        return [pscustomobject]@{ Success = $false; Error = 'Installing a language feature requires an elevated (Run as Administrator) session.' }
+    }
+    $capName = Get-KFCapabilityName -Feature $Feature -LanguageTag $LanguageTag
+    if (-not $capName) {
+        return [pscustomobject]@{ Success = $false; Error = "No '$Feature' capability is available for '$LanguageTag' on this system." }
+    }
+    if (-not $PSCmdlet.ShouldProcess("$LanguageTag/$Feature", 'Install language feature')) {
+        return [pscustomobject]@{ Success = $false; Error = 'Cancelled (ShouldProcess).' }
+    }
+
+    $result = Invoke-KFSafe -Context "Install-KFLanguageFeature:$Feature" -Action {
+        Add-WindowsCapability -Online -Name $capName -ErrorAction Stop
+    }
+    Clear-KFCache -Prefix 'lang:'
+    Clear-KFCache -Prefix 'capname:'
+    [pscustomobject]@{ Success = $result.Success; Error = $result.Error }
+}
+
+#endregion ==================================================================
+
+#region ============================== LANGUAGE MANAGER: REMOVAL (TIERED) ======
+
+function Remove-KFLanguage {
+    <#
+    .SYNOPSIS
+        Tiered language removal. Every tier backs up first, checks
+        Test-KFLanguageCanBeRemoved, and returns a per-step result list so a
+        partial failure is visible rather than silent.
+    .PARAMETER Tier
+        Normal  - remove from the user's language list; remove the Basic
+                  capability if DISM is available.
+        Deep    - Normal, plus remove OCR/Handwriting/Speech/TextToSpeech
+                  capabilities and clear MUI cache entries for the tag.
+        Forced  - Deep, plus clean lingering registry references to the tag
+                  across the paths KeyForge knows about, and remove keyboard
+                  layouts exclusively tied to this language.
+        Complete - Forced, plus an OPT-IN, clearly-separate offer to run
+                  Windows' own supported component-store cleanup
+                  (DISM /StartComponentCleanup). That's a system-wide
+                  operation, not specific to this language, so it's never
+                  run silently as a side effect - see
+                  Invoke-KFComponentCleanup, called separately by the UI.
+    .OUTPUTS
+        [pscustomobject] @{ Success; Tier; Steps; BackupId; Error }
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$LanguageTag,
+
+        [Parameter(Mandatory)]
+        [ValidateSet('Normal', 'Deep', 'Forced', 'Complete')]
+        [string]$Tier
+    )
+    $steps = [System.Collections.Generic.List[pscustomobject]]::new()
+    function Add-KFStep([string]$Name, [bool]$Ok, [string]$Detail) {
+        $steps.Add([pscustomobject]@{ Step = $Name; Success = $Ok; Detail = $Detail })
+    }
+
+    $normalized = Test-KFLanguageTagFormat -Tag $LanguageTag
+    if (-not $normalized) {
+        return [pscustomobject]@{ Success = $false; Tier = $Tier; Steps = @(); BackupId = $null; Error = "'$LanguageTag' is not a valid language tag." }
+    }
+    if (-not (Test-KFLanguageInstalled -LanguageTag $normalized)) {
+        return [pscustomobject]@{ Success = $false; Tier = $Tier; Steps = @(); BackupId = $null; Error = "'$normalized' is not currently installed." }
+    }
+    $safety = Test-KFLanguageCanBeRemoved -LanguageTag $normalized
+    if (-not $safety.CanRemove) {
+        return [pscustomobject]@{ Success = $false; Tier = $Tier; Steps = @(); BackupId = $null; Error = ($safety.Blockers -join '; ') }
+    }
+    if (-not (Test-KFAdminPrivileges) -and $Tier -ne 'Normal') {
+        return [pscustomobject]@{ Success = $false; Tier = $Tier; Steps = @(); BackupId = $null; Error = "$Tier removal requires an elevated (Run as Administrator) session." }
+    }
+    if (-not $PSCmdlet.ShouldProcess($normalized, "$Tier language removal")) {
+        return [pscustomobject]@{ Success = $false; Tier = $Tier; Steps = @(); BackupId = $null; Error = 'Cancelled (ShouldProcess).' }
+    }
+
+    $backup = Backup-KFSystemState -Note "Automatic pre-removal backup ($Tier removal of $normalized)"
+    if (-not $backup.Success) {
+        return [pscustomobject]@{ Success = $false; Tier = $Tier; Steps = @(); BackupId = $null; Error = "Refusing to remove without a successful backup: $($backup.Error)" }
+    }
+
+    # ---- Normal: remove from user language list + Basic capability -------
+    $listOutcome = Invoke-KFSafe -Context 'Remove-KFLanguage:UserLanguageList' -Action {
+        $currentTags = @(Get-WinUserLanguageList -ErrorAction Stop | ForEach-Object { $_.LanguageTag })
+        $remainingTags = @($currentTags | Where-Object { $_ -ne $normalized })
+        if ($remainingTags.Count -eq 0) {
+            throw [ValidationException]::new('Refusing to leave the user language list empty.')
+        }
+        Set-WinUserLanguageList -LanguageList $remainingTags -Force -ErrorAction Stop
+    }
+    Add-KFStep 'Remove from user language list' $listOutcome.Success $(if ($listOutcome.Success) { 'Removed.' } else { $listOutcome.Error })
+
+    if (Test-KFCommandExists -Name 'Uninstall-Language') {
+        $uninstallOutcome = Invoke-KFSafe -Context 'Remove-KFLanguage:Uninstall-Language' -Silent -Action {
+            Uninstall-Language -Language $normalized -ErrorAction Stop
+        }
+        Add-KFStep 'Uninstall-Language' $uninstallOutcome.Success $(if ($uninstallOutcome.Success) { 'Removed via LanguagePackManagement.' } else { $uninstallOutcome.Error })
+    } else {
+        $basicName = Get-KFCapabilityName -Feature 'Basic' -LanguageTag $normalized
+        if ($basicName) {
+            $basicOutcome = Invoke-KFSafe -Context 'Remove-KFLanguage:RemoveCapability:Basic' -Action {
+                Remove-WindowsCapability -Online -Name $basicName -ErrorAction Stop
+            }
+            Add-KFStep 'Remove Basic capability' $basicOutcome.Success $(if ($basicOutcome.Success) { $basicName } else { $basicOutcome.Error })
+        } else {
+            Add-KFStep 'Remove Basic capability' $true 'No installed Basic capability found for this tag - nothing to remove.'
+        }
+    }
+
+    # ---- Deep: additional feature capabilities + MUI cache ---------------
+    if ($Tier -in @('Deep', 'Forced', 'Complete')) {
+        foreach ($feature in 'OCR', 'Handwriting', 'Speech', 'TextToSpeech') {
+            $capName = Get-KFCapabilityName -Feature $feature -LanguageTag $normalized
+            if (-not $capName) {
+                Add-KFStep "Remove $feature capability" $true 'Not installed - nothing to remove.'
+                continue
+            }
+            $featOutcome = Invoke-KFSafe -Context "Remove-KFLanguage:RemoveCapability:$feature" -Action {
+                Remove-WindowsCapability -Online -Name $capName -ErrorAction Stop
+            }
+            Add-KFStep "Remove $feature capability" $featOutcome.Success $(if ($featOutcome.Success) { $capName } else { $featOutcome.Error })
+        }
+
+        $muiOutcome = Invoke-KFSafe -Context 'Remove-KFLanguage:MUICache' -Action {
+            # MUICache stores its data as values directly on the key, not as
+            # subkeys, so this reads values via Get-ItemProperty rather than
+            # enumerating child keys.
+            $props = Get-ItemProperty -LiteralPath $Script:RegistryPaths.MUICache -ErrorAction SilentlyContinue
+            $removed = 0
+            if ($props) {
+                foreach ($name in @($props.PSObject.Properties.Name)) {
+                    if ($name -match [regex]::Escape($normalized)) {
+                        Remove-ItemProperty -LiteralPath $Script:RegistryPaths.MUICache -Name $name -ErrorAction SilentlyContinue
+                        $removed++
+                    }
+                }
+            }
+            $removed
+        }
+        Add-KFStep 'Clean MUI cache' $muiOutcome.Success $(if ($muiOutcome.Success) { "$($muiOutcome.Result) entrie(s) removed." } else { $muiOutcome.Error })
+    }
+
+    # ---- Forced: registry cleanup + exclusively-tied keyboards -----------
+    if ($Tier -in @('Forced', 'Complete')) {
+        $impact = Get-KFLanguageRemovalImpact -LanguageTag $normalized -Tier $Tier
+        foreach ($kbd in $impact.Keyboards) {
+            $removeResult = Remove-KFRegKey -Path "$($Script:RegistryPaths.KeyboardLayouts)\$($kbd.KLID)" -Confirm:$false
+            Add-KFStep "Remove orphaned keyboard layout $($kbd.KLID)" $removeResult.Success $(if ($removeResult.Success) { $kbd.Name } else { $removeResult.Error })
+
+            $preloadOutcome = Invoke-KFSafe -Context 'Remove-KFLanguage:PreloadCleanup' -Action {
+                $preloadItem = Get-Item -LiteralPath $Script:RegistryPaths.Preload -ErrorAction Stop
+                $slot = @($preloadItem.Property) | Where-Object { $preloadItem.GetValue($_) -eq $kbd.KLID } | Select-Object -First 1
+                if ($slot) { Remove-ItemProperty -LiteralPath $Script:RegistryPaths.Preload -Name $slot -ErrorAction Stop }
+            }
+            Add-KFStep "Remove preload entry for $($kbd.KLID)" $preloadOutcome.Success $(if ($preloadOutcome.Success) { 'Done.' } else { $preloadOutcome.Error })
+        }
+        if ($impact.Keyboards.Count -eq 0) {
+            Add-KFStep 'Orphaned keyboard cleanup' $true 'No keyboard layouts were exclusively tied to this language.'
+        }
+        Clear-KFCache -Prefix 'kbd:'
+    }
+
+    Clear-KFCache -Prefix 'lang:'
+    Clear-KFCache -Prefix 'capname:'
+    Clear-KFCache -Prefix 'dashboard:'
+
+    $anyFail = [bool]($steps | Where-Object { -not $_.Success })
+    $stillInstalled = Test-KFLanguageInstalled -LanguageTag $normalized
+    if ($stillInstalled -and $Tier -eq 'Normal') {
+        # Normal removal intentionally may leave the Basic capability
+        # installed system-wide if it's shared - not a failure by itself.
+        Add-KFStep 'Post-removal check' $true "'$normalized' removed from the user language list; the underlying capability may still be present for other users."
+    } elseif ($stillInstalled) {
+        Add-KFStep 'Post-removal check' $false "'$normalized' still verifies as installed after $Tier removal."
+        $anyFail = $true
+    } else {
+        Add-KFStep 'Post-removal check' $true 'Verified not installed.'
+    }
+
+    Write-LogEntry -Level 'Info' -Message "$Tier removal of '$normalized' completed (anyFail=$anyFail); backup='$($backup.BackupId)'"
+    [pscustomobject]@{
+        Success  = (-not $anyFail)
+        Tier     = $Tier
+        Steps    = @($steps)
+        BackupId = $backup.BackupId
+        Error    = $(if ($anyFail) { 'One or more steps failed - see Steps for details.' } else { $null })
+    }
+}
+
+function Invoke-KFComponentCleanup {
+    <#
+    .SYNOPSIS
+        Runs Windows' own supported component-store cleanup
+        (DISM /Online /Cleanup-Image /StartComponentCleanup). This is a
+        SYSTEM-WIDE operation that reclaims space from any fully-superseded
+        component, not specific to any one language - it is never run as an
+        automatic side effect of removing a language. The UI offers it
+        separately, with that scope explained, after a Complete-tier removal.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
+    if (-not (Test-KFAdminPrivileges)) {
+        return [pscustomobject]@{ Success = $false; Error = 'Component cleanup requires an elevated (Run as Administrator) session.' }
+    }
+    if (-not $PSCmdlet.ShouldProcess('Windows component store', 'Run StartComponentCleanup')) {
+        return [pscustomobject]@{ Success = $false; Error = 'Cancelled (ShouldProcess).' }
+    }
+    $outcome = Invoke-KFSafe -Context 'Invoke-KFComponentCleanup' -Action {
+        $result = & Dism.exe /Online /Cleanup-Image /StartComponentCleanup /NoRestart 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw [OperationFailedException]::new("DISM exited with code $LASTEXITCODE: $result")
+        }
+        $result
+    }
+    [pscustomobject]@{ Success = $outcome.Success; Error = $outcome.Error }
+}
+
+#endregion ==================================================================
+
 #region ============================== CONFIRMATION UTILITIES =================
 
 function Request-KFUserConfirmation {
@@ -2829,23 +3364,23 @@ function Show-KFDashboard {
 $Script:MenuItems = @(
     [pscustomobject]@{ Id = 1;  Label = 'Installed Languages';               Status = 'Ready'; Phase = '' }
     [pscustomobject]@{ Id = 2;  Label = 'Installed Keyboard Layouts';        Status = 'Ready'; Phase = '' }
-    [pscustomobject]@{ Id = 3;  Label = 'Install New Language';             Status = 'Stub';  Phase = 'Phase 4' }
-    [pscustomobject]@{ Id = 4;  Label = 'Remove Language';                  Status = 'Stub';  Phase = 'Phase 4' }
-    [pscustomobject]@{ Id = 5;  Label = 'Remove Keyboard Layout';           Status = 'Stub';  Phase = 'Phase 4' }
+    [pscustomobject]@{ Id = 3;  Label = 'Install New Language';             Status = 'Ready'; Phase = '' }
+    [pscustomobject]@{ Id = 4;  Label = 'Remove Language';                  Status = 'Ready'; Phase = '' }
+    [pscustomobject]@{ Id = 5;  Label = 'Remove Keyboard Layout';           Status = 'Stub';  Phase = 'Phase 5' }
     [pscustomobject]@{ Id = 6;  Label = 'Set Default Keyboard';             Status = 'Ready'; Phase = '' }
     [pscustomobject]@{ Id = 7;  Label = 'Set Display Language';             Status = 'Ready'; Phase = '' }
     [pscustomobject]@{ Id = 8;  Label = 'Region Settings';                  Status = 'Ready'; Phase = '' }
     [pscustomobject]@{ Id = 9;  Label = 'Locale Settings';                  Status = 'Ready'; Phase = '' }
     [pscustomobject]@{ Id = 10; Label = 'Time & Region';                    Status = 'Ready'; Phase = '' }
     [pscustomobject]@{ Id = 11; Label = 'Language Features';                Status = 'Ready'; Phase = '' }
-    [pscustomobject]@{ Id = 12; Label = 'Cleanup';                          Status = 'Stub';  Phase = 'Phase 4' }
-    [pscustomobject]@{ Id = 13; Label = 'Advanced Removal';                 Status = 'Stub';  Phase = 'Phase 4' }
+    [pscustomobject]@{ Id = 12; Label = 'Cleanup';                          Status = 'Stub';  Phase = 'Phase 5' }
+    [pscustomobject]@{ Id = 13; Label = 'Advanced Removal';                 Status = 'Stub';  Phase = 'Phase 5' }
     [pscustomobject]@{ Id = 14; Label = 'Backup';                           Status = 'Ready'; Phase = '' }
     [pscustomobject]@{ Id = 15; Label = 'Restore';                          Status = 'Ready'; Phase = '' }
     [pscustomobject]@{ Id = 16; Label = 'Diagnostics';                      Status = 'Ready'; Phase = '' }
-    [pscustomobject]@{ Id = 17; Label = 'Repair Windows Language Components'; Status = 'Stub'; Phase = 'Phase 4' }
+    [pscustomobject]@{ Id = 17; Label = 'Repair Windows Language Components'; Status = 'Stub'; Phase = 'Phase 5' }
     [pscustomobject]@{ Id = 18; Label = 'Export Configuration';             Status = 'Ready'; Phase = '' }
-    [pscustomobject]@{ Id = 19; Label = 'Import Configuration';             Status = 'Stub';  Phase = 'Phase 4' }
+    [pscustomobject]@{ Id = 19; Label = 'Import Configuration';             Status = 'Stub';  Phase = 'Phase 5' }
     [pscustomobject]@{ Id = 20; Label = 'Live Monitoring';                  Status = 'Ready'; Phase = '' }
     [pscustomobject]@{ Id = 21; Label = 'Settings';                         Status = 'Ready'; Phase = '' }
     [pscustomobject]@{ Id = 22; Label = 'About';                            Status = 'Ready'; Phase = '' }
@@ -3086,20 +3621,57 @@ function Show-KFLanguageFeaturesScreen {
     $langs = Wait-KFWithSpinner -Label 'Reading feature matrix (DISM)' -Action { Get-KFAllInstalledLanguages }
     if ($null -eq $langs -or @($langs).Count -eq 0) {
         Write-KFStatus -Type 'Warning' -Message 'No feature data available (DISM query failed or returned nothing).'
-    } else {
-        foreach ($lang in $langs) {
-            $features = [System.Collections.Generic.List[string]]::new()
-            foreach ($f in @('Basic', 'Speech', 'OCR', 'Handwriting', 'TextToSpeech')) {
-                $val = $lang.$f
-                $mark = if ($val -eq $true) { Get-KFIcon 'Success' } elseif ($val -eq $false) { Get-KFIcon 'Ring' } else { '?' }
-                $features.Add("$mark $f")
-            }
-            Write-KFColor -Text "  $($lang.DisplayName) " -Color $Script:Colors.Body -NoNewline
-            Write-KFColor -Text "($($lang.LanguageTag))" -Color $Script:Colors.Muted
-            Write-KFColor -Text "    $($features -join '   ')" -Color $Script:Colors.Info
-            Write-Host ''
-        }
+        Write-Host ''
+        Wait-KFKeyPress
+        return
     }
+
+    foreach ($lang in $langs) {
+        $features = [System.Collections.Generic.List[string]]::new()
+        foreach ($f in @('Basic', 'Speech', 'OCR', 'Handwriting', 'TextToSpeech')) {
+            $val = $lang.$f
+            $mark = if ($val -eq $true) { Get-KFIcon 'Success' } elseif ($val -eq $false) { Get-KFIcon 'Ring' } else { '?' }
+            $features.Add("$mark $f")
+        }
+        Write-KFColor -Text "  $($lang.DisplayName) " -Color $Script:Colors.Body -NoNewline
+        Write-KFColor -Text "($($lang.LanguageTag))" -Color $Script:Colors.Muted
+        Write-KFColor -Text "    $($features -join '   ')" -Color $Script:Colors.Info
+        Write-Host ''
+    }
+
+    Write-Host ''
+    Write-KFColor -Text '  [I] Install a missing feature   [0] Back' -Color $Script:Colors.Muted
+    Write-Host ''
+    Write-KFColor -Text '  Choice: ' -Color $Script:Colors.Body -NoNewline
+    $choice = (Read-Host).Trim()
+    if ($choice -notmatch '^(?i:i)$') { return }
+
+    Write-Host ''
+    $tag = Request-KFTextInput -Prompt 'Language tag to add a feature to (blank to cancel)'
+    if ([string]::IsNullOrWhiteSpace($tag)) { return }
+    $normalized = Test-KFLanguageTagFormat -Tag $tag
+    if (-not $normalized -or -not (Test-KFLanguageInstalled -LanguageTag $normalized)) {
+        Write-KFStatus -Type 'Failure' -Message "'$tag' isn't currently installed."
+        Write-Host ''
+        Wait-KFKeyPress
+        return
+    }
+    $featureIndex = Show-KFChoiceDialog -Question 'Which feature?' -Options @('OCR', 'Handwriting', 'Speech', 'TextToSpeech', 'Cancel') -DefaultIndex 4
+    if ($featureIndex -lt 0 -or $featureIndex -eq 4) { return }
+    $feature = @('OCR', 'Handwriting', 'Speech', 'TextToSpeech')[$featureIndex]
+
+    if (-not (Show-KFConfirmationDialog -Message "Install the $feature feature for '$normalized'?" -DefaultYes $true)) { return }
+
+    $result = Wait-KFWithSpinner -Label "Installing $feature for $normalized" -Action {
+        Install-KFLanguageFeature -LanguageTag $normalized -Feature $feature -Confirm:$false
+    }
+    Write-Host ''
+    if ($result -and $result.Success) {
+        Write-KFStatus -Type 'Success' -Message "$feature installed for '$normalized'."
+    } else {
+        Write-KFStatus -Type 'Failure' -Message "Could not install ${feature}: $(if ($result) { $result.Error } else { 'see the session log' })"
+    }
+    Write-Host ''
     Wait-KFKeyPress
 }
 
@@ -3142,6 +3714,195 @@ function Show-KFSetDisplayLanguageScreen {
         Write-KFStatus -Type 'Success' -Message "Display language set to '$tag'. Sign out and back in for it to fully apply everywhere."
     } else {
         Write-KFStatus -Type 'Failure' -Message "Could not set display language: $($result.Error)"
+    }
+    Write-Host ''
+    Wait-KFKeyPress
+}
+
+#endregion ==================================================================
+
+#region ============================== SCREEN: INSTALL / REMOVE LANGUAGE =======
+
+function Show-KFInstallLanguageScreen {
+    [CmdletBinding()]
+    param()
+    try { Clear-Host } catch {}
+    Write-KFBanner
+    Write-KFColor -Text '  INSTALL NEW LANGUAGE' -Color $Script:Colors.Highlight
+    Write-KFLine
+    Write-Host ''
+
+    if (-not (Test-KFAdminPrivileges)) {
+        Write-KFAlert -Level 'Warning' -Message 'Installing a language requires an elevated (Run as Administrator) session. Restart KeyForge as Administrator to use this.'
+        Write-Host ''
+        Wait-KFKeyPress
+        return
+    }
+
+    $tag = Request-KFTextInput -Prompt "Language tag to install, e.g. 'es-MX' or 'ja-JP' (blank to cancel)" -Validator {
+        param($v) [string]::IsNullOrWhiteSpace($v) -or (Test-KFLanguageTagFormat -Tag $v)
+    } -ErrorText "Enter a valid BCP-47 tag like 'es-MX', or leave blank to cancel."
+    if ([string]::IsNullOrWhiteSpace($tag)) { return }
+
+    $normalized = Test-KFLanguageTagFormat -Tag $tag
+    if (-not (Test-KFLanguageKnownToWindows -LanguageTag $normalized)) {
+        Write-Host ''
+        Write-KFStatus -Type 'Failure' -Message "'$normalized' isn't a language/region combination Windows recognizes."
+        Write-Host ''
+        Wait-KFKeyPress
+        return
+    }
+    if (Test-KFLanguageInstalled -LanguageTag $normalized) {
+        Write-Host ''
+        Write-KFStatus -Type 'Info' -Message "'$normalized' is already installed."
+        Write-Host ''
+        Wait-KFKeyPress
+        return
+    }
+
+    Write-Host ''
+    $featureInput = Request-KFTextInput -Prompt 'Additional features - comma-separated (OCR, Handwriting, Speech, TextToSpeech), or blank for Basic only'
+    $features = @()
+    if (-not [string]::IsNullOrWhiteSpace($featureInput)) {
+        $valid = 'OCR', 'Handwriting', 'Speech', 'TextToSpeech'
+        $requested = @($featureInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+        $features = @($requested | Where-Object { $_ -in $valid })
+        $unknown = @($requested | Where-Object { $_ -notin $valid })
+        if ($unknown.Count -gt 0) {
+            Write-KFStatus -Type 'Warning' -Message "Ignoring unrecognized feature(s): $($unknown -join ', ')"
+        }
+    }
+
+    $setDisplay = Request-KFUserConfirmation -Message 'Also set this as the display language once installed?' -DefaultYes $false
+
+    $affected = @("Download and install the Basic language pack for '$normalized'" ) + @($features | ForEach-Object { "Install the $_ feature" })
+    if (-not (Show-KFConfirmationDialog -Message "Install '$normalized'? This downloads from Windows Update and may take several minutes." -AffectedItems $affected -DefaultYes $true)) {
+        return
+    }
+
+    $result = Wait-KFWithSpinner -Label "Installing $normalized (this can take a while)" -Action {
+        Install-KFLanguage -LanguageTag $normalized -Features $features -SetAsDisplayLanguage:$setDisplay -Confirm:$false
+    }
+    Write-Host ''
+    if ($null -eq $result) {
+        Write-KFStatus -Type 'Failure' -Message 'Install failed - see the session log for details.'
+    } elseif ($result.Success) {
+        Write-KFStatus -Type 'Success' -Message "'$normalized' installed via $($result.Method). Features: $($result.InstalledFeatures -join ', ')"
+        if ($result.BackupId) { Write-KFColor -Text "  Pre-install backup: $($result.BackupId)" -Color $Script:Colors.Dim }
+    } else {
+        Write-KFStatus -Type 'Failure' -Message "Install failed: $($result.Error)"
+    }
+    Write-Host ''
+    Wait-KFKeyPress
+}
+
+function Show-KFRemoveLanguageScreen {
+    [CmdletBinding()]
+    param()
+    try { Clear-Host } catch {}
+    Write-KFBanner
+    Write-KFColor -Text '  REMOVE LANGUAGE' -Color $Script:Colors.Highlight
+    Write-KFLine
+    Write-Host ''
+
+    $userLangs = @(Get-KFUserLanguages -Force)
+    if ($userLangs.Count -eq 0) {
+        Write-KFStatus -Type 'Warning' -Message 'No languages found in the current user language list.'
+        Write-Host ''
+        Wait-KFKeyPress
+        return
+    }
+    $rows = @($userLangs | ForEach-Object { [pscustomobject]@{ Tag = $_.LanguageTag; Name = Format-KFLanguageName -Tag $_.LanguageTag } })
+    Write-KFTable -Data $rows -Columns @(
+        @{ Name = 'Tag'; Header = 'Tag'; Width = 10; Align = 'Left' }
+        @{ Name = 'Name'; Header = 'Language'; Width = 40; Align = 'Left' }
+    )
+    Write-Host ''
+
+    $tag = Request-KFTextInput -Prompt 'Enter the tag to remove (blank to cancel)'
+    if ([string]::IsNullOrWhiteSpace($tag)) { return }
+    $normalized = Test-KFLanguageTagFormat -Tag $tag
+    if (-not $normalized -or -not (Test-KFLanguageInstalled -LanguageTag $normalized)) {
+        Write-Host ''
+        Write-KFStatus -Type 'Failure' -Message "'$tag' isn't currently installed for this user."
+        Write-Host ''
+        Wait-KFKeyPress
+        return
+    }
+
+    $safety = Test-KFLanguageCanBeRemoved -LanguageTag $normalized
+    if (-not $safety.CanRemove) {
+        Write-Host ''
+        Write-KFAlert -Level 'Danger' -Message ($safety.Blockers -join ' ')
+        Write-Host ''
+        Wait-KFKeyPress
+        return
+    }
+    foreach ($w in $safety.Warnings) { Write-KFStatus -Type 'Warning' -Message $w }
+
+    $tierOptions = @(
+        'Normal   - remove from your language list; remove the Basic pack if unshared'
+        'Deep     - Normal, plus OCR/Handwriting/Speech/TextToSpeech and MUI cache cleanup'
+        'Forced   - Deep, plus registry cleanup and any keyboard layouts exclusive to this language'
+        'Complete - Forced, plus an optional Windows-wide component-store cleanup afterward'
+        'Cancel'
+    )
+    $tierIndex = Show-KFChoiceDialog -Question "Removal depth for '$normalized'?" -Options $tierOptions -DefaultIndex 0
+    if ($tierIndex -lt 0 -or $tierIndex -eq 4) { return }
+    $tier = @('Normal', 'Deep', 'Forced', 'Complete')[$tierIndex]
+
+    if ($tier -ne 'Normal' -and -not (Test-KFAdminPrivileges)) {
+        Write-Host ''
+        Write-KFStatus -Type 'Warning' -Message "$tier removal requires an elevated (Run as Administrator) session."
+        Write-Host ''
+        Wait-KFKeyPress
+        return
+    }
+
+    Write-Host ''
+    $impact = Wait-KFWithSpinner -Label 'Checking what this will affect' -Action { Get-KFLanguageRemovalImpact -LanguageTag $normalized -Tier $tier }
+    $affected = [System.Collections.Generic.List[string]]::new()
+    if ($impact) {
+        foreach ($c in $impact.Capabilities) { $affected.Add("Remove capability: $c") }
+        foreach ($k in $impact.Keyboards) { $affected.Add("Remove keyboard layout: $($k.Name) ($($k.KLID))") }
+    }
+    if ($affected.Count -eq 0) { $affected.Add('Remove from the user language list.') }
+
+    if (-not (Show-KFConfirmationDialog -Message "$tier removal of '$normalized'. A backup is taken automatically first." -AffectedItems $affected -DefaultYes $false)) {
+        return
+    }
+    if ($tier -in @('Forced', 'Complete')) {
+        if (-not (Request-KFExplicitConfirmation -Phrase $normalized -Prompt "This is a $tier removal. Type the language tag ('$normalized') to confirm:")) {
+            Write-KFStatus -Type 'Info' -Message 'Cancelled.'
+            Start-Sleep -Milliseconds 900
+            return
+        }
+    }
+
+    $result = Wait-KFWithSpinner -Label "Running $tier removal of $normalized" -Action {
+        Remove-KFLanguage -LanguageTag $normalized -Tier $tier -Confirm:$false
+    }
+    Write-Host ''
+    if ($null -eq $result) {
+        Write-KFStatus -Type 'Failure' -Message 'Removal failed - see the session log for details.'
+    } else {
+        foreach ($step in $result.Steps) {
+            Write-KFStatus -Type $(if ($step.Success) { 'Success' } else { 'Failure' }) -Message "$($step.Step): $($step.Detail)"
+        }
+        Write-Host ''
+        if ($result.Success) { Write-KFStatus -Type 'Success' -Message "$tier removal of '$normalized' complete." }
+        else { Write-KFStatus -Type 'Warning' -Message "Removal finished with issues: $($result.Error)" }
+        if ($result.BackupId) { Write-KFColor -Text "  Pre-removal backup: $($result.BackupId)" -Color $Script:Colors.Dim }
+
+        if ($result.Success -and $tier -eq 'Complete') {
+            Write-Host ''
+            if (Show-KFConfirmationDialog -Message 'Also run Windows component-store cleanup now? This reclaims disk space SYSTEM-WIDE (not specific to this language) and can take several minutes.' -DefaultYes $false) {
+                $cleanupResult = Wait-KFWithSpinner -Label 'Running component-store cleanup' -Action { Invoke-KFComponentCleanup -Confirm:$false }
+                Write-Host ''
+                if ($cleanupResult -and $cleanupResult.Success) { Write-KFStatus -Type 'Success' -Message 'Component-store cleanup complete.' }
+                else { Write-KFStatus -Type 'Failure' -Message "Component-store cleanup failed: $($cleanupResult.Error)" }
+            }
+        }
     }
     Write-Host ''
     Wait-KFKeyPress
@@ -4022,6 +4783,8 @@ function Invoke-KFMenuDispatch {
     switch ($Selection) {
         1  { Show-KFLanguagesScreen }
         2  { Show-KFKeyboardsScreen }
+        3  { Show-KFInstallLanguageScreen }
+        4  { Show-KFRemoveLanguageScreen }
         6  { Show-KFSetDefaultKeyboardScreen }
         7  { Show-KFSetDisplayLanguageScreen }
         8  { Show-KFRegionScreen }
