@@ -876,8 +876,10 @@ function Get-KFUserLanguages {
         module. Used for dashboard-speed reads (no DISM round-trip).
     #>
     [CmdletBinding()]
-    param()
-    Get-KFCached -Key 'lang:user' -TtlSeconds 300 -Action {
+    param(
+        [switch]$Force
+    )
+    Get-KFCached -Key 'lang:user' -TtlSeconds 300 -Force:$Force -Action {
         try {
             Get-WinUserLanguageList -ErrorAction Stop
         } catch {
@@ -1102,6 +1104,996 @@ function Get-KFTimeZoneInfo {
             [pscustomobject]@{ Id = 'Unknown'; DisplayName = 'Unknown'; UtcOffset = '+00:00' }
         }
     }
+}
+
+#endregion ==================================================================
+
+#region ============================== REGISTRY HANDLER MODULE =================
+#
+# Every write-capable module in Phase 3 goes through this layer. Two
+# deliberate departures from the original spec's literal wording, both
+# safety-motivated:
+#
+#  1. "Backup-RegistryHive" in the spec really means "protect the specific
+#     subtree we're about to touch." A literal hive-level save/restore
+#     (reg.exe SAVE/RESTORE) needs SeBackupPrivilege/SeRestorePrivilege and
+#     only works against certain loaded root keys - it's the wrong tool for
+#     KeyForge, which only ever touches a handful of well-known subtrees
+#     (Keyboard Layouts, Control Panel\International, Nls\Language Groups).
+#     `reg export` / `reg import` against those specific paths is safe,
+#     always available to an admin, and protects exactly what KeyForge is
+#     about to change - so that's what Backup-KFRegistryKey/Restore-KFRegistryKey
+#     do.
+#
+#  2. WOW64 redirection only applies to HKLM\SOFTWARE and HKEY_CLASSES_ROOT.
+#     None of KeyForge's actual registry targets live under those paths -
+#     they're all under HKLM\SYSTEM\CurrentControlSet\Control, which is NOT
+#     redirected. Get-KFRegistryView is included for completeness/future use
+#     against SOFTWARE keys, but WOW64 handling is intentionally minimal here
+#     because it doesn't apply to anything KeyForge currently reads or writes.
+#
+
+function Test-KFRegistryPathSafety {
+    <#
+    .SYNOPSIS
+        Guardrail checked before ANY write/delete operation. Rejects paths
+        that are malformed, are a bare hive root, or fall under a small
+        denylist of paths KeyForge must never modify regardless of caller.
+    .OUTPUTS
+        [pscustomobject] @{ Safe; Reason }
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return [pscustomobject]@{ Safe = $false; Reason = 'Path is empty.' }
+    }
+    if ($Path -notmatch '^(HKLM|HKCU|HKU|HKCR|HKCC):\\') {
+        return [pscustomobject]@{ Safe = $false; Reason = "Path must start with a recognized hive drive (HKLM:\, HKCU:\, HKU:\, HKCR:\, HKCC:\)." }
+    }
+    $depth = ($Path -split '\\' | Where-Object { $_ -ne '' }).Count
+    if ($depth -le 1) {
+        return [pscustomobject]@{ Safe = $false; Reason = 'Refusing to operate on a bare hive root - path must point at a specific subkey.' }
+    }
+
+    $denylist = @(
+        'HKLM:\SAM'
+        'HKLM:\SECURITY'
+        'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
+        'HKLM:\SYSTEM\CurrentControlSet\Services'
+        'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+        'HKCU:\Software\Classes'
+    )
+    foreach ($denied in $denylist) {
+        if ($Path -eq $denied -or $Path.StartsWith("$denied\", [StringComparison]::OrdinalIgnoreCase)) {
+            return [pscustomobject]@{ Safe = $false; Reason = "'$Path' falls under a protected path KeyForge will not modify ($denied)." }
+        }
+    }
+    return [pscustomobject]@{ Safe = $true; Reason = 'OK' }
+}
+
+function Get-KFRegistryView {
+    <#
+    .SYNOPSIS
+        Reports process/OS bitness. WOW64 redirection only affects
+        HKLM\SOFTWARE and HKCR, which none of KeyForge's current targets use -
+        see the module header. Kept for future modules that may need it.
+    #>
+    [CmdletBinding()]
+    param()
+    [pscustomobject]@{
+        ProcessIs64Bit = [System.Environment]::Is64BitProcess
+        OSIs64Bit      = [System.Environment]::Is64BitOperatingSystem
+        IsWow64        = (-not [System.Environment]::Is64BitProcess) -and [System.Environment]::Is64BitOperatingSystem
+    }
+}
+
+function Get-KFRegValue {
+    <#
+    .SYNOPSIS
+        Reads a single registry value. Never throws - missing keys/values
+        return $null via .Success = $false rather than a terminating error.
+    .OUTPUTS
+        [pscustomobject] @{ Success; Value; Error }
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [string]$Name
+    )
+    $outcome = Invoke-KFSafe -Context "Get-KFRegValue:$Path\$Name" -Silent -Action {
+        Get-ItemPropertyValue -LiteralPath $Path -Name $Name -ErrorAction Stop
+    }
+    [pscustomobject]@{ Success = $outcome.Success; Value = $outcome.Result; Error = $outcome.Error }
+}
+
+function Get-KFRegKey {
+    <#
+    .SYNOPSIS
+        Lists subkeys under a path, optionally recursive and/or filtered.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [switch]$Recurse,
+
+        [string]$Filter
+    )
+    $outcome = Invoke-KFSafe -Context "Get-KFRegKey:$Path" -Silent -Action {
+        $items = Get-ChildItem -LiteralPath $Path -Recurse:$Recurse -ErrorAction Stop
+        if ($Filter) { $items = $items | Where-Object { (Split-Path -Leaf $_.PSPath) -like $Filter } }
+        $items
+    }
+    if ($outcome.Success) { return @($outcome.Result) }
+    Write-LogEntry -Level 'Debug' -Message "Get-KFRegKey failed for '$Path': $($outcome.Error)"
+    return @()
+}
+
+function Export-KFRegKey {
+    <#
+    .SYNOPSIS
+        Exports a registry key tree to a .reg file via reg.exe (the only
+        tool that produces the standard, re-importable .reg format).
+    .OUTPUTS
+        [pscustomobject] @{ Success; DestinationPath; Error }
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [string]$DestinationPath
+    )
+    $safety = Test-KFRegistryPathSafety -Path $Path
+    if (-not $safety.Safe) {
+        return [pscustomobject]@{ Success = $false; DestinationPath = $null; Error = $safety.Reason }
+    }
+    if (-not (Test-KFRegistryKeyExists -Path $Path)) {
+        # Nothing to export is not a failure - the key simply doesn't exist
+        # yet (common for e.g. per-user keys that haven't been created).
+        return [pscustomobject]@{ Success = $true; DestinationPath = $null; Error = 'Key does not exist - nothing to export.' }
+    }
+
+    # reg.exe wants "HKLM\Path\To\Key" (backslash-hive, no PSDrive colon).
+    $regPath = $Path -replace '^HKLM:', 'HKLM' -replace '^HKCU:', 'HKCU' -replace '^HKU:', 'HKU' -replace '^HKCR:', 'HKCR' -replace '^HKCC:', 'HKCC'
+
+    $outcome = Invoke-KFSafe -Context "Export-KFRegKey:$Path" -Action {
+        $destDir = Split-Path -Parent $DestinationPath
+        if ($destDir -and -not (Test-Path -LiteralPath $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
+        $result = & reg.exe export "$regPath" "$DestinationPath" /y 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw [RegistryAccessException]::new("reg.exe export exited with code $LASTEXITCODE for '$Path': $result")
+        }
+    }
+    [pscustomobject]@{ Success = $outcome.Success; DestinationPath = $(if ($outcome.Success) { $DestinationPath } else { $null }); Error = $outcome.Error }
+}
+
+function Import-KFRegFile {
+    <#
+    .SYNOPSIS
+        Imports a previously-exported .reg file via reg.exe. Internal
+        primitive used by Restore-KFRegistryKey - not exposed on the menu
+        directly, since importing an arbitrary .reg file bypasses KeyForge's
+        own path-safety checks (the exporting side already validated them).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$SourcePath
+    )
+    if (-not (Test-Path -LiteralPath $SourcePath)) {
+        return [pscustomobject]@{ Success = $false; Error = "Backup file not found: $SourcePath" }
+    }
+    $outcome = Invoke-KFSafe -Context "Import-KFRegFile:$SourcePath" -Action {
+        $result = & reg.exe import "$SourcePath" 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw [RegistryAccessException]::new("reg.exe import exited with code $LASTEXITCODE for '$SourcePath': $result")
+        }
+    }
+    [pscustomobject]@{ Success = $outcome.Success; Error = $outcome.Error }
+}
+
+function Set-KFRegValue {
+    <#
+    .SYNOPSIS
+        Creates or updates a registry value, auto-backing up the containing
+        key first (via Export-KFRegKey) so the caller always has a rollback
+        path. Refuses to run against anything Test-KFRegistryPathSafety flags.
+    .OUTPUTS
+        [pscustomobject] @{ Success; PreviousValue; BackupPath; Error }
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [string]$Name,
+
+        [Parameter(Mandatory)]
+        [object]$Value,
+
+        [ValidateSet('String', 'ExpandString', 'DWord', 'QWord', 'Binary', 'MultiString')]
+        [string]$Type = 'String'
+    )
+    $safety = Test-KFRegistryPathSafety -Path $Path
+    if (-not $safety.Safe) {
+        return [pscustomobject]@{ Success = $false; PreviousValue = $null; BackupPath = $null; Error = $safety.Reason }
+    }
+    if (-not $PSCmdlet.ShouldProcess("$Path\$Name", "Set to '$Value' ($Type)")) {
+        return [pscustomobject]@{ Success = $false; PreviousValue = $null; BackupPath = $null; Error = 'Cancelled (ShouldProcess).' }
+    }
+
+    $previous = Get-KFRegValue -Path $Path -Name $Name
+    $backupPath = Join-Path $Script:Paths.Backups "regvalue_$(Split-Path -Leaf $Path)_$(Get-Date -Format 'yyyyMMdd-HHmmss').reg"
+    $backupResult = Export-KFRegKey -Path $Path -DestinationPath $backupPath
+
+    $outcome = Invoke-KFSafe -Context "Set-KFRegValue:$Path\$Name" -Action {
+        if (-not (Test-Path -LiteralPath $Path)) {
+            New-Item -ItemType Directory -Path $Path -Force -ErrorAction Stop | Out-Null
+        }
+        New-ItemProperty -LiteralPath $Path -Name $Name -Value $Value -PropertyType $Type -Force -ErrorAction Stop | Out-Null
+    }
+
+    [pscustomobject]@{
+        Success       = $outcome.Success
+        PreviousValue = $(if ($previous.Success) { $previous.Value } else { $null })
+        BackupPath    = $(if ($backupResult.Success) { $backupResult.DestinationPath } else { $null })
+        Error         = $outcome.Error
+    }
+}
+
+function New-KFRegKey {
+    <#
+    .SYNOPSIS
+        Creates a registry key, including any missing parent keys.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+    $safety = Test-KFRegistryPathSafety -Path $Path
+    if (-not $safety.Safe) {
+        return [pscustomobject]@{ Success = $false; Error = $safety.Reason }
+    }
+    if (Test-KFRegistryKeyExists -Path $Path) {
+        return [pscustomobject]@{ Success = $true; Error = 'Key already exists.' }
+    }
+    if (-not $PSCmdlet.ShouldProcess($Path, 'Create registry key')) {
+        return [pscustomobject]@{ Success = $false; Error = 'Cancelled (ShouldProcess).' }
+    }
+    $outcome = Invoke-KFSafe -Context "New-KFRegKey:$Path" -Action {
+        New-Item -ItemType Directory -Path $Path -Force -ErrorAction Stop | Out-Null
+    }
+    [pscustomobject]@{ Success = $outcome.Success; Error = $outcome.Error }
+}
+
+function Remove-KFRegKey {
+    <#
+    .SYNOPSIS
+        Deletes a registry key tree, backing it up first via Export-KFRegKey
+        so it can be restored with Restore-KFRegistryKey. Refuses to run
+        against anything Test-KFRegistryPathSafety flags.
+    .OUTPUTS
+        [pscustomobject] @{ Success; BackupPath; Error }
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+    $safety = Test-KFRegistryPathSafety -Path $Path
+    if (-not $safety.Safe) {
+        return [pscustomobject]@{ Success = $false; BackupPath = $null; Error = $safety.Reason }
+    }
+    if (-not (Test-KFRegistryKeyExists -Path $Path)) {
+        return [pscustomobject]@{ Success = $true; BackupPath = $null; Error = 'Key did not exist - nothing to remove.' }
+    }
+    if (-not $PSCmdlet.ShouldProcess($Path, 'Delete registry key tree')) {
+        return [pscustomobject]@{ Success = $false; BackupPath = $null; Error = 'Cancelled (ShouldProcess).' }
+    }
+
+    $backupPath = Join-Path $Script:Paths.Backups "regkey_$(Split-Path -Leaf $Path)_$(Get-Date -Format 'yyyyMMdd-HHmmss').reg"
+    $backupResult = Export-KFRegKey -Path $Path -DestinationPath $backupPath
+    if (-not $backupResult.Success) {
+        return [pscustomobject]@{ Success = $false; BackupPath = $null; Error = "Refusing to delete without a successful backup: $($backupResult.Error)" }
+    }
+
+    $outcome = Invoke-KFSafe -Context "Remove-KFRegKey:$Path" -Action {
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $Path) {
+            throw [OperationFailedException]::new("'$Path' still exists after deletion attempt.")
+        }
+    }
+    [pscustomobject]@{ Success = $outcome.Success; BackupPath = $backupResult.DestinationPath; Error = $outcome.Error }
+}
+
+function Backup-KFRegistryKey {
+    <#
+    .SYNOPSIS
+        Protects a specific registry subtree before KeyForge modifies it.
+        See the module header for why this targets a subtree rather than a
+        literal hive.
+    .OUTPUTS
+        [pscustomobject] @{ Success; BackupPath; ItemCount; Error }
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [string]$Label = (Split-Path -Leaf $Path)
+    )
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $safeLabel = ($Label -replace '[^A-Za-z0-9_-]', '_')
+    $dest = Join-Path $Script:Paths.Backups "regkey_${safeLabel}_$stamp.reg"
+
+    $result = Export-KFRegKey -Path $Path -DestinationPath $dest
+    $itemCount = (Get-KFRegKey -Path $Path -Recurse).Count
+
+    [pscustomobject]@{
+        Success    = $result.Success
+        BackupPath = $result.DestinationPath
+        ItemCount  = $itemCount
+        Error      = $result.Error
+    }
+}
+
+function Restore-KFRegistryKey {
+    <#
+    .SYNOPSIS
+        Restores a subtree from a .reg file created by Backup-KFRegistryKey.
+        Takes a safety backup of the CURRENT state first, so a bad restore
+        is itself reversible, then imports and verifies.
+    .OUTPUTS
+        [pscustomobject] @{ Success; SafetyBackupPath; Error }
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$BackupFilePath,
+
+        [Parameter(Mandatory)]
+        [string]$TargetPath
+    )
+    if (-not (Test-Path -LiteralPath $BackupFilePath)) {
+        return [pscustomobject]@{ Success = $false; SafetyBackupPath = $null; Error = "Backup file not found: $BackupFilePath" }
+    }
+    if (-not $PSCmdlet.ShouldProcess($TargetPath, "Restore from $BackupFilePath")) {
+        return [pscustomobject]@{ Success = $false; SafetyBackupPath = $null; Error = 'Cancelled (ShouldProcess).' }
+    }
+
+    $safety = Backup-KFRegistryKey -Path $TargetPath -Label "prerestore_$(Split-Path -Leaf $TargetPath)"
+    if (-not $safety.Success -and (Test-KFRegistryKeyExists -Path $TargetPath)) {
+        return [pscustomobject]@{ Success = $false; SafetyBackupPath = $null; Error = "Refusing to restore without a pre-restore safety backup: $($safety.Error)" }
+    }
+
+    $importResult = Import-KFRegFile -SourcePath $BackupFilePath
+    [pscustomobject]@{
+        Success          = $importResult.Success
+        SafetyBackupPath = $safety.BackupPath
+        Error            = $importResult.Error
+    }
+}
+
+function Get-KFRegistrySize {
+    <#
+    .SYNOPSIS
+        Approximates the "size" of a registry subtree as (subkey count,
+        value count, total string-representable value bytes). Not a byte-
+        exact hive size - Windows doesn't expose one per-subtree - but a
+        useful relative measure for backup/diagnostics display.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+    $outcome = Invoke-KFSafe -Context "Get-KFRegistrySize:$Path" -Silent -Action {
+        $keys = @(Get-ChildItem -LiteralPath $Path -Recurse -ErrorAction Stop)
+        $valueCount = 0
+        $byteEstimate = 0L
+        foreach ($k in (@($Path) + @($keys.PSPath))) {
+            try {
+                $props = Get-ItemProperty -LiteralPath $k -ErrorAction Stop
+                $names = @($props.PSObject.Properties.Name | Where-Object { $_ -notmatch '^PS(Path|ParentPath|ChildName|Provider|Drive)$' })
+                $valueCount += $names.Count
+                foreach ($n in $names) {
+                    $v = $props.$n
+                    $byteEstimate += [System.Text.Encoding]::Unicode.GetByteCount([string]$v)
+                }
+            } catch { continue }
+        }
+        [pscustomobject]@{ SubkeyCount = $keys.Count; ValueCount = $valueCount; EstimatedBytes = $byteEstimate }
+    }
+    if ($outcome.Success) { return $outcome.Result }
+    [pscustomobject]@{ SubkeyCount = 0; ValueCount = 0; EstimatedBytes = 0L }
+}
+
+#endregion ==================================================================
+
+#region ============================== KEYBOARD MANAGER (SAFE SUBSET) ==========
+#
+# Add/Remove/Replace/Duplicate keyboard layout and ghost-layout repair need
+# the full Keyboard Manager module (next phase - they touch IME registration
+# and orphan cleanup, which deserve dedicated review). Reordering which
+# ALREADY-INSTALLED layout loads first is pure Preload-list registry work
+# with no IME/capability risk, so it's safe to ship now.
+#
+
+function Set-KFDefaultKeyboard {
+    <#
+    .SYNOPSIS
+        Makes an already-loaded keyboard layout the default (Preload entry
+        "1") for the current user, shifting the others down by one slot.
+        Only reorders layouts already in the user's Preload list - it does
+        not add a new layout (that's Add-KeyboardLayout, next phase).
+    .OUTPUTS
+        [pscustomobject] @{ Success; BackupPath; Error }
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$KLID
+    )
+    if (-not (Test-KFKlidFormat -Klid $KLID)) {
+        return [pscustomobject]@{ Success = $false; BackupPath = $null; Error = "'$KLID' is not a valid 8-character hex KLID." }
+    }
+
+    $current = @(Get-KFInstalledKeyboards -Force)
+    $target = $current | Where-Object { $_.KLID -eq $KLID } | Select-Object -First 1
+    if (-not $target) {
+        return [pscustomobject]@{ Success = $false; BackupPath = $null; Error = "KLID '$KLID' was not found among installed layouts." }
+    }
+    if (-not $target.Loaded) {
+        return [pscustomobject]@{ Success = $false; BackupPath = $null; Error = "'$($target.Name)' is installed but not loaded for the current user - loading a new layout is a Phase 3.4 (Add-KeyboardLayout) operation, not a reorder." }
+    }
+    if ($target.PreloadOrder -eq 1) {
+        return [pscustomobject]@{ Success = $true; BackupPath = $null; Error = "'$($target.Name)' is already the default." }
+    }
+    if (-not $PSCmdlet.ShouldProcess('Preload', "Make '$($target.Name)' ($KLID) the default keyboard")) {
+        return [pscustomobject]@{ Success = $false; BackupPath = $null; Error = 'Cancelled (ShouldProcess).' }
+    }
+
+    $backup = Backup-KFRegistryKey -Path $Script:RegistryPaths.Preload -Label 'preload'
+    if (-not $backup.Success) {
+        return [pscustomobject]@{ Success = $false; BackupPath = $null; Error = "Refusing to reorder without a successful backup: $($backup.Error)" }
+    }
+
+    $outcome = Invoke-KFSafe -Context 'Set-KFDefaultKeyboard' -Action {
+        # Rebuild the ordered list with $KLID first, everything else
+        # following in its existing relative order, renumbered 1..N.
+        $loaded = @($current | Where-Object { $_.Loaded } | Sort-Object PreloadOrder)
+        $reordered = @($target) + @($loaded | Where-Object { $_.KLID -ne $KLID })
+
+        for ($i = 0; $i -lt $reordered.Count; $i++) {
+            $slot = ($i + 1).ToString()
+            Set-ItemProperty -LiteralPath $Script:RegistryPaths.Preload -Name $slot -Value $reordered[$i].KLID -Type String -ErrorAction Stop
+        }
+    }
+
+    Clear-KFCache -Prefix 'kbd:'
+    Clear-KFCache -Prefix 'dashboard:'
+    [pscustomobject]@{ Success = $outcome.Success; BackupPath = $backup.BackupPath; Error = $outcome.Error }
+}
+
+#endregion ==================================================================
+
+#region ============================== REGION & LOCALE MODULE (WRITE) ==========
+
+function Get-KFAvailableRegions {
+    <#
+    .SYNOPSIS
+        All GeoIDs/region names .NET knows about, for the region picker.
+    #>
+    [CmdletBinding()]
+    param()
+    Get-KFCached -Key 'region:available' -TtlSeconds 3600 -Action {
+        $outcome = Invoke-KFSafe -Context 'Get-KFAvailableRegions' -Silent -Action {
+            [System.Globalization.CultureInfo]::GetCultures([System.Globalization.CultureTypes]::SpecificCultures) |
+                Where-Object { $_.Name -match '-' } |
+                ForEach-Object {
+                    try {
+                        $ri = [System.Globalization.RegionInfo]::new($_.Name)
+                        [pscustomobject]@{ GeoId = $ri.GeoId; Name = $ri.EnglishName; TwoLetterCode = $ri.TwoLetterISORegionName }
+                    } catch { $null }
+                } | Where-Object { $_ } | Sort-Object Name -Unique
+        }
+        if ($outcome.Success) { $outcome.Result } else { @() }
+    }
+}
+
+function Set-KFRegion {
+    <#
+    .SYNOPSIS
+        Sets the current user's home location (region) by GeoID, via the
+        real Set-WinHomeLocation cmdlet - no registry surgery needed here,
+        which is why this doesn't go through Backup-KFRegistryKey: the
+        cmdlet itself is the safe, supported, atomic way to make this change.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [int]$GeoId
+    )
+    if (-not $PSCmdlet.ShouldProcess('User home location', "Set GeoID to $GeoId")) {
+        return [pscustomobject]@{ Success = $false; Error = 'Cancelled (ShouldProcess).' }
+    }
+    $outcome = Invoke-KFSafe -Context 'Set-KFRegion' -Action {
+        Set-WinHomeLocation -GeoId $GeoId -ErrorAction Stop
+    }
+    Clear-KFCache -Prefix 'region:'
+    Clear-KFCache -Prefix 'dashboard:'
+    [pscustomobject]@{ Success = $outcome.Success; Error = $outcome.Error }
+}
+
+function Set-KFSystemLocale {
+    <#
+    .SYNOPSIS
+        Sets the system locale (used for non-Unicode program language) via
+        Set-WinSystemLocale. This is a machine-wide setting and typically
+        requires a restart to fully take effect - callers should say so.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$LanguageTag
+    )
+    $normalized = Test-KFLanguageTagFormat -Tag $LanguageTag
+    if (-not $normalized) {
+        return [pscustomobject]@{ Success = $false; RequiresRestart = $false; Error = "'$LanguageTag' is not a recognizable language tag." }
+    }
+    if (-not (Test-KFAdminPrivileges)) {
+        return [pscustomobject]@{ Success = $false; RequiresRestart = $false; Error = 'Changing the system locale requires an elevated (Run as Administrator) session.' }
+    }
+    if (-not $PSCmdlet.ShouldProcess('System locale', "Set to $normalized")) {
+        return [pscustomobject]@{ Success = $false; RequiresRestart = $false; Error = 'Cancelled (ShouldProcess).' }
+    }
+    $outcome = Invoke-KFSafe -Context 'Set-KFSystemLocale' -Action {
+        Set-WinSystemLocale -SystemLocale $normalized -ErrorAction Stop
+    }
+    Clear-KFCache -Prefix 'locale:'
+    Clear-KFCache -Prefix 'dashboard:'
+    [pscustomobject]@{ Success = $outcome.Success; RequiresRestart = $outcome.Success; Error = $outcome.Error }
+}
+
+function Set-KFUserLocale {
+    <#
+    .SYNOPSIS
+        Sets the per-user locale (formats: dates, times, numbers, currency)
+        via Set-Culture. Takes effect for new processes/after sign-out,
+        immediately for KeyForge's own subsequent reads.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$LanguageTag
+    )
+    $normalized = Test-KFLanguageTagFormat -Tag $LanguageTag
+    if (-not $normalized) {
+        return [pscustomobject]@{ Success = $false; Error = "'$LanguageTag' is not a recognizable language tag." }
+    }
+    if (-not $PSCmdlet.ShouldProcess('User locale (formats)', "Set to $normalized")) {
+        return [pscustomobject]@{ Success = $false; Error = 'Cancelled (ShouldProcess).' }
+    }
+    $outcome = Invoke-KFSafe -Context 'Set-KFUserLocale' -Action {
+        Set-Culture -CultureInfo $normalized -ErrorAction Stop
+    }
+    Clear-KFCache -Prefix 'locale:'
+    Clear-KFCache -Prefix 'region:'
+    Clear-KFCache -Prefix 'dashboard:'
+    [pscustomobject]@{ Success = $outcome.Success; Error = $outcome.Error }
+}
+
+function Set-KFDisplayLanguage {
+    <#
+    .SYNOPSIS
+        Sets the UI display language for the current user. Deliberately
+        restricted to languages ALREADY present in the user's language list
+        (matches the original spec: "Only safe if installed") - installing a
+        new display language is a Language Manager (Phase 3, next pass)
+        operation, not this function's job.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$LanguageTag
+    )
+    $normalized = Test-KFLanguageTagFormat -Tag $LanguageTag
+    if (-not $normalized) {
+        return [pscustomobject]@{ Success = $false; Error = "'$LanguageTag' is not a recognizable language tag." }
+    }
+    $userLangs = @(Get-KFUserLanguages)
+    $match = $userLangs | Where-Object { $_.LanguageTag -eq $normalized } | Select-Object -First 1
+    if (-not $match) {
+        return [pscustomobject]@{ Success = $false; Error = "'$normalized' is not in the current user's language list. Installing a new display language isn't available in this build - see 'Install New Language' in the menu for its status." }
+    }
+    if (-not $PSCmdlet.ShouldProcess('Display language', "Set to $normalized")) {
+        return [pscustomobject]@{ Success = $false; Error = 'Cancelled (ShouldProcess).' }
+    }
+
+    $outcome = Invoke-KFSafe -Context 'Set-KFDisplayLanguage' -Action {
+        $list = Get-WinUserLanguageList -ErrorAction Stop
+        $entry = $list | Where-Object { $_.LanguageTag -eq $normalized } | Select-Object -First 1
+        if (-not $entry) { throw [OperationFailedException]::new("'$normalized' disappeared from the language list between check and apply.") }
+        # Move the target language to the front of the list - the first
+        # entry in a Set-WinUserLanguageList call becomes the display language.
+        $reordered = @($entry) + @($list | Where-Object { $_.LanguageTag -ne $normalized })
+        Set-WinUserLanguageList -LanguageList $reordered -Force -ErrorAction Stop
+    }
+    Clear-KFCache -Prefix 'lang:'
+    Clear-KFCache -Prefix 'locale:'
+    Clear-KFCache -Prefix 'dashboard:'
+    [pscustomobject]@{ Success = $outcome.Success; Error = $outcome.Error }
+}
+
+function Set-KFTimeZone {
+    <#
+    .SYNOPSIS
+        Sets the system time zone via the real Set-TimeZone cmdlet.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Id
+    )
+    if (-not (Test-KFAdminPrivileges)) {
+        return [pscustomobject]@{ Success = $false; Error = 'Changing the time zone requires an elevated (Run as Administrator) session.' }
+    }
+    if (-not $PSCmdlet.ShouldProcess('System time zone', "Set to $Id")) {
+        return [pscustomobject]@{ Success = $false; Error = 'Cancelled (ShouldProcess).' }
+    }
+    $outcome = Invoke-KFSafe -Context 'Set-KFTimeZone' -Action {
+        Set-TimeZone -Id $Id -ErrorAction Stop
+    }
+    Clear-KFCache -Prefix 'tz:'
+    Clear-KFCache -Prefix 'dashboard:'
+    [pscustomobject]@{ Success = $outcome.Success; Error = $outcome.Error }
+}
+
+function Get-KFAvailableTimeZones {
+    [CmdletBinding()]
+    param()
+    Get-KFCached -Key 'tz:available' -TtlSeconds 3600 -Action {
+        $outcome = Invoke-KFSafe -Context 'Get-KFAvailableTimeZones' -Silent -Action { Get-TimeZone -ListAvailable -ErrorAction Stop }
+        if ($outcome.Success) {
+            @($outcome.Result | ForEach-Object { [pscustomobject]@{ Id = $_.Id; DisplayName = $_.DisplayName } } | Sort-Object DisplayName)
+        } else { @() }
+    }
+}
+
+function Set-KFRegionalFormat {
+    <#
+    .SYNOPSIS
+        Sets one custom format override (short date / long date / short
+        time / decimal separator / thousands separator) for the current
+        user via the documented Control Panel\International registry
+        values .NET's CultureInfo reads from. Each change is backed up
+        through Set-KFRegValue automatically.
+    .PARAMETER Field
+        One of: ShortDate, LongDate, TimeFormat, DecimalSeparator, ThousandsSeparator
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('ShortDate', 'LongDate', 'TimeFormat', 'DecimalSeparator', 'ThousandsSeparator')]
+        [string]$Field,
+
+        [Parameter(Mandatory)]
+        [string]$Value
+    )
+    $valueName = switch ($Field) {
+        'ShortDate'          { 'sShortDate' }
+        'LongDate'           { 'sLongDate' }
+        'TimeFormat'         { 'sTimeFormat' }
+        'DecimalSeparator'   { 'sDecimal' }
+        'ThousandsSeparator' { 'sThousand' }
+    }
+    if (-not $PSCmdlet.ShouldProcess("International\$valueName", "Set to '$Value'")) {
+        return [pscustomobject]@{ Success = $false; Error = 'Cancelled (ShouldProcess).' }
+    }
+    $result = Set-KFRegValue -Path $Script:RegistryPaths.IntlUserProfile -Name $valueName -Value $Value -Type String
+    Clear-KFCache -Prefix 'region:detail'
+    Clear-KFCache -Prefix 'locale:'
+    [pscustomobject]@{ Success = $result.Success; PreviousValue = $result.PreviousValue; BackupPath = $result.BackupPath; Error = $result.Error }
+}
+
+#endregion ==================================================================
+
+#region ============================== BACKUP & RESTORE MODULE =================
+#
+# A KeyForge "backup" is a folder under Backups\<id>\ containing:
+#   manifest.json          - what's inside, when, KeyForge version, checksums
+#   registry\*.reg          - one .reg export per protected subtree
+#   state.json              - JSON snapshot of languages/keyboards/region/locale
+#     (read-only data straight from the Phase 1/2 query layer, so it's
+#      always accurate to what Get-KFAllInstalledLanguages etc. would show)
+#
+# Restoring language INSTALL state (installing missing / removing unwanted
+# languages to match a snapshot) needs Install-Language/Remove-Language from
+# the Language Manager module (next phase) and is flagged as such below -
+# everything else in a snapshot (registry subtrees, keyboard preload order,
+# region/locale/timezone settings) restores fully today.
+#
+
+$Script:BackupRegistryTargets = [ordered]@{
+    KeyboardLayouts  = $Script:RegistryPaths.KeyboardLayouts
+    Preload          = $Script:RegistryPaths.Preload
+    Substitutes      = $Script:RegistryPaths.Substitutes
+    ToggleKeys       = $Script:RegistryPaths.ToggleKeys
+    IntlUserProfile  = $Script:RegistryPaths.IntlUserProfile
+}
+
+function Get-KFFileHashSafe {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+    $outcome = Invoke-KFSafe -Context 'Get-KFFileHashSafe' -Silent -Action {
+        (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash
+    }
+    if ($outcome.Success) { return $outcome.Result }
+    return $null
+}
+
+function New-KFBackup {
+    <#
+    .SYNOPSIS
+        Creates a new, empty, timestamped backup container and returns its
+        paths. Internal primitive used by Backup-KFSystemState.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Note = ''
+    )
+    $id = "backup_$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+    $root = Join-Path $Script:Paths.Backups $id
+    $regDir = Join-Path $root 'registry'
+    New-Item -ItemType Directory -Path $regDir -Force -ErrorAction Stop | Out-Null
+    [pscustomobject]@{
+        Id           = $id
+        RootPath     = $root
+        RegistryPath = $regDir
+        ManifestPath = Join-Path $root 'manifest.json'
+        StatePath    = Join-Path $root 'state.json'
+        Note         = $Note
+    }
+}
+
+function Backup-KFSystemState {
+    <#
+    .SYNOPSIS
+        Full KeyForge backup: exports every protected registry subtree and
+        snapshots current language/keyboard/region/locale/timezone state,
+        writing a manifest with per-file SHA-256 checksums for later
+        integrity verification.
+    .OUTPUTS
+        [pscustomobject] @{ Success; BackupId; Path; Error }
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Note = ''
+    )
+    $container = New-KFBackup -Note $Note
+    $registryResults = [ordered]@{}
+    $allOk = $true
+
+    foreach ($key in $Script:BackupRegistryTargets.Keys) {
+        $dest = Join-Path $container.RegistryPath "$key.reg"
+        $result = Export-KFRegKey -Path $Script:BackupRegistryTargets[$key] -DestinationPath $dest
+        $registryResults[$key] = [ordered]@{
+            Path   = $(if ($result.Success -and $result.DestinationPath) { "registry\$key.reg" } else { $null })
+            Sha256 = $(if ($result.Success -and $result.DestinationPath) { Get-KFFileHashSafe -Path $result.DestinationPath } else { $null })
+            Error  = $result.Error
+        }
+        if (-not $result.Success) { $allOk = $false }
+    }
+
+    $stateOutcome = Invoke-KFSafe -Context 'Backup-KFSystemState:state' -Action {
+        [pscustomobject]@{
+            CapturedAt = (Get-Date).ToString('u')
+            Languages  = Get-KFAllInstalledLanguages -Force
+            Keyboards  = Get-KFInstalledKeyboards -Force
+            Region     = Get-KFRegionDetail
+            Locale     = Get-KFLocaleInfo
+            TimeZone   = Get-KFTimeZoneInfo
+        }
+    }
+    if ($stateOutcome.Success) {
+        try {
+            ($stateOutcome.Result | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $container.StatePath -Encoding UTF8 -ErrorAction Stop
+        } catch {
+            $allOk = $false
+            Write-ExceptionLog -ErrorRecord $_ -Context 'Backup-KFSystemState:state-write'
+        }
+    } else {
+        $allOk = $false
+    }
+    $stateHash = if (Test-Path -LiteralPath $container.StatePath) { Get-KFFileHashSafe -Path $container.StatePath } else { $null }
+
+    $manifest = [ordered]@{
+        BackupId       = $container.Id
+        CreatedAt      = (Get-Date).ToString('u')
+        KeyForgeVersion = $Script:Meta.Version
+        Note           = $Note
+        Registry       = $registryResults
+        State          = [ordered]@{ Path = 'state.json'; Sha256 = $stateHash }
+        AllComponentsOk = $allOk
+    }
+    try {
+        ($manifest | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $container.ManifestPath -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        Write-ExceptionLog -ErrorRecord $_ -Context 'Backup-KFSystemState:manifest-write'
+        return [pscustomobject]@{ Success = $false; BackupId = $container.Id; Path = $container.RootPath; Error = "Could not write manifest: $($_.Exception.Message)" }
+    }
+
+    Write-LogEntry -Level 'Info' -Message "Backup '$($container.Id)' created (allComponentsOk=$allOk) at $($container.RootPath)"
+    [pscustomobject]@{ Success = $allOk; BackupId = $container.Id; Path = $container.RootPath; Error = $(if (-not $allOk) { 'One or more components failed - see manifest.json for details.' } else { $null }) }
+}
+
+function Get-KFBackupList {
+    <#
+    .SYNOPSIS
+        Lists available backups (newest first) with manifest metadata.
+    #>
+    [CmdletBinding()]
+    param()
+    if (-not (Test-Path -LiteralPath $Script:Paths.Backups)) { return @() }
+
+    $entries = [System.Collections.Generic.List[pscustomobject]]::new()
+    $dirs = Get-ChildItem -LiteralPath $Script:Paths.Backups -Directory -ErrorAction SilentlyContinue
+    foreach ($dir in $dirs) {
+        $manifestPath = Join-Path $dir.FullName 'manifest.json'
+        if (-not (Test-Path -LiteralPath $manifestPath)) { continue }
+        $parsed = Invoke-KFSafe -Context "Get-KFBackupList:$($dir.Name)" -Silent -Action {
+            Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json
+        }
+        if (-not $parsed.Success) { continue }
+        $size = (Get-ChildItem -LiteralPath $dir.FullName -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+        $entries.Add([pscustomobject]@{
+            BackupId  = $parsed.Result.BackupId
+            Path      = $dir.FullName
+            CreatedAt = $parsed.Result.CreatedAt
+            Note      = $parsed.Result.Note
+            AllOk     = $parsed.Result.AllComponentsOk
+            SizeBytes = $(if ($size) { $size } else { 0 })
+            Manifest  = $parsed.Result
+        })
+    }
+    return @($entries | Sort-Object CreatedAt -Descending)
+}
+
+function Test-KFBackupIntegrity {
+    <#
+    .SYNOPSIS
+        Re-hashes every file listed in a backup's manifest and compares
+        against the recorded SHA-256, catching truncated/corrupted backups
+        before a restore is attempted.
+    .OUTPUTS
+        [pscustomobject] @{ Valid; Issues }
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$BackupPath
+    )
+    $manifestPath = Join-Path $BackupPath 'manifest.json'
+    if (-not (Test-Path -LiteralPath $manifestPath)) {
+        return [pscustomobject]@{ Valid = $false; Issues = @('manifest.json is missing.') }
+    }
+    $manifest = (Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json)
+    $issues = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($key in $manifest.Registry.PSObject.Properties.Name) {
+        $entry = $manifest.Registry.$key
+        if ($null -eq $entry.Path) { continue }  # component legitimately absent (e.g. key didn't exist)
+        $full = Join-Path $BackupPath $entry.Path
+        if (-not (Test-Path -LiteralPath $full)) {
+            $issues.Add("Missing file for '$key': $($entry.Path)")
+            continue
+        }
+        $actualHash = Get-KFFileHashSafe -Path $full
+        if ($actualHash -ne $entry.Sha256) {
+            $issues.Add("Checksum mismatch for '$key' - file may be corrupted or was modified after backup.")
+        }
+    }
+    if ($manifest.State.Path) {
+        $statePath = Join-Path $BackupPath $manifest.State.Path
+        if (-not (Test-Path -LiteralPath $statePath)) {
+            $issues.Add('Missing state.json.')
+        } elseif ((Get-KFFileHashSafe -Path $statePath) -ne $manifest.State.Sha256) {
+            $issues.Add('Checksum mismatch for state.json.')
+        }
+    }
+    [pscustomobject]@{ Valid = ($issues.Count -eq 0); Issues = @($issues) }
+}
+
+function Restore-KFSystemState {
+    <#
+    .SYNOPSIS
+        Restores registry subtrees from a backup. Verifies integrity first,
+        takes a fresh safety backup of current state before touching
+        anything, restores each component, and reports per-component
+        results so a partial failure is visible rather than silent.
+    .OUTPUTS
+        [pscustomobject] @{ Success; SafetyBackupId; Results; Error }
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$BackupPath
+    )
+    $integrity = Test-KFBackupIntegrity -BackupPath $BackupPath
+    if (-not $integrity.Valid) {
+        return [pscustomobject]@{ Success = $false; SafetyBackupId = $null; Results = @(); Error = "Backup failed integrity check: $($integrity.Issues -join '; ')" }
+    }
+    if (-not $PSCmdlet.ShouldProcess($BackupPath, 'Restore system state from backup')) {
+        return [pscustomobject]@{ Success = $false; SafetyBackupId = $null; Results = @(); Error = 'Cancelled (ShouldProcess).' }
+    }
+
+    $safety = Backup-KFSystemState -Note "Automatic pre-restore safety backup (before restoring from $(Split-Path -Leaf $BackupPath))"
+    if (-not $safety.Success) {
+        return [pscustomobject]@{ Success = $false; SafetyBackupId = $null; Results = @(); Error = "Refusing to restore without a successful pre-restore safety backup: $($safety.Error)" }
+    }
+
+    $manifest = (Get-Content -LiteralPath (Join-Path $BackupPath 'manifest.json') -Raw | ConvertFrom-Json)
+    $results = [System.Collections.Generic.List[pscustomobject]]::new()
+    $allOk = $true
+
+    foreach ($key in $manifest.Registry.PSObject.Properties.Name) {
+        $entry = $manifest.Registry.$key
+        if ($null -eq $entry.Path) {
+            $results.Add([pscustomobject]@{ Component = $key; Success = $true; Detail = 'Not present in backup - skipped.' })
+            continue
+        }
+        if (-not $Script:BackupRegistryTargets.Contains($key)) {
+            $results.Add([pscustomobject]@{ Component = $key; Success = $false; Detail = 'Unknown component - no known target path, skipped for safety.' })
+            $allOk = $false
+            continue
+        }
+        $fullBackupFile = Join-Path $BackupPath $entry.Path
+        $restoreResult = Restore-KFRegistryKey -BackupFilePath $fullBackupFile -TargetPath $Script:BackupRegistryTargets[$key] -Confirm:$false
+        $results.Add([pscustomobject]@{ Component = $key; Success = $restoreResult.Success; Detail = $(if ($restoreResult.Success) { 'Restored.' } else { $restoreResult.Error }) })
+        if (-not $restoreResult.Success) { $allOk = $false }
+    }
+
+    Clear-KFCache
+    Write-LogEntry -Level 'Info' -Message "Restore from '$BackupPath' completed (allOk=$allOk); safety backup='$($safety.BackupId)'"
+    [pscustomobject]@{ Success = $allOk; SafetyBackupId = $safety.BackupId; Results = @($results); Error = $(if (-not $allOk) { 'One or more components failed to restore - see Results.' } else { $null }) }
+}
+
+function Remove-KFBackup {
+    <#
+    .SYNOPSIS
+        Deletes a backup folder. Does not itself prompt - the calling
+        screen is responsible for confirming with the user first.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$BackupPath
+    )
+    if (-not $BackupPath.StartsWith($Script:Paths.Backups, [StringComparison]::OrdinalIgnoreCase)) {
+        return [pscustomobject]@{ Success = $false; Error = 'Refusing to delete a path outside the KeyForge Backups folder.' }
+    }
+    if (-not $PSCmdlet.ShouldProcess($BackupPath, 'Delete backup')) {
+        return [pscustomobject]@{ Success = $false; Error = 'Cancelled (ShouldProcess).' }
+    }
+    $outcome = Invoke-KFSafe -Context 'Remove-KFBackup' -Action {
+        Remove-Item -LiteralPath $BackupPath -Recurse -Force -ErrorAction Stop
+    }
+    [pscustomobject]@{ Success = $outcome.Success; Error = $outcome.Error }
 }
 
 #endregion ==================================================================
@@ -1831,29 +2823,29 @@ function Show-KFDashboard {
 #region ============================== MENU SYSTEM ==============================
 
 # Menu item catalog: Id matches the original 22-item spec numbering exactly.
-# Status: 'Ready' = fully implemented read-only screen in this build.
-#         'Stub'  = placeholder; ships with the write/destructive modules
-#                    in the next phase (each stub names which phase).
+# Status: 'Ready' = fully implemented screen in this build (read or write).
+#         'Stub'  = placeholder; ships with the Language/Keyboard install-
+#                    remove modules in the next phase (each stub names it).
 $Script:MenuItems = @(
     [pscustomobject]@{ Id = 1;  Label = 'Installed Languages';               Status = 'Ready'; Phase = '' }
     [pscustomobject]@{ Id = 2;  Label = 'Installed Keyboard Layouts';        Status = 'Ready'; Phase = '' }
-    [pscustomobject]@{ Id = 3;  Label = 'Install New Language';             Status = 'Stub';  Phase = 'Phase 3' }
-    [pscustomobject]@{ Id = 4;  Label = 'Remove Language';                  Status = 'Stub';  Phase = 'Phase 3' }
-    [pscustomobject]@{ Id = 5;  Label = 'Remove Keyboard Layout';           Status = 'Stub';  Phase = 'Phase 3' }
-    [pscustomobject]@{ Id = 6;  Label = 'Set Default Keyboard';             Status = 'Stub';  Phase = 'Phase 3' }
-    [pscustomobject]@{ Id = 7;  Label = 'Set Display Language';             Status = 'Stub';  Phase = 'Phase 3' }
+    [pscustomobject]@{ Id = 3;  Label = 'Install New Language';             Status = 'Stub';  Phase = 'Phase 4' }
+    [pscustomobject]@{ Id = 4;  Label = 'Remove Language';                  Status = 'Stub';  Phase = 'Phase 4' }
+    [pscustomobject]@{ Id = 5;  Label = 'Remove Keyboard Layout';           Status = 'Stub';  Phase = 'Phase 4' }
+    [pscustomobject]@{ Id = 6;  Label = 'Set Default Keyboard';             Status = 'Ready'; Phase = '' }
+    [pscustomobject]@{ Id = 7;  Label = 'Set Display Language';             Status = 'Ready'; Phase = '' }
     [pscustomobject]@{ Id = 8;  Label = 'Region Settings';                  Status = 'Ready'; Phase = '' }
     [pscustomobject]@{ Id = 9;  Label = 'Locale Settings';                  Status = 'Ready'; Phase = '' }
     [pscustomobject]@{ Id = 10; Label = 'Time & Region';                    Status = 'Ready'; Phase = '' }
     [pscustomobject]@{ Id = 11; Label = 'Language Features';                Status = 'Ready'; Phase = '' }
     [pscustomobject]@{ Id = 12; Label = 'Cleanup';                          Status = 'Stub';  Phase = 'Phase 4' }
     [pscustomobject]@{ Id = 13; Label = 'Advanced Removal';                 Status = 'Stub';  Phase = 'Phase 4' }
-    [pscustomobject]@{ Id = 14; Label = 'Backup';                           Status = 'Stub';  Phase = 'Phase 3' }
-    [pscustomobject]@{ Id = 15; Label = 'Restore';                          Status = 'Stub';  Phase = 'Phase 3' }
+    [pscustomobject]@{ Id = 14; Label = 'Backup';                           Status = 'Ready'; Phase = '' }
+    [pscustomobject]@{ Id = 15; Label = 'Restore';                          Status = 'Ready'; Phase = '' }
     [pscustomobject]@{ Id = 16; Label = 'Diagnostics';                      Status = 'Ready'; Phase = '' }
     [pscustomobject]@{ Id = 17; Label = 'Repair Windows Language Components'; Status = 'Stub'; Phase = 'Phase 4' }
     [pscustomobject]@{ Id = 18; Label = 'Export Configuration';             Status = 'Ready'; Phase = '' }
-    [pscustomobject]@{ Id = 19; Label = 'Import Configuration';             Status = 'Stub';  Phase = 'Phase 3' }
+    [pscustomobject]@{ Id = 19; Label = 'Import Configuration';             Status = 'Stub';  Phase = 'Phase 4' }
     [pscustomobject]@{ Id = 20; Label = 'Live Monitoring';                  Status = 'Ready'; Phase = '' }
     [pscustomobject]@{ Id = 21; Label = 'Settings';                         Status = 'Ready'; Phase = '' }
     [pscustomobject]@{ Id = 22; Label = 'About';                            Status = 'Ready'; Phase = '' }
@@ -2005,6 +2997,80 @@ function Show-KFKeyboardsScreen {
     )
     Write-KFTable -Data $rows -Columns $columns
     Write-Host ''
+    Write-KFColor -Text "  Tip: use menu option 6 (Set Default Keyboard) to change which loaded layout is active first." -Color $Script:Colors.Dim
+    Write-Host ''
+    Wait-KFKeyPress
+}
+
+function Show-KFSetDefaultKeyboardScreen {
+    [CmdletBinding()]
+    param()
+    try { Clear-Host } catch {}
+    Write-KFBanner
+    Write-KFColor -Text '  SET DEFAULT KEYBOARD' -Color $Script:Colors.Highlight
+    Write-KFLine
+    Write-Host ''
+
+    $kbds = @(Get-KFInstalledKeyboards -Force | Where-Object { $_.Loaded } | Sort-Object PreloadOrder)
+    if ($kbds.Count -eq 0) {
+        Write-KFStatus -Type 'Warning' -Message 'No loaded keyboard layouts were found for the current user.'
+        Write-Host ''
+        Wait-KFKeyPress
+        return
+    }
+
+    $rows = @($kbds | ForEach-Object {
+        [pscustomobject]@{ Order = $_.PreloadOrder; KLID = $_.KLID; Name = $_.Name; Tag = $(if ($_.LanguageTag) { $_.LanguageTag } else { '-' }) }
+    })
+    $columns = @(
+        @{ Name = 'Order'; Header = '#';    Width = 3;  Align = 'Right' }
+        @{ Name = 'KLID';  Header = 'KLID'; Width = 10; Align = 'Left' }
+        @{ Name = 'Name';  Header = 'Name'; Width = 36; Align = 'Left' }
+        @{ Name = 'Tag';   Header = 'Tag';  Width = 8;  Align = 'Left' }
+    )
+    Write-KFTable -Data $rows -Columns $columns
+    Write-Host ''
+
+    if ($kbds.Count -eq 1) {
+        Write-KFStatus -Type 'Info' -Message "'$($kbds[0].Name)' is the only loaded layout - nothing to reorder."
+        Write-Host ''
+        Wait-KFKeyPress
+        return
+    }
+
+    $klid = Request-KFTextInput -Prompt 'Enter the KLID to make default (blank to cancel)' -Validator {
+        param($v) [string]::IsNullOrWhiteSpace($v) -or (Test-KFKlidFormat -Klid $v)
+    } -ErrorText 'Enter an 8-character hex KLID from the table above, or leave blank to cancel.'
+
+    if ([string]::IsNullOrWhiteSpace($klid)) {
+        Write-KFStatus -Type 'Info' -Message 'Cancelled.'
+        Start-Sleep -Milliseconds 800
+        return
+    }
+
+    $target = $kbds | Where-Object { $_.KLID -eq $klid } | Select-Object -First 1
+    if (-not $target) {
+        Write-KFStatus -Type 'Failure' -Message "'$klid' isn't one of the loaded layouts listed above."
+        Write-Host ''
+        Wait-KFKeyPress
+        return
+    }
+
+    if (-not (Show-KFConfirmationDialog -Message "Make '$($target.Name)' the default keyboard?" -AffectedItems @("HKCU:\Keyboard Layout\Preload will be reordered ($($kbds.Count) entries)") -DefaultYes $true)) {
+        Write-KFStatus -Type 'Info' -Message 'Cancelled.'
+        Start-Sleep -Milliseconds 800
+        return
+    }
+
+    $result = Set-KFDefaultKeyboard -KLID $target.KLID -Confirm:$false
+    Write-Host ''
+    if ($result.Success) {
+        Write-KFStatus -Type 'Success' -Message "'$($target.Name)' is now the default keyboard."
+        if ($result.BackupPath) { Write-KFColor -Text "  Preload list backed up to: $($result.BackupPath)" -Color $Script:Colors.Dim }
+    } else {
+        Write-KFStatus -Type 'Failure' -Message "Could not change the default keyboard: $($result.Error)"
+    }
+    Write-Host ''
     Wait-KFKeyPress
 }
 
@@ -2034,6 +3100,50 @@ function Show-KFLanguageFeaturesScreen {
             Write-Host ''
         }
     }
+    Wait-KFKeyPress
+}
+
+function Show-KFSetDisplayLanguageScreen {
+    [CmdletBinding()]
+    param()
+    try { Clear-Host } catch {}
+    Write-KFBanner
+    Write-KFColor -Text '  SET DISPLAY LANGUAGE' -Color $Script:Colors.Highlight
+    Write-KFLine
+    Write-Host ''
+    Write-KFColor -Text "  Only languages already in the current user's language list can be set" -Color $Script:Colors.Body
+    Write-KFColor -Text "  as the display language here. Installing a new one is a Language" -Color $Script:Colors.Body
+    Write-KFColor -Text "  Manager operation (menu option 3), landing in the next build." -Color $Script:Colors.Body
+    Write-Host ''
+
+    $userLangs = @(Get-KFUserLanguages -Force)
+    if ($userLangs.Count -eq 0) {
+        Write-KFStatus -Type 'Warning' -Message 'No languages found in the current user language list.'
+        Write-Host ''
+        Wait-KFKeyPress
+        return
+    }
+
+    $rows = @($userLangs | ForEach-Object { [pscustomobject]@{ Tag = $_.LanguageTag; Name = Format-KFLanguageName -Tag $_.LanguageTag } })
+    Write-KFTable -Data $rows -Columns @(
+        @{ Name = 'Tag'; Header = 'Tag'; Width = 10; Align = 'Left' }
+        @{ Name = 'Name'; Header = 'Language'; Width = 40; Align = 'Left' }
+    )
+    Write-Host ''
+
+    $tag = Request-KFTextInput -Prompt 'Enter the tag to set as display language (blank to cancel)'
+    if ([string]::IsNullOrWhiteSpace($tag)) { return }
+
+    if (-not (Show-KFConfirmationDialog -Message "Set display language to '$tag'?" -DefaultYes $true)) { return }
+
+    $result = Set-KFDisplayLanguage -LanguageTag $tag -Confirm:$false
+    Write-Host ''
+    if ($result.Success) {
+        Write-KFStatus -Type 'Success' -Message "Display language set to '$tag'. Sign out and back in for it to fully apply everywhere."
+    } else {
+        Write-KFStatus -Type 'Failure' -Message "Could not set display language: $($result.Error)"
+    }
+    Write-Host ''
     Wait-KFKeyPress
 }
 
@@ -2082,85 +3192,261 @@ function Get-KFRegionDetail {
 function Show-KFRegionScreen {
     [CmdletBinding()]
     param()
-    try { Clear-Host } catch {}
-    Write-KFBanner
-    Write-KFColor -Text '  REGION SETTINGS  (view-only)' -Color $Script:Colors.Highlight
-    Write-KFLine
-    Write-Host ''
-    $d = Get-KFRegionDetail
-    if ($null -eq $d) {
-        Write-KFStatus -Type 'Failure' -Message 'Could not read region settings.'
-    } else {
-        $lines = @(
-            ('{0,-22} {1}' -f 'Country/Region:', $d.CountryName)
-            ('{0,-22} {1}' -f 'GeoID:', $d.GeoId)
-            ('{0,-22} {1}' -f 'Currency:', "$($d.CurrencySymbol)  ($($d.ISOCurrency))")
-            ('{0,-22} {1}' -f 'Measurement system:', $d.Measurement)
-            ('{0,-22} {1}' -f 'First day of week:', $d.FirstDayOfWeek)
-            ('{0,-22} {1}' -f 'Calendar:', $d.Calendar)
-        )
-        Write-KFBox -Lines $lines -Title 'Region' -BorderColor $Script:Colors.Border
+    while ($true) {
+        try { Clear-Host } catch {}
+        Write-KFBanner
+        Write-KFColor -Text '  REGION SETTINGS' -Color $Script:Colors.Highlight
+        Write-KFLine
+        Write-Host ''
+        $d = Get-KFRegionDetail
+        if ($null -eq $d) {
+            Write-KFStatus -Type 'Failure' -Message 'Could not read region settings.'
+        } else {
+            $lines = @(
+                ('{0,-22} {1}' -f 'Country/Region:', $d.CountryName)
+                ('{0,-22} {1}' -f 'GeoID:', $d.GeoId)
+                ('{0,-22} {1}' -f 'Currency:', "$($d.CurrencySymbol)  ($($d.ISOCurrency))")
+                ('{0,-22} {1}' -f 'Measurement system:', $d.Measurement)
+                ('{0,-22} {1}' -f 'First day of week:', $d.FirstDayOfWeek)
+                ('{0,-22} {1}' -f 'Calendar:', $d.Calendar)
+            )
+            Write-KFBox -Lines $lines -Title 'Region' -BorderColor $Script:Colors.Border
+        }
+        Write-Host ''
+        Write-KFColor -Text '  [C] Change region   [0] Back' -Color $Script:Colors.Muted
+        Write-Host ''
+        Write-KFColor -Text '  Choice: ' -Color $Script:Colors.Body -NoNewline
+        $choice = (Read-Host).Trim()
+
+        switch -Regex ($choice) {
+            '^(?i:c)$' { Invoke-KFChangeRegionFlow }
+            default    { return }
+        }
     }
+}
+
+function Invoke-KFChangeRegionFlow {
+    [CmdletBinding()]
+    param()
     Write-Host ''
-    Write-KFAlert -Level 'Info' -Message 'Changing region settings arrives with the Region Manager module in Phase 3.'
+    $search = Request-KFTextInput -Prompt 'Search for a country/region name (blank to cancel)'
+    if ([string]::IsNullOrWhiteSpace($search)) { return }
+
+    $regionMatches = Wait-KFWithSpinner -Label 'Searching regions' -Action {
+        @(Get-KFAvailableRegions | Where-Object { $_.Name -like "*$search*" } | Select-Object -First 12)
+    }
+    if ($null -eq $regionMatches -or $regionMatches.Count -eq 0) {
+        Write-KFStatus -Type 'Warning' -Message "No regions matched '$search'."
+        Start-Sleep -Milliseconds 1200
+        return
+    }
+
+    $labels = @($regionMatches | ForEach-Object { "$($_.Name)  (GeoID $($_.GeoId))" })
+    $index = Show-KFChoiceDialog -Question 'Which region?' -Options $labels -DefaultIndex 0
+    if ($index -lt 0) { return }
+    $selected = $regionMatches[$index]
+
+    if (-not (Show-KFConfirmationDialog -Message "Set region to '$($selected.Name)'?" -AffectedItems @("Current user's home location (GeoID $($selected.GeoId))") -DefaultYes $true)) {
+        return
+    }
+
+    $result = Set-KFRegion -GeoId $selected.GeoId -Confirm:$false
     Write-Host ''
-    Wait-KFKeyPress
+    if ($result.Success) {
+        Write-KFStatus -Type 'Success' -Message "Region set to '$($selected.Name)'."
+    } else {
+        Write-KFStatus -Type 'Failure' -Message "Could not set region: $($result.Error)"
+    }
+    Start-Sleep -Milliseconds 1200
 }
 
 function Show-KFLocaleScreen {
     [CmdletBinding()]
     param()
-    try { Clear-Host } catch {}
-    Write-KFBanner
-    Write-KFColor -Text '  LOCALE SETTINGS  (view-only)' -Color $Script:Colors.Highlight
-    Write-KFLine
-    Write-Host ''
-    $locale = Get-KFLocaleInfo
-    $d = Get-KFRegionDetail
-    $lines = @(
-        ('{0,-22} {1}' -f 'System locale:', $locale.SystemLocale)
-        ('{0,-22} {1}' -f 'User locale:', $locale.UserLocale)
-        ('{0,-22} {1}' -f 'Display language:', $locale.DisplayName)
-        ('{0,-22} {1}' -f 'Console encoding:', [Console]::OutputEncoding.WebName)
-    )
-    Write-KFBox -Lines $lines -Title 'Locale' -BorderColor $Script:Colors.Border
-    Write-Host ''
-    if ($d) {
-        $fmtLines = @(
-            ('{0,-22} {1}' -f 'Short date pattern:', "$($d.ShortDate)   e.g. $($d.SampleShortDate)")
-            ('{0,-22} {1}' -f 'Long date pattern:', $d.LongDate)
-            ('{0,-22} {1}' -f 'Short time pattern:', $d.ShortTime)
-            ('{0,-22} {1}' -f 'Decimal separator:', "'$($d.DecimalSep)'")
-            ('{0,-22} {1}' -f 'Thousands separator:', "'$($d.ThousandsSep)'   e.g. $($d.SampleNumber)")
-        )
-        Write-KFBox -Lines $fmtLines -Title 'Formats' -BorderColor $Script:Colors.Border
+    while ($true) {
+        try { Clear-Host } catch {}
+        Write-KFBanner
+        Write-KFColor -Text '  LOCALE SETTINGS' -Color $Script:Colors.Highlight
+        Write-KFLine
         Write-Host ''
+        $locale = Get-KFLocaleInfo
+        $d = Get-KFRegionDetail
+        $lines = @(
+            ('{0,-22} {1}' -f 'System locale:', $locale.SystemLocale)
+            ('{0,-22} {1}' -f 'User locale:', $locale.UserLocale)
+            ('{0,-22} {1}' -f 'Display language:', $locale.DisplayName)
+            ('{0,-22} {1}' -f 'Console encoding:', [Console]::OutputEncoding.WebName)
+        )
+        Write-KFBox -Lines $lines -Title 'Locale' -BorderColor $Script:Colors.Border
+        Write-Host ''
+        if ($d) {
+            $fmtLines = @(
+                ('{0,-22} {1}' -f 'Short date pattern:', "$($d.ShortDate)   e.g. $($d.SampleShortDate)")
+                ('{0,-22} {1}' -f 'Long date pattern:', $d.LongDate)
+                ('{0,-22} {1}' -f 'Time pattern:', $d.ShortTime)
+                ('{0,-22} {1}' -f 'Decimal separator:', "'$($d.DecimalSep)'")
+                ('{0,-22} {1}' -f 'Thousands separator:', "'$($d.ThousandsSep)'   e.g. $($d.SampleNumber)")
+            )
+            Write-KFBox -Lines $fmtLines -Title 'Formats' -BorderColor $Script:Colors.Border
+            Write-Host ''
+        }
+        Write-KFColor -Text '  [S] System locale  [U] User locale  [F] Edit a format  [0] Back' -Color $Script:Colors.Muted
+        Write-Host ''
+        Write-KFColor -Text '  Choice: ' -Color $Script:Colors.Body -NoNewline
+        $choice = (Read-Host).Trim()
+
+        switch -Regex ($choice) {
+            '^(?i:s)$' { Invoke-KFChangeSystemLocaleFlow }
+            '^(?i:u)$' { Invoke-KFChangeUserLocaleFlow }
+            '^(?i:f)$' { Invoke-KFChangeFormatFlow }
+            default    { return }
+        }
     }
-    Write-KFAlert -Level 'Info' -Message 'Changing locale settings arrives with the Locale Manager module in Phase 3.'
+}
+
+function Invoke-KFChangeSystemLocaleFlow {
+    [CmdletBinding()]
+    param()
     Write-Host ''
-    Wait-KFKeyPress
+    if (-not (Test-KFAdminPrivileges)) {
+        Write-KFStatus -Type 'Warning' -Message 'Changing the system locale requires Run as Administrator.'
+        Start-Sleep -Milliseconds 1500
+        return
+    }
+    $tag = Request-KFTextInput -Prompt "Language tag for the new system locale, e.g. 'en-US' (blank to cancel)" -Validator {
+        param($v) [string]::IsNullOrWhiteSpace($v) -or (Test-KFLanguageTagFormat -Tag $v)
+    } -ErrorText "Enter a valid BCP-47 tag like 'en-US' or 'fr-FR', or leave blank to cancel."
+    if ([string]::IsNullOrWhiteSpace($tag)) { return }
+
+    if (-not (Show-KFConfirmationDialog -Message "Set system locale to '$tag'? This is machine-wide and needs a restart to fully apply." -DefaultYes $false)) { return }
+
+    $result = Set-KFSystemLocale -LanguageTag $tag -Confirm:$false
+    Write-Host ''
+    if ($result.Success) {
+        Write-KFStatus -Type 'Success' -Message "System locale set to '$tag'. Restart Windows for it to fully apply."
+    } else {
+        Write-KFStatus -Type 'Failure' -Message "Could not set system locale: $($result.Error)"
+    }
+    Start-Sleep -Milliseconds 1500
+}
+
+function Invoke-KFChangeUserLocaleFlow {
+    [CmdletBinding()]
+    param()
+    Write-Host ''
+    $tag = Request-KFTextInput -Prompt "Language tag for the new user locale/formats, e.g. 'en-GB' (blank to cancel)" -Validator {
+        param($v) [string]::IsNullOrWhiteSpace($v) -or (Test-KFLanguageTagFormat -Tag $v)
+    } -ErrorText "Enter a valid BCP-47 tag like 'en-GB' or 'de-DE', or leave blank to cancel."
+    if ([string]::IsNullOrWhiteSpace($tag)) { return }
+
+    if (-not (Show-KFConfirmationDialog -Message "Set user locale (date/time/number formats) to '$tag'?" -DefaultYes $true)) { return }
+
+    $result = Set-KFUserLocale -LanguageTag $tag -Confirm:$false
+    Write-Host ''
+    if ($result.Success) {
+        Write-KFStatus -Type 'Success' -Message "User locale set to '$tag'."
+    } else {
+        Write-KFStatus -Type 'Failure' -Message "Could not set user locale: $($result.Error)"
+    }
+    Start-Sleep -Milliseconds 1500
+}
+
+function Invoke-KFChangeFormatFlow {
+    [CmdletBinding()]
+    param()
+    Write-Host ''
+    $options = @('Short date pattern', 'Long date pattern', 'Time pattern', 'Decimal separator', 'Thousands separator', 'Cancel')
+    $index = Show-KFChoiceDialog -Question 'Which format?' -Options $options -DefaultIndex 5
+    if ($index -lt 0 -or $index -eq 5) { return }
+
+    $fieldMap = @('ShortDate', 'LongDate', 'TimeFormat', 'DecimalSeparator', 'ThousandsSeparator')
+    $field = $fieldMap[$index]
+    $exampleMap = @{
+        ShortDate = 'e.g. M/d/yyyy'; LongDate = 'e.g. dddd, MMMM d, yyyy'; TimeFormat = 'e.g. h:mm:ss tt'
+        DecimalSeparator = "e.g. '.'"; ThousandsSeparator = "e.g. ','"
+    }
+    $value = Request-KFTextInput -Prompt "New value for $($options[$index]) ($($exampleMap[$field]), blank to cancel)"
+    if ([string]::IsNullOrWhiteSpace($value)) { return }
+
+    if (-not (Show-KFConfirmationDialog -Message "Set $($options[$index]) to '$value'?" -DefaultYes $true)) { return }
+
+    $result = Set-KFRegionalFormat -Field $field -Value $value -Confirm:$false
+    Write-Host ''
+    if ($result.Success) {
+        Write-KFStatus -Type 'Success' -Message "$($options[$index]) updated."
+        if ($result.BackupPath) { Write-KFColor -Text "  Previous value backed up to: $($result.BackupPath)" -Color $Script:Colors.Dim }
+    } else {
+        Write-KFStatus -Type 'Failure' -Message "Could not update format: $($result.Error)"
+    }
+    Start-Sleep -Milliseconds 1500
 }
 
 function Show-KFTimeRegionScreen {
     [CmdletBinding()]
     param()
-    try { Clear-Host } catch {}
-    Write-KFBanner
-    Write-KFColor -Text '  TIME & REGION  (view-only)' -Color $Script:Colors.Highlight
-    Write-KFLine
+    while ($true) {
+        try { Clear-Host } catch {}
+        Write-KFBanner
+        Write-KFColor -Text '  TIME & REGION' -Color $Script:Colors.Highlight
+        Write-KFLine
+        Write-Host ''
+        $tz = Get-KFTimeZoneInfo
+        $now = Get-Date
+        $lines = @(
+            ('{0,-22} {1}' -f 'Time zone:', $tz.DisplayName)
+            ('{0,-22} {1}' -f 'Zone ID:', $tz.Id)
+            ('{0,-22} {1}' -f 'UTC offset:', $tz.UtcOffset)
+            ('{0,-22} {1}' -f 'Local time now:', $now.ToString('yyyy-MM-dd HH:mm:ss'))
+            ('{0,-22} {1}' -f 'UTC time now:', $now.ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss'))
+        )
+        Write-KFBox -Lines $lines -Title 'Time & Region' -BorderColor $Script:Colors.Border
+        Write-Host ''
+        Write-KFColor -Text '  [C] Change time zone   [0] Back' -Color $Script:Colors.Muted
+        Write-Host ''
+        Write-KFColor -Text '  Choice: ' -Color $Script:Colors.Body -NoNewline
+        $choice = (Read-Host).Trim()
+
+        switch -Regex ($choice) {
+            '^(?i:c)$' { Invoke-KFChangeTimeZoneFlow }
+            default    { return }
+        }
+    }
+}
+
+function Invoke-KFChangeTimeZoneFlow {
+    [CmdletBinding()]
+    param()
     Write-Host ''
-    $tz = Get-KFTimeZoneInfo
-    $now = Get-Date
-    $lines = @(
-        ('{0,-22} {1}' -f 'Time zone:', $tz.DisplayName)
-        ('{0,-22} {1}' -f 'Zone ID:', $tz.Id)
-        ('{0,-22} {1}' -f 'UTC offset:', $tz.UtcOffset)
-        ('{0,-22} {1}' -f 'Local time now:', $now.ToString('yyyy-MM-dd HH:mm:ss'))
-        ('{0,-22} {1}' -f 'UTC time now:', $now.ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss'))
-    )
-    Write-KFBox -Lines $lines -Title 'Time & Region' -BorderColor $Script:Colors.Border
+    if (-not (Test-KFAdminPrivileges)) {
+        Write-KFStatus -Type 'Warning' -Message 'Changing the time zone requires Run as Administrator.'
+        Start-Sleep -Milliseconds 1500
+        return
+    }
+    $search = Request-KFTextInput -Prompt "Search time zones, e.g. 'Tokyo' or 'Eastern' (blank to cancel)"
+    if ([string]::IsNullOrWhiteSpace($search)) { return }
+
+    $tzMatches = @(Get-KFAvailableTimeZones | Where-Object { $_.DisplayName -like "*$search*" -or $_.Id -like "*$search*" } | Select-Object -First 12)
+    if ($tzMatches.Count -eq 0) {
+        Write-KFStatus -Type 'Warning' -Message "No time zones matched '$search'."
+        Start-Sleep -Milliseconds 1200
+        return
+    }
+
+    $labels = @($tzMatches | ForEach-Object { $_.DisplayName })
+    $index = Show-KFChoiceDialog -Question 'Which time zone?' -Options $labels -DefaultIndex 0
+    if ($index -lt 0) { return }
+    $selected = $tzMatches[$index]
+
+    if (-not (Show-KFConfirmationDialog -Message "Set the system time zone to '$($selected.DisplayName)'?" -DefaultYes $true)) { return }
+
+    $result = Set-KFTimeZone -Id $selected.Id -Confirm:$false
     Write-Host ''
-    Wait-KFKeyPress
+    if ($result.Success) {
+        Write-KFStatus -Type 'Success' -Message "Time zone set to '$($selected.DisplayName)'."
+    } else {
+        Write-KFStatus -Type 'Failure' -Message "Could not set time zone: $($result.Error)"
+    }
+    Start-Sleep -Milliseconds 1500
 }
 
 #endregion ==================================================================
@@ -2328,6 +3614,147 @@ function Show-KFExportScreen {
             Write-KFStatus -Type 'Success' -Message "Snapshot saved to $destPath"
         } else {
             Write-KFStatus -Type 'Failure' -Message "Could not write snapshot: $($writeResult.Error)"
+        }
+    }
+    Write-Host ''
+    Wait-KFKeyPress
+}
+
+#endregion ==================================================================
+
+#region ============================== SCREEN: BACKUP & RESTORE ================
+
+function Show-KFBackupScreen {
+    [CmdletBinding()]
+    param()
+    try { Clear-Host } catch {}
+    Write-KFBanner
+    Write-KFColor -Text '  BACKUP' -Color $Script:Colors.Highlight
+    Write-KFLine
+    Write-Host ''
+    Write-KFColor -Text '  Captures the Keyboard Layouts, Preload/Substitutes/Toggle, and' -Color $Script:Colors.Body
+    Write-KFColor -Text '  Control Panel\International registry subtrees (as .reg exports),' -Color $Script:Colors.Body
+    Write-KFColor -Text '  plus a JSON snapshot of current languages/keyboards/region/locale.' -Color $Script:Colors.Body
+    Write-Host ''
+
+    $note = Request-KFTextInput -Prompt 'Optional note for this backup (blank is fine)'
+
+    $result = Wait-KFWithSpinner -Label 'Creating backup' -Action { Backup-KFSystemState -Note $note }
+    Write-Host ''
+    if ($null -eq $result) {
+        Write-KFStatus -Type 'Failure' -Message 'Backup failed - see the session log for details.'
+    } elseif ($result.Success) {
+        Write-KFStatus -Type 'Success' -Message "Backup '$($result.BackupId)' created."
+        Write-KFColor -Text "  Saved to: $($result.Path)" -Color $Script:Colors.Dim
+    } else {
+        Write-KFStatus -Type 'Warning' -Message "Backup '$($result.BackupId)' created but one or more components had issues: $($result.Error)"
+        Write-KFColor -Text "  Saved to: $($result.Path)" -Color $Script:Colors.Dim
+    }
+    Write-Host ''
+    Wait-KFKeyPress
+}
+
+function Show-KFRestoreScreen {
+    [CmdletBinding()]
+    param()
+    try { Clear-Host } catch {}
+    Write-KFBanner
+    Write-KFColor -Text '  RESTORE' -Color $Script:Colors.Highlight
+    Write-KFLine
+    Write-Host ''
+
+    $backups = Get-KFBackupList
+    if ($backups.Count -eq 0) {
+        Write-KFStatus -Type 'Info' -Message "No backups found yet - create one from menu option 14 first."
+        Write-Host ''
+        Wait-KFKeyPress
+        return
+    }
+
+    $rows = @($backups | ForEach-Object {
+        [pscustomobject]@{
+            Id      = $_.BackupId
+            Created = $_.CreatedAt
+            Ok      = if ($_.AllOk) { Get-KFIcon 'Success' } else { Get-KFIcon 'Warning' }
+            Size    = Format-KFByteSize -Bytes $_.SizeBytes
+            Note    = $(if ($_.Note) { $_.Note } else { '-' })
+        }
+    })
+    Write-KFTable -Data $rows -Columns @(
+        @{ Name = 'Id';      Header = 'Backup ID';  Width = 24; Align = 'Left' }
+        @{ Name = 'Created'; Header = 'Created';    Width = 20; Align = 'Left' }
+        @{ Name = 'Ok';      Header = 'OK';         Width = 3;  Align = 'Left' }
+        @{ Name = 'Size';    Header = 'Size';       Width = 10; Align = 'Right' }
+        @{ Name = 'Note';    Header = 'Note';       Width = 26; Align = 'Left' }
+    )
+    Write-Host ''
+    Write-KFColor -Text '  Note: restoring re-applies registry state. Installed languages themselves' -Color $Script:Colors.Dim
+    Write-KFColor -Text '  are not installed/removed to match a snapshot yet - that needs the' -Color $Script:Colors.Dim
+    Write-KFColor -Text '  Language Manager module (next build).' -Color $Script:Colors.Dim
+    Write-Host ''
+
+    $id = Request-KFTextInput -Prompt 'Enter a Backup ID to restore, or D<id> to delete one (blank to cancel)'
+    if ([string]::IsNullOrWhiteSpace($id)) { return }
+
+    if ($id -match '^(?i:d)(.+)$') {
+        $deleteId = $Matches[1].Trim()
+        $target = $backups | Where-Object { $_.BackupId -eq $deleteId } | Select-Object -First 1
+        if (-not $target) {
+            Write-KFStatus -Type 'Failure' -Message "'$deleteId' is not one of the backup IDs listed above."
+            Write-Host ''
+            Wait-KFKeyPress
+            return
+        }
+        if (Show-KFConfirmationDialog -Message "Permanently delete backup '$deleteId'?" -DefaultYes $false) {
+            $delResult = Remove-KFBackup -BackupPath $target.Path -Confirm:$false
+            Write-Host ''
+            if ($delResult.Success) { Write-KFStatus -Type 'Success' -Message "Backup '$deleteId' deleted." }
+            else { Write-KFStatus -Type 'Failure' -Message "Could not delete: $($delResult.Error)" }
+            Write-Host ''
+            Wait-KFKeyPress
+        }
+        return
+    }
+
+    $target = $backups | Where-Object { $_.BackupId -eq $id } | Select-Object -First 1
+    if (-not $target) {
+        Write-KFStatus -Type 'Failure' -Message "'$id' is not one of the backup IDs listed above."
+        Write-Host ''
+        Wait-KFKeyPress
+        return
+    }
+
+    $integrity = Test-KFBackupIntegrity -BackupPath $target.Path
+    if (-not $integrity.Valid) {
+        Write-KFAlert -Level 'Danger' -Message "This backup failed integrity verification and will not be restored: $($integrity.Issues -join '; ')"
+        Write-Host ''
+        Wait-KFKeyPress
+        return
+    }
+
+    $affected = @($Script:BackupRegistryTargets.Keys)
+    if (-not (Show-KFConfirmationDialog -Message "Restore registry state from backup '$id'? A fresh safety backup of the CURRENT state will be taken first." -AffectedItems $affected -DefaultYes $false)) {
+        return
+    }
+    if (-not (Request-KFExplicitConfirmation -Phrase $id -Prompt "Type the backup ID ('$id') to confirm the restore:")) {
+        Write-KFStatus -Type 'Info' -Message 'Cancelled.'
+        Start-Sleep -Milliseconds 900
+        return
+    }
+
+    $result = Wait-KFWithSpinner -Label 'Restoring' -Action { Restore-KFSystemState -BackupPath $target.Path -Confirm:$false }
+    Write-Host ''
+    if ($null -eq $result) {
+        Write-KFStatus -Type 'Failure' -Message 'Restore failed - see the session log for details.'
+    } else {
+        foreach ($r in $result.Results) {
+            Write-KFStatus -Type $(if ($r.Success) { 'Success' } else { 'Failure' }) -Message "$($r.Component): $($r.Detail)"
+        }
+        Write-Host ''
+        if ($result.Success) {
+            Write-KFStatus -Type 'Success' -Message "Restore complete. Safety backup of the prior state: '$($result.SafetyBackupId)'."
+        } else {
+            Write-KFStatus -Type 'Warning' -Message "Restore finished with issues. Safety backup of the prior state: '$($result.SafetyBackupId)'."
         }
     }
     Write-Host ''
@@ -2595,10 +4022,14 @@ function Invoke-KFMenuDispatch {
     switch ($Selection) {
         1  { Show-KFLanguagesScreen }
         2  { Show-KFKeyboardsScreen }
+        6  { Show-KFSetDefaultKeyboardScreen }
+        7  { Show-KFSetDisplayLanguageScreen }
         8  { Show-KFRegionScreen }
         9  { Show-KFLocaleScreen }
         10 { Show-KFTimeRegionScreen }
         11 { Show-KFLanguageFeaturesScreen }
+        14 { Show-KFBackupScreen }
+        15 { Show-KFRestoreScreen }
         16 { Show-KFDiagnosticsScreen }
         18 { Show-KFExportScreen }
         20 { Show-KFLiveMonitorScreen }
